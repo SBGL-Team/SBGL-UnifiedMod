@@ -1,0 +1,108 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>netstandard2.1</TargetFramework>
+        <AssemblyName>SBGL.UnifiedMod</AssemblyName>
+        <RootNamespace>SBGL.UnifiedMod</RootNamespace>
+        <Product>Super Battle Golf League Unified Mod</Product>
+        <Version>0.0.1</Version>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <LangVersion>latest</LangVersion>
+        <RestoreAdditionalProjectSources>
+            https://api.nuget.org/v3/index.json;
+            https://nuget.bepinex.dev/v3/index.json;
+            https://nuget.samboy.dev/v3/index.json
+        </RestoreAdditionalProjectSources>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="BepInEx.Analyzers" Version="1.*" PrivateAssets="all"/>
+        <PackageReference Include="BepInEx.AssemblyPublicizer.MSBuild" Version="0.4.3">
+          <PrivateAssets>all</PrivateAssets>
+          <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+        </PackageReference>
+        <PackageReference Include="BepInEx.Core" Version="5.*"/>
+        <PackageReference Include="BepInEx.PluginInfoProps" Version="2.*"/>
+    </ItemGroup>
+
+    <ItemGroup Condition="'$(TargetFramework.TrimEnd(`0123456789`))' == 'net'">
+        <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.2" PrivateAssets="all"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <Reference Include="GameAssembly" Publicize="true">
+            <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\GameAssembly.dll</HintPath>
+        </Reference>
+        <Reference Include="SharedAssembly">
+            <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\SharedAssembly.dll</HintPath>
+        </Reference>
+        <Reference Include="UnityEngine">
+            <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\UnityEngine.dll</HintPath>
+        </Reference>
+        <Reference Include="UnityEngine.CoreModule">
+            <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
+        </Reference>
+        
+        <Reference Include="UnityEngine.UI">
+            <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\UnityEngine.UI.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
+        <Reference Include="UnityEngine.UIModule">
+            <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\UnityEngine.UIModule.dll</HintPath>
+        </Reference>
+        <Reference Include="Unity.TextMeshPro">
+            <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\Unity.TextMeshPro.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
+        <Reference Include="UnityEngine.TextRenderingModule">
+            <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\UnityEngine.TextRenderingModule.dll</HintPath>
+        </Reference>
+
+        <Reference Include="UnityEngine.UnityWebRequestModule">
+            <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\UnityEngine.UnityWebRequestModule.dll</HintPath>
+        </Reference>
+        <Reference Include="UnityEngine.UnityWebRequestTextureModule">
+            <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\UnityEngine.UnityWebRequestTextureModule.dll</HintPath>
+        </Reference>
+        <Reference Include="Newtonsoft.Json">
+            <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\Newtonsoft.Json.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
+
+        <Reference Include="Unity.InputSystem">
+            <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\Unity.InputSystem.dll</HintPath>
+        </Reference>
+        <Reference Include="0Harmony">
+            <HintPath>$(SUPER_BATTLE_GOLF_PATH)\BepInEx\core\0Harmony.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
+
+        <Reference Include="UnityEngine.IMGUIModule">
+            <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
+        </Reference>
+        <Reference Include="UnityEngine.PhysicsModule">
+            <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\UnityEngine.PhysicsModule.dll</HintPath>
+        </Reference>
+        <Reference Include="Mirror">
+            <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\Mirror.dll</HintPath>
+        </Reference>
+        <Reference Include="Steam">
+            <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\Steam.dll</HintPath>
+        </Reference>
+        <Reference Include="Facepunch.Steamworks.Win64">
+            <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\Facepunch.Steamworks.Win64.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
+        <Reference Include="UnityEngine.InputLegacyModule">
+            <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\UnityEngine.InputLegacyModule.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
+    </ItemGroup>
+
+    <Target Name="PostBuild" AfterTargets="PostBuildEvent">
+        <PropertyGroup>
+            <GameExe>Super Battle Golf.exe</GameExe>
+        </PropertyGroup>
+        <Exec Command="taskkill /F /IM &quot;$(GameExe)&quot; /T 2&gt;nul &amp; xcopy /Y &quot;$(TargetDir)$(TargetName).dll&quot; &quot;$(SUPER_BATTLE_GOLF_PATH)\BepInEx\plugins\&quot; &amp; start /d &quot;$(SUPER_BATTLE_GOLF_PATH)&quot; &quot;&quot; &quot;$(GameExe)&quot;" />
+    </Target>
+</Project>
