@@ -1,0 +1,1912 @@
+## Player
+
+### Schema
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `display_name` | string | Yes | Player display name |
+| `ign` | string |  | In-game name (optional) |
+| `discord_name` | string |  | Discord username (optional) |
+| `linked_user_id` | string |  | Reference to linked User account (optional, one-to-one) |
+| `active_status` | boolean |  |  |
+| `current_mmr` | number |  | Current MMR rating |
+| `matches_played` | number |  |  |
+| `wins` | number |  | 1st place finishes |
+| `losses` | number |  |  |
+| `draws` | number |  |  |
+| `top_3_finishes` | number |  |  |
+| `average_score_vs_par` | number |  |  |
+| `best_adjusted_match_score` | number |  |  |
+| `latest_mmr_change` | number |  |  |
+| `highest_mmr_ever` | number |  |  |
+| `lowest_mmr_after_placement` | number |  |  |
+| `notes` | string |  |  |
+| `profile_pic_url` | string |  | URL of player's profile picture |
+| `duplicate_flag` | boolean |  | Flagged as potential duplicate |
+| `duplicate_reason` | string |  | Reason for duplicate flag |
+| `possible_duplicate_ids` | string |  | Comma-separated player IDs of potential duplicates |
+| `region` | string |  | ISO 3166-1 alpha-2 country code (e.g., `US`, `GB`, `AU`) |
+| `state_province` | string |  | State/province code for US, CA, AU (e.g., `NY`, `ON`, `NSW`) |
+| `region_private` | boolean |  | Whether to hide region from public profiles |
+| `id` | string |  | Unique record identifier |
+| `created_date` | string |  | Record creation timestamp |
+| `updated_date` | string |  | Record last update timestamp |
+| `created_by` | string |  | Email of the user who created the record |
+
+### Endpoints
+
+### `GET /entities/Player`
+List Player records
+
+**Parameters:**
+- `q` (query): JSON query filter, e.g. {"status":"active"}
+- `limit` (query): Maximum number of records to return
+- `skip` (query): Number of records to skip (pagination)
+- `sort_by` (query): Field name to sort by. Prefix with '-' for descending order, e.g. -created_date
+
+```javascript
+const records = await base44.entities.Player.list();
+```
+
+### `POST /entities/Player`
+Create a Player record
+
+```javascript
+const record = await base44.entities.Player.create({
+  // your data
+});
+```
+
+### `DELETE /entities/Player`
+Delete multiple Player records
+
+```javascript
+await base44.entities.Player.deleteMany({
+  // query filter — WARNING: empty {} deletes ALL records
+  display_name: "Example display_name"
+});
+```
+
+### `POST /entities/Player/bulk`
+Bulk create Player records
+
+```javascript
+const records = await base44.entities.Player.bulkCreate([
+  { /* record 1 */ },
+  { /* record 2 */ },
+]);
+```
+
+### `PUT /entities/Player/bulk`
+Bulk update Player records
+
+```javascript
+// bulk-update is not available via SDK — use the REST API
+```
+
+### `PATCH /entities/Player/update-many`
+Update many Player records by query
+
+```javascript
+// update-many is not available via SDK — use the REST API
+```
+
+### `GET /entities/Player/{Player_id}`
+Get a Player record by ID
+
+**Parameters:**
+- `Player_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.Player.get(recordId);
+```
+
+### `PUT /entities/Player/{Player_id}`
+Update a Player record
+
+**Parameters:**
+- `Player_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.Player.update(recordId, {
+  // fields to update
+});
+```
+
+### `DELETE /entities/Player/{Player_id}`
+Delete a Player record
+
+**Parameters:**
+- `Player_id` (path): Record ID
+
+```javascript
+await base44.entities.Player.delete(recordId);
+```
+
+### `PUT /entities/Player/{Player_id}/restore`
+Restore a deleted Player record
+
+**Parameters:**
+- `Player_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.Player.restore(recordId);
+```
+
+## AppSettings
+
+### Schema
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `starting_mmr` | number |  |  |
+| `k_factor` | number |  |  |
+| `par_multiplier` | number |  |  |
+| `par_cap_low` | number |  |  |
+| `par_cap_high` | number |  |  |
+| `provisional_matches_threshold` | number |  |  |
+| `ranked_matches_threshold` | number |  |  |
+| `allow_self_registration` | boolean |  |  |
+| `require_admin_approval` | boolean |  |  |
+| `allow_self_linking` | boolean |  |  |
+| `require_link_approval` | boolean |  |  |
+| `season_title` | string |  |  |
+| `season_start_date` | string |  |  |
+| `season_end_date` | string |  |  |
+| `app_name` | string |  | Display name of the app |
+| `accent_color` | string |  | Hex accent color |
+| `season_label` | string |  | Season badge label shown in sidebar |
+| `logo_base64` | string |  | Base64 encoded logo image |
+| `banner_base64` | string |  | Base64 encoded dashboard banner image |
+| `hero_image_url` | string |  | URL for public homepage hero background |
+| `obs_selected_ids` | string |  | JSON array of selected player IDs for OBS overlay |
+| `obs_overlay_mode` | string |  | OBS overlay mode: lobby, leaderboard, results, spotlight |
+| `obs_columns` | string |  | Number of columns for lobby overlay |
+| `obs_state` | string |  | JSON object with OBS state: lobby_name, event_name, hole_info, live_scores, final_scores, mmr_changes, ps_points |
+| `id` | string |  | Unique record identifier |
+| `created_date` | string |  | Record creation timestamp |
+| `updated_date` | string |  | Record last update timestamp |
+| `created_by` | string |  | Email of the user who created the record |
+
+### Endpoints
+
+### `GET /entities/AppSettings`
+List AppSettings records
+
+**Parameters:**
+- `q` (query): JSON query filter, e.g. {"status":"active"}
+- `limit` (query): Maximum number of records to return
+- `skip` (query): Number of records to skip (pagination)
+- `sort_by` (query): Field name to sort by. Prefix with '-' for descending order, e.g. -created_date
+
+```javascript
+const records = await base44.entities.AppSettings.list();
+```
+
+### `POST /entities/AppSettings`
+Create a AppSettings record
+
+```javascript
+const record = await base44.entities.AppSettings.create({
+  // your data
+});
+```
+
+### `DELETE /entities/AppSettings`
+Delete multiple AppSettings records
+
+```javascript
+await base44.entities.AppSettings.deleteMany({
+  // query filter — WARNING: empty {} deletes ALL records
+  field: "value"
+});
+```
+
+### `POST /entities/AppSettings/bulk`
+Bulk create AppSettings records
+
+```javascript
+const records = await base44.entities.AppSettings.bulkCreate([
+  { /* record 1 */ },
+  { /* record 2 */ },
+]);
+```
+
+### `PUT /entities/AppSettings/bulk`
+Bulk update AppSettings records
+
+```javascript
+// bulk-update is not available via SDK — use the REST API
+```
+
+### `PATCH /entities/AppSettings/update-many`
+Update many AppSettings records by query
+
+```javascript
+// update-many is not available via SDK — use the REST API
+```
+
+### `GET /entities/AppSettings/{AppSettings_id}`
+Get a AppSettings record by ID
+
+**Parameters:**
+- `AppSettings_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.AppSettings.get(recordId);
+```
+
+### `PUT /entities/AppSettings/{AppSettings_id}`
+Update a AppSettings record
+
+**Parameters:**
+- `AppSettings_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.AppSettings.update(recordId, {
+  // fields to update
+});
+```
+
+### `DELETE /entities/AppSettings/{AppSettings_id}`
+Delete a AppSettings record
+
+**Parameters:**
+- `AppSettings_id` (path): Record ID
+
+```javascript
+await base44.entities.AppSettings.delete(recordId);
+```
+
+### `PUT /entities/AppSettings/{AppSettings_id}/restore`
+Restore a deleted AppSettings record
+
+**Parameters:**
+- `AppSettings_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.AppSettings.restore(recordId);
+```
+
+## AuditLog
+
+### Schema
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `user_email` | string |  |  |
+| `user_name` | string |  |  |
+| `action_type` | `create`, `update`, `delete` | Yes | Type of action performed |
+| `entity_type` | string | Yes | Which entity was affected |
+| `entity_id` | string |  | ID of affected record |
+| `old_values` | string |  | JSON string of old values |
+| `new_values` | string |  | JSON string of new values |
+| `description` | string |  | Human-readable description |
+| `id` | string |  | Unique record identifier |
+| `created_date` | string |  | Record creation timestamp |
+| `updated_date` | string |  | Record last update timestamp |
+| `created_by` | string |  | Email of the user who created the record |
+
+### Endpoints
+
+### `GET /entities/AuditLog`
+List AuditLog records
+
+**Parameters:**
+- `q` (query): JSON query filter, e.g. {"status":"active"}
+- `limit` (query): Maximum number of records to return
+- `skip` (query): Number of records to skip (pagination)
+- `sort_by` (query): Field name to sort by. Prefix with '-' for descending order, e.g. -created_date
+
+```javascript
+const records = await base44.entities.AuditLog.list();
+```
+
+### `POST /entities/AuditLog`
+Create a AuditLog record
+
+```javascript
+const record = await base44.entities.AuditLog.create({
+  // your data
+});
+```
+
+### `DELETE /entities/AuditLog`
+Delete multiple AuditLog records
+
+```javascript
+await base44.entities.AuditLog.deleteMany({
+  // query filter — WARNING: empty {} deletes ALL records
+  action_type: "create"
+});
+```
+
+### `POST /entities/AuditLog/bulk`
+Bulk create AuditLog records
+
+```javascript
+const records = await base44.entities.AuditLog.bulkCreate([
+  { /* record 1 */ },
+  { /* record 2 */ },
+]);
+```
+
+### `PUT /entities/AuditLog/bulk`
+Bulk update AuditLog records
+
+```javascript
+// bulk-update is not available via SDK — use the REST API
+```
+
+### `PATCH /entities/AuditLog/update-many`
+Update many AuditLog records by query
+
+```javascript
+// update-many is not available via SDK — use the REST API
+```
+
+### `GET /entities/AuditLog/{AuditLog_id}`
+Get a AuditLog record by ID
+
+**Parameters:**
+- `AuditLog_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.AuditLog.get(recordId);
+```
+
+### `PUT /entities/AuditLog/{AuditLog_id}`
+Update a AuditLog record
+
+**Parameters:**
+- `AuditLog_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.AuditLog.update(recordId, {
+  // fields to update
+});
+```
+
+### `DELETE /entities/AuditLog/{AuditLog_id}`
+Delete a AuditLog record
+
+**Parameters:**
+- `AuditLog_id` (path): Record ID
+
+```javascript
+await base44.entities.AuditLog.delete(recordId);
+```
+
+### `PUT /entities/AuditLog/{AuditLog_id}/restore`
+Restore a deleted AuditLog record
+
+**Parameters:**
+- `AuditLog_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.AuditLog.restore(recordId);
+```
+
+## Match
+
+### Schema
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `match_date` | string | Yes | Date of the match |
+| `season_id` | string |  | Reference to Season id |
+| `match_type` | `mmr`, `pro_series` |  | Type of match: mmr (standard) or pro_series |
+| `pro_series_season_id` | string |  | Pro Series season identifier (pro_series matches only) |
+| `pro_series_week` | number |  | Pro Series week number (pro_series matches only) |
+| `pro_series_event_name` | string |  | Pro Series event name (pro_series matches only) |
+| `mode` | string |  | Game mode (optional) |
+| `notes` | string |  | Match notes (optional) |
+| `submitted_by_email` | string |  |  |
+| `submitted_by_name` | string |  |  |
+| `player_count` | number |  |  |
+| `status` | `Pending`, `Verified`, `Flagged` |  | Match review status |
+| `review_note` | string |  | Admin review note |
+| `reviewed_by` | string |  | Admin who reviewed |
+| `reviewed_at` | string |  | When reviewed |
+| `screenshot_url` | string |  | URL of match screenshot for verification |
+| `id` | string |  | Unique record identifier |
+| `created_date` | string |  | Record creation timestamp |
+| `updated_date` | string |  | Record last update timestamp |
+| `created_by` | string |  | Email of the user who created the record |
+
+### Endpoints
+
+### `GET /entities/Match`
+List Match records
+
+**Parameters:**
+- `q` (query): JSON query filter, e.g. {"status":"active"}
+- `limit` (query): Maximum number of records to return
+- `skip` (query): Number of records to skip (pagination)
+- `sort_by` (query): Field name to sort by. Prefix with '-' for descending order, e.g. -created_date
+
+```javascript
+const records = await base44.entities.Match.list();
+```
+
+### `POST /entities/Match`
+Create a Match record
+
+```javascript
+const record = await base44.entities.Match.create({
+  // your data
+});
+```
+
+### `DELETE /entities/Match`
+Delete multiple Match records
+
+```javascript
+await base44.entities.Match.deleteMany({
+  // query filter — WARNING: empty {} deletes ALL records
+  match_date: "Example match_date"
+});
+```
+
+### `POST /entities/Match/bulk`
+Bulk create Match records
+
+```javascript
+const records = await base44.entities.Match.bulkCreate([
+  { /* record 1 */ },
+  { /* record 2 */ },
+]);
+```
+
+### `PUT /entities/Match/bulk`
+Bulk update Match records
+
+```javascript
+// bulk-update is not available via SDK — use the REST API
+```
+
+### `PATCH /entities/Match/update-many`
+Update many Match records by query
+
+```javascript
+// update-many is not available via SDK — use the REST API
+```
+
+### `GET /entities/Match/{Match_id}`
+Get a Match record by ID
+
+**Parameters:**
+- `Match_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.Match.get(recordId);
+```
+
+### `PUT /entities/Match/{Match_id}`
+Update a Match record
+
+**Parameters:**
+- `Match_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.Match.update(recordId, {
+  // fields to update
+});
+```
+
+### `DELETE /entities/Match/{Match_id}`
+Delete a Match record
+
+**Parameters:**
+- `Match_id` (path): Record ID
+
+```javascript
+await base44.entities.Match.delete(recordId);
+```
+
+### `PUT /entities/Match/{Match_id}/restore`
+Restore a deleted Match record
+
+**Parameters:**
+- `Match_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.Match.restore(recordId);
+```
+
+## MatchEntry
+
+### Schema
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `match_id` | string | Yes | Reference to Match id |
+| `player_id` | string | Yes | Reference to Player id |
+| `player_name` | string |  | Denormalized player name |
+| `match_date` | string |  | Denormalized match date |
+| `pre_match_mmr` | number |  |  |
+| `post_match_mmr` | number |  |  |
+| `mmr_change` | number |  |  |
+| `finish_position` | number |  |  |
+| `game_points` | number | Yes |  |
+| `over_under` | number |  | Score vs par: negative = under, positive = over, 0 = even |
+| `score_vs_par` | number |  | Equals over_under |
+| `capped_score_vs_par` | number |  | Capped between par_cap_low and par_cap_high |
+| `adjusted_match_score` | number |  | game_points - capped_score_vs_par * multiplier |
+| `pro_series_placement` | number |  | Official Pro Series finish position (pro_series matches only) |
+| `pro_series_points_awarded` | number |  | Pro Series circuit points awarded for this placement (pro_series matches only) |
+| `notes` | string |  |  |
+| `id` | string |  | Unique record identifier |
+| `created_date` | string |  | Record creation timestamp |
+| `updated_date` | string |  | Record last update timestamp |
+| `created_by` | string |  | Email of the user who created the record |
+
+### Endpoints
+
+### `GET /entities/MatchEntry`
+List MatchEntry records
+
+**Parameters:**
+- `q` (query): JSON query filter, e.g. {"status":"active"}
+- `limit` (query): Maximum number of records to return
+- `skip` (query): Number of records to skip (pagination)
+- `sort_by` (query): Field name to sort by. Prefix with '-' for descending order, e.g. -created_date
+
+```javascript
+const records = await base44.entities.MatchEntry.list();
+```
+
+### `POST /entities/MatchEntry`
+Create a MatchEntry record
+
+```javascript
+const record = await base44.entities.MatchEntry.create({
+  // your data
+});
+```
+
+### `DELETE /entities/MatchEntry`
+Delete multiple MatchEntry records
+
+```javascript
+await base44.entities.MatchEntry.deleteMany({
+  // query filter — WARNING: empty {} deletes ALL records
+  match_id: "Example match_id"
+});
+```
+
+### `POST /entities/MatchEntry/bulk`
+Bulk create MatchEntry records
+
+```javascript
+const records = await base44.entities.MatchEntry.bulkCreate([
+  { /* record 1 */ },
+  { /* record 2 */ },
+]);
+```
+
+### `PUT /entities/MatchEntry/bulk`
+Bulk update MatchEntry records
+
+```javascript
+// bulk-update is not available via SDK — use the REST API
+```
+
+### `PATCH /entities/MatchEntry/update-many`
+Update many MatchEntry records by query
+
+```javascript
+// update-many is not available via SDK — use the REST API
+```
+
+### `GET /entities/MatchEntry/{MatchEntry_id}`
+Get a MatchEntry record by ID
+
+**Parameters:**
+- `MatchEntry_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.MatchEntry.get(recordId);
+```
+
+### `PUT /entities/MatchEntry/{MatchEntry_id}`
+Update a MatchEntry record
+
+**Parameters:**
+- `MatchEntry_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.MatchEntry.update(recordId, {
+  // fields to update
+});
+```
+
+### `DELETE /entities/MatchEntry/{MatchEntry_id}`
+Delete a MatchEntry record
+
+**Parameters:**
+- `MatchEntry_id` (path): Record ID
+
+```javascript
+await base44.entities.MatchEntry.delete(recordId);
+```
+
+### `PUT /entities/MatchEntry/{MatchEntry_id}/restore`
+Restore a deleted MatchEntry record
+
+**Parameters:**
+- `MatchEntry_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.MatchEntry.restore(recordId);
+```
+
+## Event
+
+### Schema
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `title` | string | Yes | Event title |
+| `description` | string |  | Event description |
+| `start_date` | string | Yes | Event start date |
+| `end_date` | string |  | Event end date (optional) |
+| `location` | string |  | Event location (optional) |
+| `event_type` | `League Night`, `Tournament`, `Major`, `Casual`, `Other` |  |  |
+| `visibility` | `Public`, `Players Only`, `Staff Only`, `Hidden` |  |  |
+| `id` | string |  | Unique record identifier |
+| `created_date` | string |  | Record creation timestamp |
+| `updated_date` | string |  | Record last update timestamp |
+| `created_by` | string |  | Email of the user who created the record |
+
+### Endpoints
+
+### `GET /entities/Event`
+List Event records
+
+**Parameters:**
+- `q` (query): JSON query filter, e.g. {"status":"active"}
+- `limit` (query): Maximum number of records to return
+- `skip` (query): Number of records to skip (pagination)
+- `sort_by` (query): Field name to sort by. Prefix with '-' for descending order, e.g. -created_date
+
+```javascript
+const records = await base44.entities.Event.list();
+```
+
+### `POST /entities/Event`
+Create a Event record
+
+```javascript
+const record = await base44.entities.Event.create({
+  // your data
+});
+```
+
+### `DELETE /entities/Event`
+Delete multiple Event records
+
+```javascript
+await base44.entities.Event.deleteMany({
+  // query filter — WARNING: empty {} deletes ALL records
+  title: "Example title"
+});
+```
+
+### `POST /entities/Event/bulk`
+Bulk create Event records
+
+```javascript
+const records = await base44.entities.Event.bulkCreate([
+  { /* record 1 */ },
+  { /* record 2 */ },
+]);
+```
+
+### `PUT /entities/Event/bulk`
+Bulk update Event records
+
+```javascript
+// bulk-update is not available via SDK — use the REST API
+```
+
+### `PATCH /entities/Event/update-many`
+Update many Event records by query
+
+```javascript
+// update-many is not available via SDK — use the REST API
+```
+
+### `GET /entities/Event/{Event_id}`
+Get a Event record by ID
+
+**Parameters:**
+- `Event_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.Event.get(recordId);
+```
+
+### `PUT /entities/Event/{Event_id}`
+Update a Event record
+
+**Parameters:**
+- `Event_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.Event.update(recordId, {
+  // fields to update
+});
+```
+
+### `DELETE /entities/Event/{Event_id}`
+Delete a Event record
+
+**Parameters:**
+- `Event_id` (path): Record ID
+
+```javascript
+await base44.entities.Event.delete(recordId);
+```
+
+### `PUT /entities/Event/{Event_id}/restore`
+Restore a deleted Event record
+
+**Parameters:**
+- `Event_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.Event.restore(recordId);
+```
+
+## Season
+
+### Schema
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `season_name` | string | Yes | Display name for the season |
+| `season_number` | number |  | Optional season number |
+| `start_date` | string | Yes | Season start date |
+| `end_date` | string |  | Season end date |
+| `status` | `Upcoming`, `Active`, `Archived` | Yes | Season status |
+| `notes` | string |  | Optional season notes |
+| `id` | string |  | Unique record identifier |
+| `created_date` | string |  | Record creation timestamp |
+| `updated_date` | string |  | Record last update timestamp |
+| `created_by` | string |  | Email of the user who created the record |
+
+### Endpoints
+
+### `GET /entities/Season`
+List Season records
+
+**Parameters:**
+- `q` (query): JSON query filter, e.g. {"status":"active"}
+- `limit` (query): Maximum number of records to return
+- `skip` (query): Number of records to skip (pagination)
+- `sort_by` (query): Field name to sort by. Prefix with '-' for descending order, e.g. -created_date
+
+```javascript
+const records = await base44.entities.Season.list();
+```
+
+### `POST /entities/Season`
+Create a Season record
+
+```javascript
+const record = await base44.entities.Season.create({
+  // your data
+});
+```
+
+### `DELETE /entities/Season`
+Delete multiple Season records
+
+```javascript
+await base44.entities.Season.deleteMany({
+  // query filter — WARNING: empty {} deletes ALL records
+  season_name: "Example season_name"
+});
+```
+
+### `POST /entities/Season/bulk`
+Bulk create Season records
+
+```javascript
+const records = await base44.entities.Season.bulkCreate([
+  { /* record 1 */ },
+  { /* record 2 */ },
+]);
+```
+
+### `PUT /entities/Season/bulk`
+Bulk update Season records
+
+```javascript
+// bulk-update is not available via SDK — use the REST API
+```
+
+### `PATCH /entities/Season/update-many`
+Update many Season records by query
+
+```javascript
+// update-many is not available via SDK — use the REST API
+```
+
+### `GET /entities/Season/{Season_id}`
+Get a Season record by ID
+
+**Parameters:**
+- `Season_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.Season.get(recordId);
+```
+
+### `PUT /entities/Season/{Season_id}`
+Update a Season record
+
+**Parameters:**
+- `Season_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.Season.update(recordId, {
+  // fields to update
+});
+```
+
+### `DELETE /entities/Season/{Season_id}`
+Delete a Season record
+
+**Parameters:**
+- `Season_id` (path): Record ID
+
+```javascript
+await base44.entities.Season.delete(recordId);
+```
+
+### `PUT /entities/Season/{Season_id}/restore`
+Restore a deleted Season record
+
+**Parameters:**
+- `Season_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.Season.restore(recordId);
+```
+
+## PastSeasonStandings
+
+### Schema
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `season_id` | string | Yes | Reference to Season id |
+| `player_id` | string | Yes | Reference to Player id |
+| `player_name_snapshot` | string | Yes | Player name at time of archival |
+| `final_rank` | number | Yes | Final leaderboard position |
+| `final_mmr` | number | Yes | Final MMR at season end |
+| `matches_played` | number |  |  |
+| `wins` | number |  |  |
+| `top_3_finishes` | number |  |  |
+| `average_score_vs_par` | number |  |  |
+| `pro_series_season_id` | string |  | Pro Series season identifier this snapshot belongs to |
+| `pro_series_rank` | number |  | Final Pro Series standings rank |
+| `pro_series_total_points` | number |  | Total Pro Series circuit points (best N counted) |
+| `pro_series_events_played` | number |  | Number of Pro Series events entered |
+| `pro_series_qualified` | boolean |  | Whether player qualified for Pro Series finals |
+| `id` | string |  | Unique record identifier |
+| `created_date` | string |  | Record creation timestamp |
+| `updated_date` | string |  | Record last update timestamp |
+| `created_by` | string |  | Email of the user who created the record |
+
+### Endpoints
+
+### `GET /entities/PastSeasonStandings`
+List PastSeasonStandings records
+
+**Parameters:**
+- `q` (query): JSON query filter, e.g. {"status":"active"}
+- `limit` (query): Maximum number of records to return
+- `skip` (query): Number of records to skip (pagination)
+- `sort_by` (query): Field name to sort by. Prefix with '-' for descending order, e.g. -created_date
+
+```javascript
+const records = await base44.entities.PastSeasonStandings.list();
+```
+
+### `POST /entities/PastSeasonStandings`
+Create a PastSeasonStandings record
+
+```javascript
+const record = await base44.entities.PastSeasonStandings.create({
+  // your data
+});
+```
+
+### `DELETE /entities/PastSeasonStandings`
+Delete multiple PastSeasonStandings records
+
+```javascript
+await base44.entities.PastSeasonStandings.deleteMany({
+  // query filter — WARNING: empty {} deletes ALL records
+  season_id: "Example season_id"
+});
+```
+
+### `POST /entities/PastSeasonStandings/bulk`
+Bulk create PastSeasonStandings records
+
+```javascript
+const records = await base44.entities.PastSeasonStandings.bulkCreate([
+  { /* record 1 */ },
+  { /* record 2 */ },
+]);
+```
+
+### `PUT /entities/PastSeasonStandings/bulk`
+Bulk update PastSeasonStandings records
+
+```javascript
+// bulk-update is not available via SDK — use the REST API
+```
+
+### `PATCH /entities/PastSeasonStandings/update-many`
+Update many PastSeasonStandings records by query
+
+```javascript
+// update-many is not available via SDK — use the REST API
+```
+
+### `GET /entities/PastSeasonStandings/{PastSeasonStandings_id}`
+Get a PastSeasonStandings record by ID
+
+**Parameters:**
+- `PastSeasonStandings_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.PastSeasonStandings.get(recordId);
+```
+
+### `PUT /entities/PastSeasonStandings/{PastSeasonStandings_id}`
+Update a PastSeasonStandings record
+
+**Parameters:**
+- `PastSeasonStandings_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.PastSeasonStandings.update(recordId, {
+  // fields to update
+});
+```
+
+### `DELETE /entities/PastSeasonStandings/{PastSeasonStandings_id}`
+Delete a PastSeasonStandings record
+
+**Parameters:**
+- `PastSeasonStandings_id` (path): Record ID
+
+```javascript
+await base44.entities.PastSeasonStandings.delete(recordId);
+```
+
+### `PUT /entities/PastSeasonStandings/{PastSeasonStandings_id}/restore`
+Restore a deleted PastSeasonStandings record
+
+**Parameters:**
+- `PastSeasonStandings_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.PastSeasonStandings.restore(recordId);
+```
+
+## SeasonAwards
+
+### Schema
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `season_id` | string | Yes | Reference to Season id |
+| `award_type` | string | Yes | Type of award (Champion, RunnerUp, ThirdPlace, etc.) |
+| `player_id` | string |  | Reference to Player id (optional) |
+| `player_name_snapshot` | string | Yes | Player name at time of award |
+| `value_snapshot` | string |  | Value or stat for this award (e.g. 1250 MMR, 12 wins) |
+| `notes` | string |  | Optional notes about this award |
+| `id` | string |  | Unique record identifier |
+| `created_date` | string |  | Record creation timestamp |
+| `updated_date` | string |  | Record last update timestamp |
+| `created_by` | string |  | Email of the user who created the record |
+
+### Endpoints
+
+### `GET /entities/SeasonAwards`
+List SeasonAwards records
+
+**Parameters:**
+- `q` (query): JSON query filter, e.g. {"status":"active"}
+- `limit` (query): Maximum number of records to return
+- `skip` (query): Number of records to skip (pagination)
+- `sort_by` (query): Field name to sort by. Prefix with '-' for descending order, e.g. -created_date
+
+```javascript
+const records = await base44.entities.SeasonAwards.list();
+```
+
+### `POST /entities/SeasonAwards`
+Create a SeasonAwards record
+
+```javascript
+const record = await base44.entities.SeasonAwards.create({
+  // your data
+});
+```
+
+### `DELETE /entities/SeasonAwards`
+Delete multiple SeasonAwards records
+
+```javascript
+await base44.entities.SeasonAwards.deleteMany({
+  // query filter — WARNING: empty {} deletes ALL records
+  season_id: "Example season_id"
+});
+```
+
+### `POST /entities/SeasonAwards/bulk`
+Bulk create SeasonAwards records
+
+```javascript
+const records = await base44.entities.SeasonAwards.bulkCreate([
+  { /* record 1 */ },
+  { /* record 2 */ },
+]);
+```
+
+### `PUT /entities/SeasonAwards/bulk`
+Bulk update SeasonAwards records
+
+```javascript
+// bulk-update is not available via SDK — use the REST API
+```
+
+### `PATCH /entities/SeasonAwards/update-many`
+Update many SeasonAwards records by query
+
+```javascript
+// update-many is not available via SDK — use the REST API
+```
+
+### `GET /entities/SeasonAwards/{SeasonAwards_id}`
+Get a SeasonAwards record by ID
+
+**Parameters:**
+- `SeasonAwards_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.SeasonAwards.get(recordId);
+```
+
+### `PUT /entities/SeasonAwards/{SeasonAwards_id}`
+Update a SeasonAwards record
+
+**Parameters:**
+- `SeasonAwards_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.SeasonAwards.update(recordId, {
+  // fields to update
+});
+```
+
+### `DELETE /entities/SeasonAwards/{SeasonAwards_id}`
+Delete a SeasonAwards record
+
+**Parameters:**
+- `SeasonAwards_id` (path): Record ID
+
+```javascript
+await base44.entities.SeasonAwards.delete(recordId);
+```
+
+### `PUT /entities/SeasonAwards/{SeasonAwards_id}/restore`
+Restore a deleted SeasonAwards record
+
+**Parameters:**
+- `SeasonAwards_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.SeasonAwards.restore(recordId);
+```
+
+## ProSeriesEvent
+
+### Schema
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | string | Yes | Name of the Pro Series event |
+| `season_id` | string | Yes | Reference to the Season id |
+| `week_number` | integer | Yes | Week number of the event within the Pro Series season |
+| `event_date` | string | Yes | Date of the event |
+| `event_time` | string |  | Start time of the event (HH:MM format) |
+| `format` | `2x6`, `2x8`, `3x6`, `3x8`, `4x8` | Yes | Format of the event (groups x players per group) |
+| `status` | `Upcoming`, `Registration Open`, `Registration Closed`, `Completed` |  | Current status of the event |
+| `registered_players` | array |  | Array of Player IDs registered for the event |
+| `lobbies_generated` | boolean |  | Whether lobby assignments have been generated |
+| `lobby_assignments` | object |  | JSON object storing generated lobby groupings |
+| `id` | string |  | Unique record identifier |
+| `created_date` | string |  | Record creation timestamp |
+| `updated_date` | string |  | Record last update timestamp |
+| `created_by` | string |  | Email of the user who created the record |
+
+### Endpoints
+
+### `GET /entities/ProSeriesEvent`
+List ProSeriesEvent records
+
+**Parameters:**
+- `q` (query): JSON query filter, e.g. {"status":"active"}
+- `limit` (query): Maximum number of records to return
+- `skip` (query): Number of records to skip (pagination)
+- `sort_by` (query): Field name to sort by. Prefix with '-' for descending order, e.g. -created_date
+
+```javascript
+const records = await base44.entities.ProSeriesEvent.list();
+```
+
+### `POST /entities/ProSeriesEvent`
+Create a ProSeriesEvent record
+
+```javascript
+const record = await base44.entities.ProSeriesEvent.create({
+  // your data
+});
+```
+
+### `DELETE /entities/ProSeriesEvent`
+Delete multiple ProSeriesEvent records
+
+```javascript
+await base44.entities.ProSeriesEvent.deleteMany({
+  // query filter — WARNING: empty {} deletes ALL records
+  name: "Example name"
+});
+```
+
+### `POST /entities/ProSeriesEvent/bulk`
+Bulk create ProSeriesEvent records
+
+```javascript
+const records = await base44.entities.ProSeriesEvent.bulkCreate([
+  { /* record 1 */ },
+  { /* record 2 */ },
+]);
+```
+
+### `PUT /entities/ProSeriesEvent/bulk`
+Bulk update ProSeriesEvent records
+
+```javascript
+// bulk-update is not available via SDK — use the REST API
+```
+
+### `PATCH /entities/ProSeriesEvent/update-many`
+Update many ProSeriesEvent records by query
+
+```javascript
+// update-many is not available via SDK — use the REST API
+```
+
+### `GET /entities/ProSeriesEvent/{ProSeriesEvent_id}`
+Get a ProSeriesEvent record by ID
+
+**Parameters:**
+- `ProSeriesEvent_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.ProSeriesEvent.get(recordId);
+```
+
+### `PUT /entities/ProSeriesEvent/{ProSeriesEvent_id}`
+Update a ProSeriesEvent record
+
+**Parameters:**
+- `ProSeriesEvent_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.ProSeriesEvent.update(recordId, {
+  // fields to update
+});
+```
+
+### `DELETE /entities/ProSeriesEvent/{ProSeriesEvent_id}`
+Delete a ProSeriesEvent record
+
+**Parameters:**
+- `ProSeriesEvent_id` (path): Record ID
+
+```javascript
+await base44.entities.ProSeriesEvent.delete(recordId);
+```
+
+### `PUT /entities/ProSeriesEvent/{ProSeriesEvent_id}/restore`
+Restore a deleted ProSeriesEvent record
+
+**Parameters:**
+- `ProSeriesEvent_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.ProSeriesEvent.restore(recordId);
+```
+
+## LeagueInquiry
+
+### Schema
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | string | Yes | Submitter's name |
+| `email` | string | Yes | Submitter's email |
+| `game_sport` | string | Yes | Game or sport the league is for |
+| `league_size` | `Under 20`, `20-50`, `50-100`, `100+` | Yes | Estimated league size |
+| `message` | string |  | Additional message or details |
+| `id` | string |  | Unique record identifier |
+| `created_date` | string |  | Record creation timestamp |
+| `updated_date` | string |  | Record last update timestamp |
+| `created_by` | string |  | Email of the user who created the record |
+
+### Endpoints
+
+### `GET /entities/LeagueInquiry`
+List LeagueInquiry records
+
+**Parameters:**
+- `q` (query): JSON query filter, e.g. {"status":"active"}
+- `limit` (query): Maximum number of records to return
+- `skip` (query): Number of records to skip (pagination)
+- `sort_by` (query): Field name to sort by. Prefix with '-' for descending order, e.g. -created_date
+
+```javascript
+const records = await base44.entities.LeagueInquiry.list();
+```
+
+### `POST /entities/LeagueInquiry`
+Create a LeagueInquiry record
+
+```javascript
+const record = await base44.entities.LeagueInquiry.create({
+  // your data
+});
+```
+
+### `DELETE /entities/LeagueInquiry`
+Delete multiple LeagueInquiry records
+
+```javascript
+await base44.entities.LeagueInquiry.deleteMany({
+  // query filter — WARNING: empty {} deletes ALL records
+  name: "Example name"
+});
+```
+
+### `POST /entities/LeagueInquiry/bulk`
+Bulk create LeagueInquiry records
+
+```javascript
+const records = await base44.entities.LeagueInquiry.bulkCreate([
+  { /* record 1 */ },
+  { /* record 2 */ },
+]);
+```
+
+### `PUT /entities/LeagueInquiry/bulk`
+Bulk update LeagueInquiry records
+
+```javascript
+// bulk-update is not available via SDK — use the REST API
+```
+
+### `PATCH /entities/LeagueInquiry/update-many`
+Update many LeagueInquiry records by query
+
+```javascript
+// update-many is not available via SDK — use the REST API
+```
+
+### `GET /entities/LeagueInquiry/{LeagueInquiry_id}`
+Get a LeagueInquiry record by ID
+
+**Parameters:**
+- `LeagueInquiry_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.LeagueInquiry.get(recordId);
+```
+
+### `PUT /entities/LeagueInquiry/{LeagueInquiry_id}`
+Update a LeagueInquiry record
+
+**Parameters:**
+- `LeagueInquiry_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.LeagueInquiry.update(recordId, {
+  // fields to update
+});
+```
+
+### `DELETE /entities/LeagueInquiry/{LeagueInquiry_id}`
+Delete a LeagueInquiry record
+
+**Parameters:**
+- `LeagueInquiry_id` (path): Record ID
+
+```javascript
+await base44.entities.LeagueInquiry.delete(recordId);
+```
+
+### `PUT /entities/LeagueInquiry/{LeagueInquiry_id}/restore`
+Restore a deleted LeagueInquiry record
+
+**Parameters:**
+- `LeagueInquiry_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.LeagueInquiry.restore(recordId);
+```
+
+## MatchmakingQueue
+
+### Schema
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `player_id` | string | Yes | Linked Player entity ID |
+| `user_id` | string | Yes | Linked User entity ID |
+| `mmr_snapshot` | number | Yes | Player's MMR at time of queue join |
+| `region` | string | Yes | Player's region (ISO 3166-1 alpha-2 country code) |
+| `state_province` | string |  | Player's state/province code |
+| `queued_at` | string | Yes | ISO 8601 timestamp of queue join |
+| `status` | `queued`, `matched`, `expired`, `cancelled` | Yes | Current queue status |
+| `session_id` | string |  | Linked MatchmakingSession ID (set when matched) |
+| `id` | string |  | Unique record identifier |
+| `created_date` | string |  | Record creation timestamp |
+| `updated_date` | string |  | Record last update timestamp |
+| `created_by` | string |  | Email of the user who created the record |
+
+### Endpoints
+
+### `GET /entities/MatchmakingQueue`
+List MatchmakingQueue records
+
+**Parameters:**
+- `q` (query): JSON query filter, e.g. {"status":"active"}
+- `limit` (query): Maximum number of records to return
+- `skip` (query): Number of records to skip (pagination)
+- `sort_by` (query): Field name to sort by. Prefix with '-' for descending order, e.g. -created_date
+
+```javascript
+const records = await base44.entities.MatchmakingQueue.list();
+```
+
+### `POST /entities/MatchmakingQueue`
+Create a MatchmakingQueue record
+
+```javascript
+const record = await base44.entities.MatchmakingQueue.create({
+  // your data
+});
+```
+
+### `DELETE /entities/MatchmakingQueue`
+Delete multiple MatchmakingQueue records
+
+```javascript
+await base44.entities.MatchmakingQueue.deleteMany({
+  // query filter — WARNING: empty {} deletes ALL records
+  player_id: "Example player_id"
+});
+```
+
+### `POST /entities/MatchmakingQueue/bulk`
+Bulk create MatchmakingQueue records
+
+```javascript
+const records = await base44.entities.MatchmakingQueue.bulkCreate([
+  { /* record 1 */ },
+  { /* record 2 */ },
+]);
+```
+
+### `PUT /entities/MatchmakingQueue/bulk`
+Bulk update MatchmakingQueue records
+
+```javascript
+// bulk-update is not available via SDK — use the REST API
+```
+
+### `PATCH /entities/MatchmakingQueue/update-many`
+Update many MatchmakingQueue records by query
+
+```javascript
+// update-many is not available via SDK — use the REST API
+```
+
+### `GET /entities/MatchmakingQueue/{MatchmakingQueue_id}`
+Get a MatchmakingQueue record by ID
+
+**Parameters:**
+- `MatchmakingQueue_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.MatchmakingQueue.get(recordId);
+```
+
+### `PUT /entities/MatchmakingQueue/{MatchmakingQueue_id}`
+Update a MatchmakingQueue record
+
+**Parameters:**
+- `MatchmakingQueue_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.MatchmakingQueue.update(recordId, {
+  // fields to update
+});
+```
+
+### `DELETE /entities/MatchmakingQueue/{MatchmakingQueue_id}`
+Delete a MatchmakingQueue record
+
+**Parameters:**
+- `MatchmakingQueue_id` (path): Record ID
+
+```javascript
+await base44.entities.MatchmakingQueue.delete(recordId);
+```
+
+### `PUT /entities/MatchmakingQueue/{MatchmakingQueue_id}/restore`
+Restore a deleted MatchmakingQueue record
+
+**Parameters:**
+- `MatchmakingQueue_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.MatchmakingQueue.restore(recordId);
+```
+
+## MatchmakingSession
+
+### Schema
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `lobby_name` | string | Yes | Generated lobby name (e.g., SBGL-RANKED-1234) |
+| `lobby_password` | string | Yes | Generated 4-digit password |
+| `status` | `pending_accept`, `ready`, `in_progress`, `expired`, `completed` | Yes | Current session status |
+| `player_ids` | array | Yes | All matched player IDs |
+| `host_player_id` | string | Yes | Optimal host player ID |
+| `accepted_player_ids` | array |  | Players who accepted the match |
+| `declined_player_ids` | array |  | Players who declined the match |
+| `mmr_range` | object |  | MMR range object with min, max, avg |
+| `estimated_pings` | object |  | Map of player_id to estimated ping to host |
+| `created_at` | string | Yes | ISO 8601 timestamp |
+| `expires_at` | string | Yes | ISO 8601 timestamp (auto-expire if not all accepted) |
+| `match_id` | string |  | Linked Match entity ID (after completion) |
+| `id` | string |  | Unique record identifier |
+| `created_date` | string |  | Record creation timestamp |
+| `updated_date` | string |  | Record last update timestamp |
+| `created_by` | string |  | Email of the user who created the record |
+
+### Endpoints
+
+### `GET /entities/MatchmakingSession`
+List MatchmakingSession records
+
+**Parameters:**
+- `q` (query): JSON query filter, e.g. {"status":"active"}
+- `limit` (query): Maximum number of records to return
+- `skip` (query): Number of records to skip (pagination)
+- `sort_by` (query): Field name to sort by. Prefix with '-' for descending order, e.g. -created_date
+
+```javascript
+const records = await base44.entities.MatchmakingSession.list();
+```
+
+### `POST /entities/MatchmakingSession`
+Create a MatchmakingSession record
+
+```javascript
+const record = await base44.entities.MatchmakingSession.create({
+  // your data
+});
+```
+
+### `DELETE /entities/MatchmakingSession`
+Delete multiple MatchmakingSession records
+
+```javascript
+await base44.entities.MatchmakingSession.deleteMany({
+  // query filter — WARNING: empty {} deletes ALL records
+  lobby_name: "Example lobby_name"
+});
+```
+
+### `POST /entities/MatchmakingSession/bulk`
+Bulk create MatchmakingSession records
+
+```javascript
+const records = await base44.entities.MatchmakingSession.bulkCreate([
+  { /* record 1 */ },
+  { /* record 2 */ },
+]);
+```
+
+### `PUT /entities/MatchmakingSession/bulk`
+Bulk update MatchmakingSession records
+
+```javascript
+// bulk-update is not available via SDK — use the REST API
+```
+
+### `PATCH /entities/MatchmakingSession/update-many`
+Update many MatchmakingSession records by query
+
+```javascript
+// update-many is not available via SDK — use the REST API
+```
+
+### `GET /entities/MatchmakingSession/{MatchmakingSession_id}`
+Get a MatchmakingSession record by ID
+
+**Parameters:**
+- `MatchmakingSession_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.MatchmakingSession.get(recordId);
+```
+
+### `PUT /entities/MatchmakingSession/{MatchmakingSession_id}`
+Update a MatchmakingSession record
+
+**Parameters:**
+- `MatchmakingSession_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.MatchmakingSession.update(recordId, {
+  // fields to update
+});
+```
+
+### `DELETE /entities/MatchmakingSession/{MatchmakingSession_id}`
+Delete a MatchmakingSession record
+
+**Parameters:**
+- `MatchmakingSession_id` (path): Record ID
+
+```javascript
+await base44.entities.MatchmakingSession.delete(recordId);
+```
+
+### `PUT /entities/MatchmakingSession/{MatchmakingSession_id}/restore`
+Restore a deleted MatchmakingSession record
+
+**Parameters:**
+- `MatchmakingSession_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.MatchmakingSession.restore(recordId);
+```
+
+## SponsorshipPurchase
+
+### Schema
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `sponsorName` | string | Yes | Public-facing name of the sponsor/company |
+| `sponsorEmail` | string | Yes | Contact email for the sponsor |
+| `sponsorLogoUrl` | string |  | URL to sponsor's logo for display |
+| `tier` | `$100`, `$250`, `$500` | Yes | Sponsorship tier |
+| `amount` | number | Yes | Total amount paid for sponsorship |
+| `stripePaymentIntentId` | string | Yes | Stripe payment intent ID for transaction tracking |
+| `weekSponsored` | string |  | Week identifier for sponsorship (e.g., 2026-W15) - Only used for $100 tier |
+| `seasonSponsored` | string |  | Season identifier (e.g., Season 12) - Used for $250 and $500 tiers |
+| `status` | `pending`, `active`, `completed` | Yes | Sponsorship status lifecycle |
+| `purchasedDate` | string | Yes | When the sponsorship was purchased |
+| `contactNotes` | string |  | Long-form notes about sponsor contact, preferences, or special requests |
+| `wantsAdSpot` | boolean |  | Whether sponsor wants promotional ad spot (only applicable for $500 tier) |
+| `id` | string |  | Unique record identifier |
+| `created_date` | string |  | Record creation timestamp |
+| `updated_date` | string |  | Record last update timestamp |
+| `created_by` | string |  | Email of the user who created the record |
+
+### Endpoints
+
+### `GET /entities/SponsorshipPurchase`
+List SponsorshipPurchase records
+
+**Parameters:**
+- `q` (query): JSON query filter, e.g. {"status":"active"}
+- `limit` (query): Maximum number of records to return
+- `skip` (query): Number of records to skip (pagination)
+- `sort_by` (query): Field name to sort by. Prefix with '-' for descending order, e.g. -created_date
+
+```javascript
+const records = await base44.entities.SponsorshipPurchase.list();
+```
+
+### `POST /entities/SponsorshipPurchase`
+Create a SponsorshipPurchase record
+
+```javascript
+const record = await base44.entities.SponsorshipPurchase.create({
+  // your data
+});
+```
+
+### `DELETE /entities/SponsorshipPurchase`
+Delete multiple SponsorshipPurchase records
+
+```javascript
+await base44.entities.SponsorshipPurchase.deleteMany({
+  // query filter — WARNING: empty {} deletes ALL records
+  sponsorName: "Example sponsorName"
+});
+```
+
+### `POST /entities/SponsorshipPurchase/bulk`
+Bulk create SponsorshipPurchase records
+
+```javascript
+const records = await base44.entities.SponsorshipPurchase.bulkCreate([
+  { /* record 1 */ },
+  { /* record 2 */ },
+]);
+```
+
+### `PUT /entities/SponsorshipPurchase/bulk`
+Bulk update SponsorshipPurchase records
+
+```javascript
+// bulk-update is not available via SDK — use the REST API
+```
+
+### `PATCH /entities/SponsorshipPurchase/update-many`
+Update many SponsorshipPurchase records by query
+
+```javascript
+// update-many is not available via SDK — use the REST API
+```
+
+### `GET /entities/SponsorshipPurchase/{SponsorshipPurchase_id}`
+Get a SponsorshipPurchase record by ID
+
+**Parameters:**
+- `SponsorshipPurchase_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.SponsorshipPurchase.get(recordId);
+```
+
+### `PUT /entities/SponsorshipPurchase/{SponsorshipPurchase_id}`
+Update a SponsorshipPurchase record
+
+**Parameters:**
+- `SponsorshipPurchase_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.SponsorshipPurchase.update(recordId, {
+  // fields to update
+});
+```
+
+### `DELETE /entities/SponsorshipPurchase/{SponsorshipPurchase_id}`
+Delete a SponsorshipPurchase record
+
+**Parameters:**
+- `SponsorshipPurchase_id` (path): Record ID
+
+```javascript
+await base44.entities.SponsorshipPurchase.delete(recordId);
+```
+
+### `PUT /entities/SponsorshipPurchase/{SponsorshipPurchase_id}/restore`
+Restore a deleted SponsorshipPurchase record
+
+**Parameters:**
+- `SponsorshipPurchase_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.SponsorshipPurchase.restore(recordId);
+```
+
+## SupporterSubscription
+
+### Schema
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `linkedUserId` | string | Yes | Reference to the User entity this subscription is tied to |
+| `tier` | `fan`, `mvp`, `founding_member` | Yes | Supporter tier level |
+| `stripeSubscriptionId` | string | Yes | Stripe subscription ID for recurring billing |
+| `stripeCustomerId` | string | Yes | Stripe customer ID associated with this subscription |
+| `status` | `active`, `cancelled`, `past_due` | Yes | Current subscription status |
+| `discordUserId` | string | Yes | Discord user ID for granting community roles/benefits |
+| `createdDate` | string | Yes | When the subscription was created |
+| `nextBillingDate` | string |  | When the next billing cycle begins (null if cancelled) |
+| `cancelledAtDate` | string |  | When the subscription was cancelled (null if still active) |
+| `id` | string |  | Unique record identifier |
+| `created_date` | string |  | Record creation timestamp |
+| `updated_date` | string |  | Record last update timestamp |
+| `created_by` | string |  | Email of the user who created the record |
+
+### Endpoints
+
+### `GET /entities/SupporterSubscription`
+List SupporterSubscription records
+
+**Parameters:**
+- `q` (query): JSON query filter, e.g. {"status":"active"}
+- `limit` (query): Maximum number of records to return
+- `skip` (query): Number of records to skip (pagination)
+- `sort_by` (query): Field name to sort by. Prefix with '-' for descending order, e.g. -created_date
+
+```javascript
+const records = await base44.entities.SupporterSubscription.list();
+```
+
+### `POST /entities/SupporterSubscription`
+Create a SupporterSubscription record
+
+```javascript
+const record = await base44.entities.SupporterSubscription.create({
+  // your data
+});
+```
+
+### `DELETE /entities/SupporterSubscription`
+Delete multiple SupporterSubscription records
+
+```javascript
+await base44.entities.SupporterSubscription.deleteMany({
+  // query filter — WARNING: empty {} deletes ALL records
+  linkedUserId: "Example linkedUserId"
+});
+```
+
+### `POST /entities/SupporterSubscription/bulk`
+Bulk create SupporterSubscription records
+
+```javascript
+const records = await base44.entities.SupporterSubscription.bulkCreate([
+  { /* record 1 */ },
+  { /* record 2 */ },
+]);
+```
+
+### `PUT /entities/SupporterSubscription/bulk`
+Bulk update SupporterSubscription records
+
+```javascript
+// bulk-update is not available via SDK — use the REST API
+```
+
+### `PATCH /entities/SupporterSubscription/update-many`
+Update many SupporterSubscription records by query
+
+```javascript
+// update-many is not available via SDK — use the REST API
+```
+
+### `GET /entities/SupporterSubscription/{SupporterSubscription_id}`
+Get a SupporterSubscription record by ID
+
+**Parameters:**
+- `SupporterSubscription_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.SupporterSubscription.get(recordId);
+```
+
+### `PUT /entities/SupporterSubscription/{SupporterSubscription_id}`
+Update a SupporterSubscription record
+
+**Parameters:**
+- `SupporterSubscription_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.SupporterSubscription.update(recordId, {
+  // fields to update
+});
+```
+
+### `DELETE /entities/SupporterSubscription/{SupporterSubscription_id}`
+Delete a SupporterSubscription record
+
+**Parameters:**
+- `SupporterSubscription_id` (path): Record ID
+
+```javascript
+await base44.entities.SupporterSubscription.delete(recordId);
+```
+
+### `PUT /entities/SupporterSubscription/{SupporterSubscription_id}/restore`
+Restore a deleted SupporterSubscription record
+
+**Parameters:**
+- `SupporterSubscription_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.SupporterSubscription.restore(recordId);
+```
+
+## User
+
+### Schema
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `email` | string | Yes | The email of the user |
+| `full_name` | string | Yes | The full name of the user |
+| `role` | `super_admin`, `admin`, `referee`, `viewer` |  | User role - defaults to viewer for all new accounts |
+| `linked_player_id` | string |  | Reference to a linked Player record |
+| `id` | string |  | Unique record identifier |
+| `created_date` | string |  | Record creation timestamp |
+| `updated_date` | string |  | Record last update timestamp |
+| `created_by` | string |  | Email of the user who created the record |
+
+### Endpoints
+
+### `GET /entities/User`
+List User records
+
+**Parameters:**
+- `q` (query): JSON query filter, e.g. {"status":"active"}
+- `limit` (query): Maximum number of records to return
+- `skip` (query): Number of records to skip (pagination)
+- `sort_by` (query): Field name to sort by. Prefix with '-' for descending order, e.g. -created_date
+
+```javascript
+const records = await base44.entities.User.list();
+```
+
+### `POST /entities/User`
+Create a User record
+
+```javascript
+const record = await base44.entities.User.create({
+  // your data
+});
+```
+
+### `GET /entities/User/{User_id}`
+Get a User record by ID
+
+**Parameters:**
+- `User_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.User.get(recordId);
+```
+
+### `PUT /entities/User/{User_id}`
+Update a User record
+
+**Parameters:**
+- `User_id` (path): Record ID
+
+```javascript
+const record = await base44.entities.User.update(recordId, {
+  // fields to update
+});
+```
+
+### `DELETE /entities/User/{User_id}`
+Delete a User record
+
+**Parameters:**
+- `User_id` (path): Record ID
+
+```javascript
+await base44.entities.User.delete(recordId);
+```

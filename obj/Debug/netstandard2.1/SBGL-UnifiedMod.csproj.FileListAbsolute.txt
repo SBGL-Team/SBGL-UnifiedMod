@@ -101,3 +101,4 @@ C:\Projects\Super Battle Golf\Mods\SBGL-UnifiedMod\bin\Debug\netstandard2.1\Opus
 C:\Projects\Super Battle Golf\Mods\SBGL-UnifiedMod\obj\Debug\netstandard2.1\SBGL-Uni.6F2BD43F.Up2Date
 C:\Projects\Super Battle Golf\Mods\SBGL-UnifiedMod\obj\Debug\netstandard2.1\SBGL.UnifiedMod.dll
 C:\Projects\Super Battle Golf\Mods\SBGL-UnifiedMod\obj\Debug\netstandard2.1\SBGL.UnifiedMod.pdb
+C:\Projects\Super Battle Golf\Mods\SBGL-UnifiedMod\obj\Debug\netstandard2.1\SBGL-UnifiedMod.sourcelink.json

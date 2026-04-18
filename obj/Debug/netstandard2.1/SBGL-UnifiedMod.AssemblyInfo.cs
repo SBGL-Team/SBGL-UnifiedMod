@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("SBGL.UnifiedMod")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("0.0.1.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("0.0.1")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("0.0.1+c3f052b0dea59e1a22071a28f40a279b9dc1c3e3")]
 [assembly: System.Reflection.AssemblyProductAttribute("Super Battle Golf League Unified Mod")]
 [assembly: System.Reflection.AssemblyTitleAttribute("SBGL.UnifiedMod")]
 [assembly: System.Reflection.AssemblyVersionAttribute("0.0.1.0")]

@@ -49,6 +49,8 @@ namespace SBGLLiveLeaderboard
         private float _lastOpacity = -1f;
 
         private List<SBGLPlayer> _persistentLeaderboard = new List<SBGLPlayer>();
+        private List<SBGLPlayer> _finalLeaderboardSnapshot = new List<SBGLPlayer>(); // Store final scores when leaving gameplay
+        private bool _showFinalSnapshot = false; // True when in driving range to freeze display
         private Dictionary<string, (string mmr, float lastFetchTime)> _mmrCache = new Dictionary<string, (string, float)>();
         private HashSet<string> _pendingRequests = new HashSet<string>();
         
@@ -98,6 +100,16 @@ namespace SBGLLiveLeaderboard
             if (Keyboard.current != null && Keyboard.current[ToggleKey].wasPressedThisFrame)
                 _showWindow = !_showWindow;
 
+            // Check if we're in driving range - if so, freeze display on final snapshot
+            string currentScene = SceneManager.GetActiveScene().name;
+            bool inDrivingRange = currentScene.Contains("Driving") || currentScene.Contains("Range");
+            
+            if (inDrivingRange) {
+                _showFinalSnapshot = true;  // Freeze on final snapshot
+            } else {
+                _showFinalSnapshot = false; // Go back to live updates
+            }
+
             if (Time.time >= _nextUpdateTime)
             {
                 ScrapeData();
@@ -107,7 +119,14 @@ namespace SBGLLiveLeaderboard
 
         void OnGUI()
         {
-            if (!_showWindow || _persistentLeaderboard.Count == 0) return;
+            // Use final snapshot if in driving range, otherwise use live data
+            List<SBGLPlayer> displayLeaderboard = _showFinalSnapshot && _finalLeaderboardSnapshot.Count > 0 
+                ? _finalLeaderboardSnapshot 
+                : _persistentLeaderboard;
+            
+            // If we're trying to show final snapshot but it's empty yet, still show the window (prevent flickering)
+            if (!_showWindow) return;
+            if (!_showFinalSnapshot && displayLeaderboard.Count == 0) return;
 
             float scale = Screen.height / 1080f;
             float edgePadding = 4f * scale;
@@ -155,7 +174,7 @@ namespace SBGLLiveLeaderboard
             float strokeW = usableWidth * wStroke;
             float baseW = usableWidth * wBase;
 
-            float totalHeight = (edgePadding * 2) + headerHeight + (_persistentLeaderboard.Count * baseRowHeight);
+            float totalHeight = (edgePadding * 2) + (headerHeight * 2) + (displayLeaderboard.Count * baseRowHeight);
             float dynamicHeight = Mathf.Min(totalHeight, ConfigMaxHeight * scale);
             
             // Clamp window position to screen bounds
@@ -173,6 +192,17 @@ namespace SBGLLiveLeaderboard
             
             float currentY = edgePadding;
             GUIStyle goldStyle = new GUIStyle(_centeredStyle) { normal = { textColor = new Color(1f, 0.85f, 0f) }, fontStyle = FontStyle.Bold };
+            GUIStyle titleStyle = new GUIStyle(_headerStyle) { fontSize = Mathf.RoundToInt(10 * scale) };
+            if (_showFinalSnapshot) {
+                titleStyle.normal.textColor = new Color(1f, 0.65f, 0.2f); // Orange for Final Score
+            } else {
+                titleStyle.normal.textColor = new Color(0.4f, 1f, 0.4f); // Green for Live
+            }
+
+            // Draw title showing Live or Final Score
+            string title = _showFinalSnapshot ? "FINAL SCORE" : "LIVE";
+            GUI.Label(new Rect(edgePadding, currentY, finalWidth - (edgePadding * 2), headerHeight), title, titleStyle);
+            currentY += headerHeight;
 
             // Draw Headers
             float hX = edgePadding;
@@ -185,13 +215,18 @@ namespace SBGLLiveLeaderboard
 
             currentY += headerHeight;
 
-            // Draw Players
-            foreach (var p in _persistentLeaderboard)
-            {
-                float rX = edgePadding;
+            // Draw Players (or loading message if snapshot not ready)
+            if (displayLeaderboard.Count == 0 && _showFinalSnapshot) {
+                // Show placeholder while snapshot is loading
+                GUIStyle placeholderStyle = new GUIStyle(_centeredStyle) { normal = { textColor = Color.gray } };
+                GUI.Label(new Rect(edgePadding, currentY, finalWidth - (edgePadding * 2), baseRowHeight), "Loading final scores...", placeholderStyle);
+            } else {
+                foreach (var p in displayLeaderboard)
+                {
+                    float rX = edgePadding;
 
-                GUI.Label(new Rect(rX, currentY, rankW, baseRowHeight), $"{_persistentLeaderboard.IndexOf(p) + 1}.", _centeredStyle);
-                rX += rankW;
+                    GUI.Label(new Rect(rX, currentY, rankW, baseRowHeight), $"{displayLeaderboard.IndexOf(p) + 1}.", _centeredStyle);
+                    rX += rankW;
 
                 GUI.Label(new Rect(rX, currentY, nameW, baseRowHeight), p.Name, _nameStyle);
                 rX += nameW;
@@ -223,6 +258,7 @@ namespace SBGLLiveLeaderboard
 
                 currentY += baseRowHeight;
                 if (currentY > dynamicHeight - edgePadding) break;
+                }
             }
             GUILayout.EndArea();
         }
@@ -360,5 +396,44 @@ namespace SBGLLiveLeaderboard
         }
 
         private string CleanTMP(string input) => string.IsNullOrEmpty(input) ? "" : Regex.Replace(input, "<.*?>", string.Empty).Trim();
+
+        /// <summary>
+        /// Public method to retrieve a player's current leaderboard stats for match submission.
+        /// Used by MatchmakingAssistant to collect game_points and score_vs_par.
+        /// </summary>
+        public SBGLPlayer GetPlayerLeaderboardData(string playerName)
+        {
+            return _persistentLeaderboard.FirstOrDefault(p => p.Name.Equals(playerName, System.StringComparison.OrdinalIgnoreCase));
+        }
+
+        /// <summary>
+        /// Get all current leaderboard players.
+        /// </summary>
+        public List<SBGLPlayer> GetCurrentLeaderboard()
+        {
+            return new List<SBGLPlayer>(_persistentLeaderboard);
+        }
+
+        /// <summary>
+        /// Captures the current leaderboard state as a final snapshot before leaving gameplay.
+        /// Call this when transitioning away from a gameplay scene to preserve match-end scores.
+        /// </summary>
+        public void CaptureLeaderboardSnapshot()
+        {
+            _finalLeaderboardSnapshot = new List<SBGLPlayer>(_persistentLeaderboard);
+            Debug.Log($"[LiveLeaderboard] Captured final snapshot: {_finalLeaderboardSnapshot.Count} players");
+        }
+
+        /// <summary>
+        /// Retrieves the final leaderboard snapshot from when the match ended.
+        /// Falls back to current leaderboard if snapshot is empty.
+        /// </summary>
+        public List<SBGLPlayer> GetFinalLeaderboardSnapshot()
+        {
+            if (_finalLeaderboardSnapshot.Count > 0) {
+                return new List<SBGLPlayer>(_finalLeaderboardSnapshot);
+            }
+            return new List<SBGLPlayer>(_persistentLeaderboard);
+        }
     }
 }

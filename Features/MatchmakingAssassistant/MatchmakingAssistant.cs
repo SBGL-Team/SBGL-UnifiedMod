@@ -56,6 +56,19 @@ namespace SBGLeagueAutomation
         private bool _hostLobbyStarted = false;
         private bool _hostServerWasActive = false;
         private bool _hostCancelSent = false;
+        private bool _matchStatsSubmitted = false;
+        private DateTime? _matchStartTime = null;
+        private Dictionary<string, int> _cachedLeaderboardScores = new Dictionary<string, int>();
+        private Dictionary<string, int> _cachedLeaderboardScoresVsPar = new Dictionary<string, int>();
+        
+        // Progressive match tracking - for updating scores after each hole
+        private string _currentMatchId = null;
+        private Dictionary<string, string> _playerMatchEntryIds = new Dictionary<string, string>(); // player_id -> entry_id
+        private Dictionary<string, int> _lastSubmittedScores = new Dictionary<string, int>(); // player_name -> score
+        private Dictionary<string, int> _lastSubmittedScoresVsPar = new Dictionary<string, int>(); // player_name -> vs_par
+        private bool _matchEntriesCreated = false;
+        private bool _isInGameplay = false;
+        private Coroutine _monitorCoroutine = null;
         
         // UI Helpers
         private List<string> _debugLogs = new List<string>();
@@ -66,6 +79,9 @@ namespace SBGLeagueAutomation
         private bool _hasFetchedProfilePic = false;
         private GUIStyle _centerLabelStyle = null;
         private GUIStyle _debugLineStyle = null;
+
+        // Match Result Submission Service
+        private MatchResultSubmissionService _matchResultSubmission;
 
         private static readonly WaitForSeconds _syncLoopDelay = new WaitForSeconds(5.0f);
         private static readonly WaitForSeconds _readyTransitionDelay = new WaitForSeconds(0.5f);
@@ -99,6 +115,15 @@ namespace SBGLeagueAutomation
 
             new Harmony("com.sbgl.matchmaking").PatchAll();
             Log("Plugin Loaded v6.2.1. Self-Sync Reconciliation Active.");
+            
+            // Initialize Match Result Submission Service
+            _matchResultSubmission = new MatchResultSubmissionService(
+                getBaseApiUrl: GetBaseApiUrl,
+                logger: Log,
+                callApi: CallAPI,
+                parseApiSingleObject: ParseApiSingleObject,
+                startCoroutine: (coro) => StartCoroutine(coro)
+            );
             
             // Hook into unified plugin API changes
             UnifiedPlugin.ApiConfigChanged += OnApiConfigChanged;
@@ -165,7 +190,53 @@ namespace SBGLeagueAutomation
         }
 
         private void OnSceneLoaded(Scene scene, LoadSceneMode mode) {
-            if (scene.name.ToLower().Contains("menu")) {
+            string sceneName = scene.name.ToLower();
+            Log($"<color=cyan>[Scene] Loaded: {scene.name}</color>");
+            
+            // Create match and entries when starting a ranked game (entering course/gameplay scene)
+            // Typically scenes like "Forest" "Desert" etc are the actual gameplay scenes
+            // Only create if session is 'ready' (all players accepted) to avoid premature creation
+            if (IsRankedTriggered && _currentSession != null && _currentSession.status == "ready" && !_matchEntriesCreated && !sceneName.Contains("menu")) {
+                if (!sceneName.Contains("drivingrange") && !sceneName.Contains("driving range") && !sceneName.Contains("lobby")) {
+                    Log("<color=yellow>[Match] Entering gameplay - creating match records...</color>");
+                    _isInGameplay = true;
+                    StartCoroutine(CreateMatchAndEntries());
+                }
+            }
+            
+            // Capture final leaderboard scores before they're lost when leaving gameplay
+            if (_isInGameplay && (sceneName.Contains("drivingrange") || sceneName.Contains("driving range"))) {
+                _isInGameplay = false;
+                
+                // Stop score monitoring immediately to prevent uploading 0's
+                if (_monitorCoroutine != null) {
+                    StopCoroutine(_monitorCoroutine);
+                    _monitorCoroutine = null;
+                    Log("<color=cyan>[Match] Score monitoring stopped</color>");
+                }
+                
+                Log("<color=cyan>[Match] Capturing final leaderboard snapshot before leaving gameplay...</color>");
+                try {
+                    var liveLeaderboard = UnityEngine.Object.FindAnyObjectByType<SBGLLiveLeaderboard.LiveLeaderboardPlugin>(FindObjectsInactive.Include);
+                    if (liveLeaderboard != null) {
+                        liveLeaderboard.CaptureLeaderboardSnapshot();
+                        Log("<color=green>[Match] ✓ Leaderboard snapshot captured</color>");
+                    }
+                } catch (System.Exception ex) {
+                    Log($"<color=yellow>[Match] Could not capture snapshot: {ex.Message}</color>");
+                }
+            }
+            
+            // Skip match finalization in driving range - scores are already updated after each hole during gameplay
+            if (sceneName.Contains("drivingrange") || sceneName.Contains("driving range")) {
+                if (IsRankedTriggered && _currentSession != null && _matchEntriesCreated) {
+                    Log("<color=green>[Match Stats] Returned to Driving Range - match already finalized. Skipping redundant update.</color>");
+                    _matchStatsSubmitted = true;
+                }
+            }
+            
+            // Reset state when returning to main menu
+            if (sceneName.Contains("menu")) {
                 // If host returns to menu after having an active hosted lobby, cancel the web session.
                 if (_isHost && _hostLobbyStarted && _hostServerWasActive && _currentSession != null) {
                     StartCoroutine(CancelSessionAsHost("host_returned_to_menu"));
@@ -175,7 +246,53 @@ namespace SBGLeagueAutomation
             }
         }
 
+        private IEnumerator CheckAndSubmitMatchStats() {
+            if (_userProfile == null || _currentSession == null) {
+                Log("<color=red>[Match Stats] Failed: Missing profile or session</color>");
+                yield break;
+            }
+
+            // Wait a moment for leaderboard to populate after returning to Driving Range
+            Log($"<color=cyan>[Match Stats] Waiting for leaderboard to populate...</color>");
+            yield return new WaitForSeconds(1.5f);
+
+            // Query Match endpoint to check if entry already exists for this session
+            string query = $"{{\"matchmaking_session_id\":\"{_currentSession.id}\"}}";
+            string fullUrl = $"{GetBaseApiUrl()}/Match?q={UnityWebRequest.EscapeURL(query)}";
+            
+            Log($"<color=cyan>[Match Stats] Checking for existing match entry...</color>");
+            Log($"<color=cyan>[Match Stats] Query URL: {fullUrl.Substring(0, Math.Min(150, fullUrl.Length))}...</color>");
+
+            using (UnityWebRequest req = UnityWebRequest.Get(fullUrl)) {
+                ApplyApiHeaders(req);
+                yield return req.SendWebRequest();
+
+                if (req.result == UnityWebRequest.Result.Success) {
+                    List<JObject> existingMatches = ParseApiObjectList(req.downloadHandler.text);
+                    
+                    if (existingMatches.Count > 0) {
+                        Log($"<color=orange>[Match Stats] Match already exists for this session (found {existingMatches.Count} entries)</color>");
+                        _matchStatsSubmitted = true;
+                        yield break;
+                    }
+                    
+                    Log("<color=cyan>[Match Stats] No existing match found - proceeding with submission</color>");
+                } else {
+                    Log($"<color=yellow>[Match Stats] Could not query existing matches: {req.result} - proceeding anyway</color>");
+                }
+            }
+
+            // No existing match found, proceed with submission
+            yield return SubmitMatchStats();
+        }
+
         private void ResetPluginState() {
+            // Stop monitoring coroutine if running
+            if (_monitorCoroutine != null) {
+                StopCoroutine(_monitorCoroutine);
+                _monitorCoroutine = null;
+            }
+            
             IsRankedTriggered = false;
             _isQueueing = false;
             _webStatus = "IDLE";
@@ -187,6 +304,8 @@ namespace SBGLeagueAutomation
             _hostLobbyStarted = false;
             _hostServerWasActive = false;
             _hostCancelSent = false;
+            _matchStatsSubmitted = false;
+            _matchStartTime = null;
 
             _syncTickCount = 0;
             _lobbyCreatedEventCount = 0;
@@ -206,6 +325,16 @@ namespace SBGLeagueAutomation
             _lastAutoJoinSteamLink = "-";
             _lastUploadError = "-";
             _lastAutoJoinError = "-";
+            
+            // Reset progressive match tracking
+            _currentMatchId = null;
+            _playerMatchEntryIds.Clear();
+            _lastSubmittedScores.Clear();
+            _lastSubmittedScoresVsPar.Clear();
+            _matchEntriesCreated = false;
+            _isInGameplay = false;
+            _cachedLeaderboardScores.Clear();
+            _cachedLeaderboardScoresVsPar.Clear();
         }
 
         private void OnDestroy() {
@@ -282,7 +411,10 @@ namespace SBGLeagueAutomation
 
                 // Only proceed with sync if the profile is successfully loaded
                 if (_userProfile != null) {
-                    yield return RefreshPlayerList();
+                    // Skip queue polling if we're in an active match (ranked gameplay)
+                    if (!IsRankedTriggered) {
+                        yield return RefreshPlayerList();
+                    }
                     
                     // Unlock the "Join Queue" button only after the first successful server check
                     if (_isInitializing) {
@@ -473,7 +605,31 @@ namespace SBGLeagueAutomation
                         yield break;
                     }
 
-                    _currentSession.status = (string)session["status"] ?? _currentSession.status;
+                    string statusFromApi = (string)session["status"];
+                    _currentSession.status = statusFromApi ?? _currentSession.status;
+                    Log($"<color=cyan>[Sync] Status from API: {statusFromApi}</color>");
+                    
+                    // Update accepted_player_ids from API response
+                    var acceptedIds = session["accepted_player_ids"]?.ToObject<List<string>>();
+                    if (acceptedIds != null) {
+                        _currentSession.accepted_player_ids = acceptedIds;
+                        Log($"<color=cyan>[Sync] Updated accepted_player_ids: {acceptedIds.Count} players have accepted</color>");
+                        
+                        // Check if all players have accepted and transition to ready if needed
+                        if (_currentSession.status == "pending_accept" && 
+                            _currentSession.accepted_player_ids.Count == _currentSession.player_ids.Count) {
+                            Log($"<color=green>[Sync] All {_currentSession.player_ids.Count} players have accepted! Transitioning to ready...</color>");
+                            _currentSession.status = "ready";
+                            _webStatus = _isHost ? "READY: HOST" : "READY: JOIN";
+                            
+                            // Notify server of ready state
+                            string readyJson = "{\"status\":\"ready\"}";
+                            yield return CallAPI($"/MatchmakingSession/{_currentSession.id}", "PUT", readyJson, (res) => {
+                                Log("<color=green>[Sync] ✓ Session transitioned to READY</color>");
+                            });
+                        }
+                    }
+                    
                     string latestSteamLobbyLink = (string)session["steam_lobby_link"];
                     if (!string.IsNullOrEmpty(latestSteamLobbyLink) && latestSteamLobbyLink != _currentSession.steam_lobby_link) {
                         _currentSession.steam_lobby_link = latestSteamLobbyLink;
@@ -482,6 +638,7 @@ namespace SBGLeagueAutomation
                     
                     if (_currentSession.status == "ready") {
                         _webStatus = _isHost ? "READY: HOST" : "READY: JOIN";
+                        Log($"<color=green>[Sync] Session is READY - Host should start game</color>");
                     } else if (_currentSession.status == "cancelled" || _currentSession.status == "completed") {
                         Log($"Match ended with status: {_currentSession.status}.");
                         ResetPluginState();
@@ -501,12 +658,16 @@ namespace SBGLeagueAutomation
                 lobby_password = (string)sessionData["lobby_password"],
                 host_player_id = (string)sessionData["host_player_id"],
                 status = (string)sessionData["status"],
-                steam_lobby_link = (string)sessionData["steam_lobby_link"]
+                steam_lobby_link = (string)sessionData["steam_lobby_link"],
+                player_ids = sessionData["player_ids"]?.ToObject<List<string>>() ?? new List<string>(),
+                accepted_player_ids = sessionData["accepted_player_ids"]?.ToObject<List<string>>() ?? new List<string>()
             };
 
             if (!string.IsNullOrEmpty(_currentSession.steam_lobby_link)) {
                 Log("Session includes steam_lobby_link from API.");
             }
+
+            Log($"<color=cyan>[Session] Parsed {_currentSession.player_ids.Count} total players, {_currentSession.accepted_player_ids.Count} accepted</color>");
 
             // Logic Check: If status is 'ready', it means everyone accepted.
             // If it's 'pending_accept', the website waits.
@@ -521,16 +682,37 @@ namespace SBGLeagueAutomation
             if (_currentSession == null) yield break;
             _hasAccepted = true;
             
-            // 1. Tell the server we accepted
-            string acceptJson = "{\"accepted_player_ids\":[\"" + _userProfile.id + "\"]}";
+            // Refresh session data to get latest accepted_player_ids from API
+            Log($"<color=cyan>[Accept] Refreshing session data before accepting...</color>");
+            yield return PollSessionStatus();
+            
+            // Build the accepted_player_ids array by merging with existing acceptances
+            var acceptedIds = new List<string>();
+            
+            // Start with existing accepted player IDs from the session
+            if (_currentSession.accepted_player_ids != null) {
+                acceptedIds.AddRange(_currentSession.accepted_player_ids);
+            }
+            
+            // Add current player's ID if not already in the list
+            if (!acceptedIds.Contains(_userProfile.id)) {
+                acceptedIds.Add(_userProfile.id);
+            }
+            
+            string acceptedIdsList = string.Join("\",\"", acceptedIds);
+            string acceptJson = "{\"accepted_player_ids\":[\"" + acceptedIdsList + "\"]}";
+            
+            Log($"<color=cyan>[Accept] Current player accepting: {_userProfile.id}</color>");
+            Log($"<color=cyan>[Accept] Total accepted players: {acceptedIds.Count}</color>");
+            Log($"<color=cyan>[Accept] JSON payload: {acceptJson}</color>");
+            
+            // Update local session object immediately to maintain state
+            _currentSession.accepted_player_ids = new List<string>(acceptedIds);
             
             yield return CallAPI($"/MatchmakingSession/{_currentSession.id}", "PUT", acceptJson, (res) => {
-                Log("Match Accepted.");
-                
-                // 2. Check if we are the last one needed to make the match 'ready'
-                // We assume a 1v1 based on the session logic, but we can check the player_ids count
-                // If the website requires an explicit 'ready' status, we send it now.
-                StartCoroutine(TransitionToReady());
+                Log("<color=green>✓ Match Accepted. Waiting for all players to accept before transitioning to ready...</color>");
+                // Do NOT call TransitionToReady() here - the server will handle transitioning to 'ready'
+                // when all players have accepted. The mod will poll and detect the status change.
             });
         }
 
@@ -548,27 +730,44 @@ namespace SBGLeagueAutomation
         }
 
         private IEnumerator TransitionToReady() {
+            // NOTE: This coroutine is now DISABLED and should not be called by the mod.
+            // The server is responsible for transitioning the session status from 'pending_accept' to 'ready'
+            // when all players have accepted. The mod should only:
+            // 1. Accept the match via PUT with accepted_player_ids
+            // 2. Poll the session status to detect when the server has set it to 'ready'
+            
             // We give the server a split second to process the previous PUT
             yield return _readyTransitionDelay;
 
-            // According to the website's behavior in your HAR file:
-            // When the last player accepts, we push the 'ready' status.
+            // DO NOT USE THIS - Let the server handle the ready transition
+            /*
             string readyJson = "{\"status\":\"ready\"}";
             
             yield return CallAPI($"/MatchmakingSession/{_currentSession.id}", "PUT", readyJson, (res) => {
                 Log("<color=green>Session marked as READY.</color>");
                 _currentSession.status = "ready"; // Local update for immediate UI response
             });
+            */
         }
 
         private void InitiateHostSequence() {
             if (_currentSession == null) return;
+            
+            // Ensure the host has explicitly accepted before initializing the lobby
+            if (!_hasAccepted) {
+                Log("<color=yellow>[Host] Must accept match first before initializing lobby</color>");
+                StartCoroutine(AcceptMatch());
+                return;
+            }
+            
             var mainMenu = UnityEngine.Object.FindAnyObjectByType<MainMenu>();
             if (mainMenu != null) {
                 IsRankedTriggered = true;
                 _hostLobbyStarted = true;
                 _hostServerWasActive = false;
                 _hostCancelSent = false;
+                _matchStartTime = DateTime.UtcNow;
+                _matchStatsSubmitted = false;
                 PlayerPrefs.SetString("LobbyName", _currentSession.lobby_name);
                 PlayerPrefs.SetString("LobbyPassword", _currentSession.lobby_password);
                 PlayerPrefs.Save();
@@ -639,6 +838,533 @@ namespace SBGLeagueAutomation
                     Log($"<color=red>Steam Lobby Link upload failed: {_lastUploadError}</color>");
                 }
             }
+        }
+
+        private IEnumerator CreateMatchAndEntries() {
+            if (_userProfile == null || _currentSession == null) {
+                Log("<color=red>[Match Creation] Failed: Missing profile or session</color>");
+                yield break;
+            }
+
+            Log($"<color=cyan>[Match Creation] Starting new match for session {_currentSession.id}</color>");
+            _matchStartTime = DateTime.UtcNow;
+
+            // Pre-fetch leaderboard data
+            Dictionary<string, int> playerScores = new Dictionary<string, int>();
+            Dictionary<string, int> playerScoresVsPar = new Dictionary<string, int>();
+            List<SBGLLiveLeaderboard.LiveLeaderboardPlugin.SBGLPlayer> startingLeaderboard = null;
+            
+            try {
+                var liveLeaderboard = UnityEngine.Object.FindAnyObjectByType<SBGLLiveLeaderboard.LiveLeaderboardPlugin>(FindObjectsInactive.Include);
+                if (liveLeaderboard != null) {
+                    var allLeaderboardPlayers = liveLeaderboard.GetCurrentLeaderboard();
+                    startingLeaderboard = new List<SBGLLiveLeaderboard.LiveLeaderboardPlugin.SBGLPlayer>(allLeaderboardPlayers); // Store for later use
+                    Log($"<color=cyan>[Match Creation] Found {allLeaderboardPlayers.Count} players on leaderboard</color>");
+                    
+                    foreach (var player in allLeaderboardPlayers) {
+                        if (player == null) continue;
+                        playerScores[player.Name] = player.BaseScore;
+                        
+                        if (!string.IsNullOrEmpty(player.RawStrokes)) {
+                            string strokeStr = player.RawStrokes.Replace("±", "").Trim();
+                            int.TryParse(strokeStr, out int vsPar);
+                            playerScoresVsPar[player.Name] = vsPar;
+                        }
+                    }
+                }
+            } catch (System.Exception ex) {
+                Log($"<color=yellow>[Match Creation] Error prefetching leaderboard: {ex.Message}</color>");
+            }
+
+            _cachedLeaderboardScores = playerScores;
+            _cachedLeaderboardScoresVsPar = playerScoresVsPar;
+
+            // Step 1: Create Match record
+            string matchId = null;
+            yield return SubmitMatchEntry(CollectMatchStats(0f), (id) => matchId = id);
+
+            if (string.IsNullOrEmpty(matchId)) {
+                Log("<color=red>[Match Creation] Failed to create Match record</color>");
+                yield break;
+            }
+
+            _currentMatchId = matchId;
+            Log($"<color=green>[Match Creation] ✓ Match created: {matchId}</color>");
+
+            // Step 2: Create initial MatchEntry records for all players
+            _playerMatchEntryIds.Clear();
+            _lastSubmittedScores.Clear();
+            _lastSubmittedScoresVsPar.Clear();
+
+            foreach (string playerId in _currentSession.player_ids) {
+                string playerName = null;
+                string preMatchMmr = null;
+                int gamePoints = 0;
+                int scoreVsPar = 0;
+
+                // Get player name, MMR and initial scores
+                if (playerId == _userProfile.id) {
+                    playerName = _userProfile.display_name;
+                    preMatchMmr = _userProfile.current_mmr.ToString();
+                    Log($"<color=cyan>[Match Creation] Current player: {playerName} (MMR: {preMatchMmr})</color>");
+                } else {
+                    yield return CallAPI($"/Player/{playerId}", "GET", "", (res) => {
+                        try {
+                            JObject profile = ParseApiSingleObject(res);
+                            if (profile != null) {
+                                playerName = (string)profile["display_name"];
+                                if (string.IsNullOrEmpty(playerName)) {
+                                    Log($"<color=yellow>[Match Creation] Player {playerId} has no display_name, using ID</color>");
+                                    playerName = playerId;
+                                }
+                                object mmrObj = profile["current_mmr"];
+                                if (mmrObj != null) {
+                                    preMatchMmr = mmrObj.ToString();
+                                }
+                                Log($"<color=cyan>[Match Creation] Fetched player: {playerName} (MMR: {preMatchMmr})</color>");
+                            } else {
+                                Log($"<color=yellow>[Match Creation] Failed to fetch Player {playerId} - response null</color>");
+                                playerName = playerId; // Fallback to ID
+                            }
+                        } catch (System.Exception ex) {
+                            Log($"<color=yellow>[Match Creation] Error fetching Player {playerId}: {ex.Message}</color>");
+                            playerName = playerId; // Fallback to ID
+                        }
+                    });
+                }
+
+                if (!string.IsNullOrEmpty(playerName)) {
+                    if (_cachedLeaderboardScores.TryGetValue(playerName, out int score)) {
+                        gamePoints = score;
+                        _cachedLeaderboardScoresVsPar.TryGetValue(playerName, out scoreVsPar);
+                    }
+                    
+                    _lastSubmittedScores[playerName] = gamePoints;
+                    _lastSubmittedScoresVsPar[playerName] = scoreVsPar;
+                }
+
+                // Get starting position from leaderboard
+                int startingPosition = GetPlayerFinishPosition(playerName, startingLeaderboard);
+
+                // Create MatchEntry with MMR snapshot and adjusted score
+                int adjustedScore = gamePoints + (scoreVsPar * -10); // Same calculation as LiveLeaderboard
+                string mmrField = !string.IsNullOrEmpty(preMatchMmr) ? $",\"pre_match_mmr\":{preMatchMmr}" : "";
+                string posField = startingPosition > 0 ? $",\"finish_position\":{startingPosition}" : "";
+                string json = "{" +
+                    $"\"match_id\":\"{matchId}\"," +
+                    $"\"player_id\":\"{playerId}\"," +
+                    $"\"player_name\":\"{playerName ?? "Unknown"}\"," +
+                    $"\"game_points\":{gamePoints}," +
+                    $"\"over_under\":{scoreVsPar}," +
+                    $"\"score_vs_par\":{scoreVsPar}," +
+                    $"\"adjusted_match_score\":{adjustedScore}" +
+                    mmrField +
+                    posField +
+                    $",\"notes\":\"Progressive match tracking - created at round start\"" +
+                "}";
+
+                string entryId = null;
+                yield return CallAPI("/MatchEntry", "POST", json, (res) => {
+                    try {
+                        JObject response = ParseApiSingleObject(res);
+                        if (response != null) {
+                            entryId = (string)response["id"];
+                            _playerMatchEntryIds[playerId] = entryId;
+                            Log($"<color=green>[Match Creation] ✓ MatchEntry created for {playerName}: {entryId}</color>");
+                        }
+                    } catch (System.Exception ex) {
+                        Log($"<color=yellow>[Match Creation] Could not parse MatchEntry: {ex.Message}</color>");
+                    }
+                });
+            }
+
+            _matchEntriesCreated = true;
+            Log($"<color=green>[Match Creation] ✓ Match and entries initialized. Starting score monitoring...</color>");
+
+            // Start monitoring for score changes during gameplay
+            _monitorCoroutine = StartCoroutine(MonitorAndUpdateScores());
+        }
+
+        private IEnumerator MonitorAndUpdateScores() {
+            Log($"<color=cyan>[Match Monitor] Starting score monitoring for gameplay</color>");
+            
+            while (_isInGameplay && _currentMatchId != null) {
+                yield return new WaitForSeconds(2f); // Check every 2 seconds
+
+                // Refresh leaderboard data
+                var liveLeaderboard = UnityEngine.Object.FindAnyObjectByType<SBGLLiveLeaderboard.LiveLeaderboardPlugin>(FindObjectsInactive.Include);
+                if (liveLeaderboard == null) continue;
+
+                var allLeaderboardPlayers = liveLeaderboard.GetCurrentLeaderboard();
+                if (allLeaderboardPlayers == null || allLeaderboardPlayers.Count == 0) continue;
+                
+                foreach (var player in allLeaderboardPlayers) {
+                    if (player == null) continue;
+
+                    int newGamePoints = player.BaseScore;
+                    int newScoreVsPar = 0;
+                    
+                    if (!string.IsNullOrEmpty(player.RawStrokes)) {
+                        string strokeStr = player.RawStrokes.Replace("±", "").Trim();
+                        int.TryParse(strokeStr, out newScoreVsPar);
+                    }
+
+                    // Check if scores changed
+                    bool scoresChanged = false;
+                    if (_lastSubmittedScores.TryGetValue(player.Name, out int lastScore)) {
+                        if (lastScore != newGamePoints || (!_lastSubmittedScoresVsPar.TryGetValue(player.Name, out int lastVsPar) || lastVsPar != newScoreVsPar)) {
+                            scoresChanged = true;
+                        }
+                    } else {
+                        scoresChanged = true;
+                    }
+
+                    if (scoresChanged) {
+                        // Find the player ID and entry ID for this player
+                        string playerId = null;
+                        string entryId = null;
+
+                        if (player.Name == _userProfile.display_name) {
+                            playerId = _userProfile.id;
+                        } else {
+                            // Try to find in player match entry IDs
+                            foreach (var pid in _currentSession.player_ids) {
+                                if (_playerMatchEntryIds.ContainsKey(pid)) {
+                                    // For opponents, we'd need name mapping - skip for now
+                                    continue;
+                                }
+                            }
+                        }
+
+                        if (!string.IsNullOrEmpty(playerId) && _playerMatchEntryIds.TryGetValue(playerId, out entryId)) {
+                            int finishPosition = GetPlayerFinishPosition(player.Name, allLeaderboardPlayers);
+                            yield return UpdateMatchEntry(entryId, playerId, player.Name, newGamePoints, newScoreVsPar, finishPosition);
+                            _lastSubmittedScores[player.Name] = newGamePoints;
+                            _lastSubmittedScoresVsPar[player.Name] = newScoreVsPar;
+                        }
+                    }
+                }
+            }
+
+            Log($"<color=cyan>[Match Monitor] Score monitoring ended</color>");
+        }
+
+        private IEnumerator UpdateMatchEntry(string entryId, string playerId, string playerName, int gamePoints, int scoreVsPar, int finishPosition = 0) {
+            Log($"<color=cyan>[Score Update] Hole completed for {playerName}: {gamePoints} pts, {scoreVsPar} vs par</color>");
+
+            int adjustedScore = gamePoints + (scoreVsPar * -10); // Same calculation as LiveLeaderboard
+            string json = "{" +
+                $"\"game_points\":{gamePoints}," +
+                $"\"over_under\":{scoreVsPar}," +
+                $"\"score_vs_par\":{scoreVsPar}," +
+                $"\"adjusted_match_score\":{adjustedScore}," +
+                $"\"finish_position\":{finishPosition}," +
+                $"\"notes\":\"Updated after hole completion\"" +
+            "}";
+
+            yield return CallAPI($"/MatchEntry/{entryId}", "PUT", json, (res) => {
+                try {
+                    JObject response = ParseApiSingleObject(res);
+                    if (response != null) {
+                        Log($"<color=green>[Score Update] ✓ MatchEntry updated for {playerName}</color>");
+                    }
+                } catch (System.Exception ex) {
+                    Log($"<color=yellow>[Score Update] Could not update MatchEntry: {ex.Message}</color>");
+                }
+            });
+        }
+
+        /// <summary>
+        /// Gets the finish position of a player by name from the final leaderboard snapshot.
+        /// Returns position (1-based) or 0 if not found.
+        /// </summary>
+        private int GetPlayerFinishPosition(string playerName, List<SBGLLiveLeaderboard.LiveLeaderboardPlugin.SBGLPlayer> finalLeaderboard) {
+            if (string.IsNullOrEmpty(playerName) || finalLeaderboard == null || finalLeaderboard.Count == 0) {
+                return 0;
+            }
+
+            for (int i = 0; i < finalLeaderboard.Count; i++) {
+                if (finalLeaderboard[i] != null && finalLeaderboard[i].Name == playerName) {
+                    return i + 1; // Return 1-based position
+                }
+            }
+
+            return 0; // Not found
+        }
+
+        private IEnumerator FinalizeMatchStats() {
+            // Wait for leaderboard to finalize
+            yield return new WaitForSeconds(1.5f);
+
+            Log($"<color=cyan>[Match Finalize] Performing final score update...</color>");
+
+            // Get final leaderboard data (uses snapshot captured when leaving gameplay)
+            var liveLeaderboard = UnityEngine.Object.FindAnyObjectByType<SBGLLiveLeaderboard.LiveLeaderboardPlugin>(FindObjectsInactive.Include);
+            if (liveLeaderboard == null) {
+                Log($"<color=yellow>[Match Finalize] LiveLeaderboard not found</color>");
+                _matchStatsSubmitted = true;
+                yield break;
+            }
+
+            var allLeaderboardPlayers = liveLeaderboard.GetFinalLeaderboardSnapshot();
+            if (allLeaderboardPlayers == null || allLeaderboardPlayers.Count == 0) {
+                Log($"<color=yellow>[Match Finalize] No leaderboard data available</color>");
+                _matchStatsSubmitted = true;
+                yield break;
+            }
+
+            Log($"<color=cyan>[Match Finalize] Using final snapshot with {allLeaderboardPlayers.Count} players</color>");
+
+            foreach (var player in allLeaderboardPlayers) {
+                if (player == null) continue;
+
+                int finalGamePoints = player.BaseScore;
+                int finalScoreVsPar = 0;
+                int finishPosition = GetPlayerFinishPosition(player.Name, allLeaderboardPlayers);
+
+                if (!string.IsNullOrEmpty(player.RawStrokes)) {
+                    string strokeStr = player.RawStrokes.Replace("±", "").Trim();
+                    int.TryParse(strokeStr, out finalScoreVsPar);
+                }
+
+                // Find entry ID for this player
+                string playerId = null;
+                string entryId = null;
+
+                if (player.Name == _userProfile.display_name) {
+                    playerId = _userProfile.id;
+                }
+
+                if (!string.IsNullOrEmpty(playerId) && _playerMatchEntryIds.TryGetValue(playerId, out entryId)) {
+                    // Perform final update
+                    Log($"<color=cyan>[Match Finalize] Final update for {player.Name}: {finalGamePoints} pts, {finalScoreVsPar} vs par, Position: {finishPosition}</color>");
+                    yield return UpdateMatchEntry(entryId, playerId, player.Name, finalGamePoints, finalScoreVsPar, finishPosition);
+                }
+            }
+
+            _matchStatsSubmitted = true;
+            Log($"<color=green>[Match Finalize] ✓ Match stats finalized</color>");
+        }
+
+        private IEnumerator SubmitMatchStats() {
+            if (_userProfile == null || _currentSession == null) {
+                Log("<color=red>[Match Stats] Failed: Missing profile or session</color>");
+                yield break;
+            }
+            
+            Log($"<color=cyan>[Match Stats] Collecting data for session: {_currentSession.id}</color>");
+
+            // Calculate match duration
+            float matchDuration = 0f;
+            if (_matchStartTime.HasValue) {
+                matchDuration = (float)(DateTime.UtcNow - _matchStartTime.Value).TotalSeconds;
+            }
+
+            // Collect available match data
+            MatchStats stats = CollectMatchStats(matchDuration);
+            if (stats == null) {
+                Log("<color=red>[Match Stats] Failed to collect stats</color>");
+                yield break;
+            }
+
+            Log($"<color=cyan>[Match Stats] Duration: {matchDuration}s | Host: {stats.is_host} | Player: {stats.player_name}</color>");
+
+            // Step 1: Submit Match entry
+            string matchId = null;
+            yield return SubmitMatchEntry(stats, (id) => matchId = id);
+
+            if (string.IsNullOrEmpty(matchId)) {
+                Log("<color=red>[Match Stats] Failed to get Match ID from submission</color>");
+                yield break;
+            }
+
+            // Pre-fetch leaderboard data for ALL players to avoid missing scores
+            Dictionary<string, int> playerScores = new Dictionary<string, int>();
+            Dictionary<string, int> playerScoresVsPar = new Dictionary<string, int>();
+            
+            try {
+                var liveLeaderboard = UnityEngine.Object.FindAnyObjectByType<SBGLLiveLeaderboard.LiveLeaderboardPlugin>(FindObjectsInactive.Include);
+                if (liveLeaderboard != null) {
+                    var allLeaderboardPlayers = liveLeaderboard.GetCurrentLeaderboard();
+                    Log($"<color=cyan>[Match Stats] Leaderboard has {allLeaderboardPlayers.Count} visible players</color>");
+                    
+                    foreach (var leaderboardPlayer in allLeaderboardPlayers) {
+                        if (leaderboardPlayer == null) continue;
+                        
+                        int gamePoints = leaderboardPlayer.BaseScore;
+                        int scoreVsPar = 0;
+                        
+                        // Extract stroke offset from RawStrokes (e.g., "+5" or "-2")
+                        if (!string.IsNullOrEmpty(leaderboardPlayer.RawStrokes)) {
+                            string strokeStr = leaderboardPlayer.RawStrokes.Replace("±", "").Trim();
+                            int.TryParse(strokeStr, out scoreVsPar);
+                        }
+                        
+                        playerScores[leaderboardPlayer.Name] = gamePoints;
+                        playerScoresVsPar[leaderboardPlayer.Name] = scoreVsPar;
+                        Log($"<color=cyan>[Match Stats] Cached: {leaderboardPlayer.Name} = {gamePoints} pts, {scoreVsPar} vs par</color>");
+                    }
+                } else {
+                    Log($"<color=yellow>[Match Stats] LiveLeaderboard not found - will use placeholder scores</color>");
+                }
+            } catch (System.Exception ex) {
+                Log($"<color=yellow>[Match Stats] Error fetching leaderboard data: {ex.Message}</color>");
+            }
+            
+            // Store cached scores for retrieval by SubmitMatchEntryForPlayer
+            _cachedLeaderboardScores = playerScores;
+            _cachedLeaderboardScoresVsPar = playerScoresVsPar;
+
+            // Step 2: Submit MatchEntry for each player in the session
+            if (_currentSession.player_ids != null && _currentSession.player_ids.Count > 0) {
+                Log($"<color=cyan>[Match Stats] Creating MatchEntry records for {_currentSession.player_ids.Count} players</color>");
+                foreach (string playerId in _currentSession.player_ids) {
+                    yield return SubmitMatchEntryForPlayer(matchId, playerId);
+                }
+            }
+
+            // Only mark as submitted AFTER successful completion
+            _matchStatsSubmitted = true;
+            Log("<color=green>[Match Stats] ✓ Match and player entries submitted successfully</color>");
+        }
+
+        private MatchStats CollectMatchStats(float duration) {
+            try {
+                // Collect basic match metadata
+                var stats = new MatchStats {
+                    matchmaking_session_id = _currentSession.id,
+                    match_id = _currentSession.id,
+                    player_id = _userProfile.id,
+                    player_name = _userProfile.display_name,
+                    match_date = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                    duration_seconds = (int)duration,
+                    is_host = _isHost,
+                    status = "completed"
+                };
+
+                // TODO: Integrate with actual game scoreboard data:
+                // - Player score
+                // - Course played
+                // - Opponent info
+                // - Hole-by-hole scores
+                // This would require hooking into game events or reading from UI elements
+
+                return stats;
+            } catch (System.Exception ex) {
+                Log($"<color=red>[Match Stats] Error collecting stats: {ex.Message}</color>");
+                return null;
+            }
+        }
+
+        private IEnumerator SubmitMatchEntry(MatchStats stats, System.Action<string> onMatchIdReceived) {
+            if (stats == null || _currentSession == null) yield break;
+
+            // Map to Match schema - these are the fields the API expects
+            // TODO: Get the actual season_id from the current season configuration
+            string seasonId = "69de6bf4fb103cb0d5eb00c5"; // Placeholder - should be dynamic
+            
+            string json = "{" +
+                $"\"matchmaking_session_id\":\"{_currentSession.id}\"," +
+                $"\"season_id\":\"{seasonId}\"," +
+                $"\"match_date\":\"{stats.match_date}\"," +
+                $"\"match_type\":\"mmr\"," +
+                $"\"player_count\":2," +
+                $"\"status\":\"Pending\"," +
+                $"\"submitted_by_name\":\"{stats.player_name}\"," +
+                $"\"mode\":\"\"," +
+                $"\"notes\":\"Auto-submitted via SBGL Unified Mod\"" +
+            "}";
+
+            Log($"<color=cyan>[Match Stats] Submitting Match entry to API</color>");
+            Log($"<color=cyan>[Match Stats] Full URL: {GetBaseApiUrl()}/Match</color>");
+            Log($"<color=cyan>[Match Stats] Payload: {json}</color>");
+
+            yield return CallAPI("/Match", "POST", json, (res) => {
+                JObject response = ParseApiSingleObject(res);
+                if (response != null) {
+                    string entryId = (string)response["id"] ?? "unknown";
+                    Log($"<color=green>[Match Stats] ✓ Match entry created (ID: {entryId})</color>");
+                    onMatchIdReceived?.Invoke(entryId);
+                } else {
+                    Log("<color=yellow>[Match Stats] Response received but could not parse ID</color>");
+                }
+            });
+        }
+
+        private IEnumerator SubmitMatchEntryForPlayer(string matchId, string playerId) {
+            // Try to get leaderboard data for this player using cached scores
+            int gamePoints = 0;
+            int scoreVsPar = 0;
+            string playerDisplayName = null;
+            
+            // First: determine the player's display name
+            if (playerId == _userProfile.id) {
+                playerDisplayName = _userProfile.display_name;
+                Log($"<color=cyan>[Match Stats] Current user: {playerDisplayName}</color>");
+            } else {
+                // For other players, fetch their profile to get their display_name
+                Log($"<color=cyan>[Match Stats] Fetching profile for opponent {playerId}</color>");
+                yield return CallAPI($"/Player/{playerId}", "GET", "", (res) => {
+                    try {
+                        JObject profile = ParseApiSingleObject(res);
+                        if (profile != null) {
+                            playerDisplayName = (string)profile["display_name"];
+                            Log($"<color=cyan>[Match Stats] Opponent display name: {playerDisplayName}</color>");
+                        }
+                    } catch (System.Exception ex) {
+                        Log($"<color=yellow>[Match Stats] Error parsing opponent profile: {ex.Message}</color>");
+                    }
+                });
+            }
+            
+            // Second: look up scores in cache by display name (with retry)
+            if (!string.IsNullOrEmpty(playerDisplayName)) {
+                int retries = 0;
+                while (retries < 5 && (gamePoints == 0 && scoreVsPar == 0)) {
+                    if (_cachedLeaderboardScores.TryGetValue(playerDisplayName, out int cachedScore)) {
+                        gamePoints = cachedScore;
+                        if (_cachedLeaderboardScoresVsPar.TryGetValue(playerDisplayName, out int cachedVsPar)) {
+                            scoreVsPar = cachedVsPar;
+                        }
+                        Log($"<color=green>[Match Stats] ✓ Found cached scores for {playerDisplayName}: {gamePoints} pts, {scoreVsPar} vs par</color>");
+                        break;
+                    } else {
+                        retries++;
+                        if (retries < 5) {
+                            Log($"<color=yellow>[Match Stats] Scores not cached yet for {playerDisplayName}, retry {retries}/5...</color>");
+                            yield return new WaitForSeconds(0.5f);
+                        }
+                    }
+                }
+                
+                if (gamePoints == 0 && scoreVsPar == 0) {
+                    Log($"<color=yellow>[Match Stats] ⚠ No leaderboard data found for {playerDisplayName} after retries</color>");
+                }
+            } else {
+                Log($"<color=yellow>[Match Stats] ⚠ Could not determine player display name for {playerId}</color>");
+            }
+            
+            // Build JSON with player_name field included
+            string json = "{" +
+                $"\"match_id\":\"{matchId}\"," +
+                $"\"player_id\":\"{playerId}\"," +
+                $"\"player_name\":\"{playerDisplayName ?? "Unknown"}\"," +
+                $"\"game_points\":{gamePoints}," +
+                $"\"score_vs_par\":{scoreVsPar}," +
+                $"\"notes\":\"Auto-submitted player entry via SBGL Unified Mod\"" +
+            "}";
+
+            Log($"<color=cyan>[Match Stats] Submitting MatchEntry for {playerDisplayName ?? playerId}: {gamePoints} pts, {scoreVsPar} vs par</color>");
+            
+            yield return CallAPI("/MatchEntry", "POST", json, (res) => {
+                JObject response = ParseApiSingleObject(res);
+                if (response != null) {
+                    string entryId = (string)response["id"] ?? "unknown";
+                    Log($"<color=green>[Match Stats] ✓ MatchEntry created (ID: {entryId}) for player {playerDisplayName ?? playerId}</color>");
+                } else {
+                    Log($"<color=yellow>[Match Stats] Could not parse MatchEntry response for player {playerDisplayName ?? playerId}</color>");
+                }
+            });
         }
 
         
@@ -991,6 +1717,24 @@ namespace SBGLeagueAutomation
             public string lobby_id;
             public string host_steam_id;
             public string steam_lobby_link;
+            public List<string> player_ids; // All players in the session
+            public List<string> accepted_player_ids; // Players who accepted
+        }
+        public class MatchStats {
+            public string matchmaking_session_id;
+            public string match_id;
+            public string player_id;
+            public string player_name;
+            public string match_date;
+            public int duration_seconds;
+            public bool is_host;
+            public string status;
+            // TODO: Add fields as we collect actual game data:
+            // public int player_score;
+            // public int opponent_score;
+            // public string course_name;
+            // public List<int> hole_scores;
+            // public string result; // "win" / "loss" / "tie"
         }
         public struct PlayerData { public string name, mmr; }
     }

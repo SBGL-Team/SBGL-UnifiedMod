@@ -983,4 +983,3 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         }
     }
 }
-
