@@ -45,11 +45,13 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         private const int SBGL_NET_CHANNEL = 2622;
         private Dictionary<ulong, string> _remotePlayerMods = new Dictionary<ulong, string>();
 
+#pragma warning disable CS0649, CS0169
         private GameObject _canvasObj, _profilePicContainer, _bgObj, _warnContainer, _debugWindowObj;
         private TextMeshProUGUI _statsText, _illegalWarningText, _missingWarningText, _debugWindowText;
         private Image _bgImage, _debugWindowBg;
         private RawImage _profileIcon;
         private RectTransform _bgRect, _debugWindowRect;
+#pragma warning restore CS0649, CS0169
 
         private Dictionary<string, string> _allowedModsMap = new Dictionary<string, string>();
         private List<string> _missingModNames = new List<string>();
@@ -898,7 +900,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 userText.alignment = TextAlignmentOptions.Center;
                 userText.verticalAlignment = VerticalAlignmentOptions.Middle;
                 userText.color = Color.black;
-                userText.enableWordWrapping = false;
+                userText.textWrappingMode = TMPro.TextWrappingModes.NoWrap;
 
                 // RECENT MATCHES
                 CreateText(page.transform, "<b>RECENT MATCH HISTORY</b>", new Color(0.12f, 0.65f, 0.55f), 24, 40);

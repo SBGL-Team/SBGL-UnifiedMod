@@ -52,11 +52,14 @@ namespace SBGLeagueAutomation
         private MatchmakingSession _currentSession = null;
         private bool _isHost = false;
         private bool _hasAccepted = false;
+        private string _hostRulesetSelection = ""; // "ranked" or "pro_series", empty until selected
         private DateTime? _queueStartTime = null;
         private bool _hostLobbyStarted = false;
         private bool _hostServerWasActive = false;
         private bool _hostCancelSent = false;
+#pragma warning disable CS0414
         private bool _matchStatsSubmitted = false;
+#pragma warning restore CS0414
         private DateTime? _matchStartTime = null;
         private Dictionary<string, int> _cachedLeaderboardScores = new Dictionary<string, int>();
         private Dictionary<string, int> _cachedLeaderboardScoresVsPar = new Dictionary<string, int>();
@@ -300,6 +303,7 @@ namespace SBGLeagueAutomation
             _currentSession = null;
             _isHost = false;
             _hasAccepted = false;
+            _hostRulesetSelection = "";
             _queueStartTime = null;
             _hostLobbyStarted = false;
             _hostServerWasActive = false;
@@ -650,18 +654,37 @@ namespace SBGLeagueAutomation
         }
 
         private void ParseSession(JObject sessionData) {
-            if (sessionData == null) return;
+            Log("[ParseSession] Entering ParseSession method");
+            if (sessionData == null) {
+                Log("[ParseSession] sessionData is null, returning");
+                return;
+            }
 
-            _currentSession = new MatchmakingSession {
-                id = (string)sessionData["id"],
-                lobby_name = (string)sessionData["lobby_name"],
-                lobby_password = (string)sessionData["lobby_password"],
-                host_player_id = (string)sessionData["host_player_id"],
-                status = (string)sessionData["status"],
-                steam_lobby_link = (string)sessionData["steam_lobby_link"],
-                player_ids = sessionData["player_ids"]?.ToObject<List<string>>() ?? new List<string>(),
-                accepted_player_ids = sessionData["accepted_player_ids"]?.ToObject<List<string>>() ?? new List<string>()
-            };
+            try
+            {
+                Log("[ParseSession] Attempting to parse session data");
+                _currentSession = new MatchmakingSession {
+                    id = (string)sessionData["id"],
+                    lobby_name = (string)sessionData["lobby_name"],
+                    lobby_password = (string)sessionData["lobby_password"],
+                    host_player_id = (string)sessionData["host_player_id"],
+                    status = (string)sessionData["status"],
+                    steam_lobby_link = (string)sessionData["steam_lobby_link"],
+                    player_ids = sessionData["player_ids"]?.ToObject<List<string>>() ?? new List<string>(),
+                    accepted_player_ids = sessionData["accepted_player_ids"]?.ToObject<List<string>>() ?? new List<string>(),
+                    match_type = (string)sessionData["match_type"] ?? "",
+                    selected_course = (string)sessionData["selected_course"] ?? "",
+                    season = sessionData["season"]?.ToObject<int>() ?? 1
+                };
+                Log("[ParseSession] Session data parsed successfully");
+            }
+            catch (System.Exception ex)
+            {
+                Log($"<color=red>[Session] Error parsing session data: {ex.Message}</color>");
+                Log($"<color=red>[Session] StackTrace: {ex.StackTrace}</color>");
+                _currentSession = null;
+                return;
+            }
 
             if (!string.IsNullOrEmpty(_currentSession.steam_lobby_link)) {
                 Log("Session includes steam_lobby_link from API.");
@@ -669,12 +692,33 @@ namespace SBGLeagueAutomation
 
             Log($"<color=cyan>[Session] Parsed {_currentSession.player_ids.Count} total players, {_currentSession.accepted_player_ids.Count} accepted</color>");
 
+            // Parse match configuration if present
+            if (!string.IsNullOrEmpty(_currentSession.match_type))
+            {
+                Log($"<color=cyan>[Session] Match Type: {_currentSession.match_type}, Course: {_currentSession.selected_course}, Season: {_currentSession.season}</color>");
+            }
+
             // Logic Check: If status is 'ready', it means everyone accepted.
             // If it's 'pending_accept', the website waits.
             _isHost = (_currentSession.host_player_id == _userProfile.id);
             
             if (_currentSession.status == "ready") {
                 Log("All players accepted. Match is READY.");
+                
+                // Store match configuration in PlayerPrefs for Harmony patches to use
+                // Only if fields are present (backwards compatibility with older API)
+                if (!string.IsNullOrEmpty(_currentSession.match_type) && !string.IsNullOrEmpty(_currentSession.selected_course))
+                {
+                    try
+                    {
+                        StoreMatchConfigurationInPlayerPrefs(_currentSession);
+                    }
+                    catch (System.Exception ex)
+                    {
+                        Log($"<color=yellow>[Session] Failed to store match configuration: {ex.Message}</color>");
+                        // Continue anyway - don't let this block the match flow
+                    }
+                }
             }
         }
 
@@ -750,6 +794,75 @@ namespace SBGLeagueAutomation
             */
         }
 
+        /// <summary>
+        /// Store match configuration (match_type, selected_course, season) in PlayerPrefs.
+        /// These values are read by Harmony patches to apply Season 1 rules during lobby creation.
+        /// </summary>
+        private void StoreMatchConfigurationInPlayerPrefs(MatchmakingSession session)
+        {
+            try
+            {
+                if (session == null)
+                {
+                    Log("<color=yellow>[Config] Session is null, cannot store configuration</color>");
+                    return;
+                }
+
+                if (string.IsNullOrEmpty(session.match_type) || string.IsNullOrEmpty(session.selected_course))
+                {
+                    Log("<color=yellow>[Config] Match type or course is empty, skipping configuration storage</color>");
+                    return;
+                }
+
+                // Validate course is approved before storing
+                try
+                {
+                    RuleSetManager.SetLogger(_bepinexLogger);
+                    bool isCourseValid = RuleSetManager.ValidateCourseForRanked(session.selected_course);
+                    
+                    string courseToStore = isCourseValid ? session.selected_course : MapPoolConfig.GetRandomApprovedCourse().Name;
+
+                    // Store configuration in PlayerPrefs for patches to access
+                    PlayerPrefs.SetString("MatchType", session.match_type);
+                    PlayerPrefs.SetString("SelectedCourse", courseToStore);
+                    PlayerPrefs.SetInt("Season", session.season);
+                    PlayerPrefs.Save();
+
+                    Log($"<color=cyan>[Config] Stored match configuration: Type={session.match_type}, Course={courseToStore}, Season={session.season}</color>");
+
+                    // Log the configuration for audit trail
+                    RuleSetManager.LogMatchConfiguration(session.match_type, courseToStore, session.season);
+                }
+                catch (System.Exception ruleEx)
+                {
+                    Log($"<color=yellow>[Config] Error during rule validation, storing raw config: {ruleEx.Message}</color>");
+                    
+                    // Store raw config anyway as fallback
+                    PlayerPrefs.SetString("MatchType", session.match_type);
+                    PlayerPrefs.SetString("SelectedCourse", session.selected_course);
+                    PlayerPrefs.SetInt("Season", session.season);
+                    PlayerPrefs.Save();
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Log($"<color=red>[Config] Exception storing match configuration: {ex.Message} | StackTrace: {ex.StackTrace}</color>");
+            }
+        }
+
+        /// <summary>
+        /// Clear match configuration from PlayerPrefs after match has started.
+        /// Prevents configuration from leaking to subsequent matches.
+        /// </summary>
+        private void ClearMatchConfigurationFromPlayerPrefs()
+        {
+            PlayerPrefs.DeleteKey("MatchType");
+            PlayerPrefs.DeleteKey("SelectedCourse");
+            PlayerPrefs.DeleteKey("Season");
+            PlayerPrefs.Save();
+            Log("[Config] Cleared match configuration from PlayerPrefs");
+        }
+
         private void InitiateHostSequence() {
             if (_currentSession == null) return;
             
@@ -759,6 +872,11 @@ namespace SBGLeagueAutomation
                 StartCoroutine(AcceptMatch());
                 return;
             }
+
+            // Ensure ruleset has been selected (read from PlayerPrefs set by driving range panel)
+            string rulesetFromPrefs = PlayerPrefs.GetString("HostRuleset", "");
+            if (string.IsNullOrEmpty(_hostRulesetSelection))
+                _hostRulesetSelection = string.IsNullOrEmpty(rulesetFromPrefs) ? "ranked" : rulesetFromPrefs;
             
             var mainMenu = UnityEngine.Object.FindAnyObjectByType<MainMenu>();
             if (mainMenu != null) {
@@ -770,7 +888,9 @@ namespace SBGLeagueAutomation
                 _matchStatsSubmitted = false;
                 PlayerPrefs.SetString("LobbyName", _currentSession.lobby_name);
                 PlayerPrefs.SetString("LobbyPassword", _currentSession.lobby_password);
+                PlayerPrefs.SetString("HostRuleset", _hostRulesetSelection);
                 PlayerPrefs.Save();
+                Log($"Host ruleset stored: {_hostRulesetSelection}");
                 mainMenu.StartHost();
                 Log("Host lobby initiated. Waiting for Steamworks lobby creation callback...");
                 StartCoroutine(UpdateSessionStatus("in_progress"));
@@ -1372,32 +1492,36 @@ namespace SBGLeagueAutomation
         // UI RENDERING
         // ==========================================
         private void OnGUI() {
-            if (!SceneManager.GetActiveScene().name.ToLower().Contains("menu")) return;
+            try
+            {
+                // Only show menu UI in menu scenes
+                // Match configuration display is handled by RuleSetDisplayManager
+                if (!SceneManager.GetActiveScene().name.ToLower().Contains("menu")) return;
 
-            // GUI.skin can be unavailable during plugin Awake; initialize style lazily at draw time.
-            if (_centerLabelStyle == null) {
-                _centerLabelStyle = GUI.skin != null
-                    ? new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleCenter }
-                    : new GUIStyle { alignment = TextAnchor.MiddleCenter };
-            }
+                // GUI.skin can be unavailable during plugin Awake; initialize style lazily at draw time.
+                if (_centerLabelStyle == null) {
+                    _centerLabelStyle = GUI.skin != null
+                        ? new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleCenter }
+                        : new GUIStyle { alignment = TextAnchor.MiddleCenter };
+                }
 
-            if (_debugLineStyle == null) {
-                _debugLineStyle = GUI.skin != null ? new GUIStyle(GUI.skin.label) : new GUIStyle();
-                _debugLineStyle.alignment = TextAnchor.MiddleLeft;
-                _debugLineStyle.fontSize = 10;
-                _debugLineStyle.wordWrap = false;
-                _debugLineStyle.clipping = TextClipping.Clip;
-                _debugLineStyle.richText = false;
-            }
+                if (_debugLineStyle == null) {
+                    _debugLineStyle = GUI.skin != null ? new GUIStyle(GUI.skin.label) : new GUIStyle();
+                    _debugLineStyle.alignment = TextAnchor.MiddleLeft;
+                    _debugLineStyle.fontSize = 10;
+                    _debugLineStyle.wordWrap = false;
+                    _debugLineStyle.clipping = TextClipping.Clip;
+                    _debugLineStyle.richText = false;
+                }
 
-            float uiWidth = 350f;
-            float rightX = Screen.width - uiWidth - 30;
-            float uiHeight = (_showLogsConfig?.Value ?? false) ? 450f : 350f; 
-            if ((_debugMode?.Value ?? false)) uiHeight += 30f;
-            if ((_showFlowDebugConfig?.Value ?? false)) uiHeight += 145f;
+                float uiWidth = 350f;
+                float rightX = Screen.width - uiWidth - 30;
+                float uiHeight = (_showLogsConfig?.Value ?? false) ? 450f : 350f; 
+                if ((_debugMode?.Value ?? false)) uiHeight += 30f;
+                if ((_showFlowDebugConfig?.Value ?? false)) uiHeight += 145f;
 
-            GUI.DrawTexture(new Rect(rightX, 20, uiWidth, uiHeight), _solidBgTex);
-            GUI.Box(new Rect(rightX, 20, uiWidth, uiHeight), "<b>SBGL LEAGUE ASSISTANT</b>");
+                GUI.DrawTexture(new Rect(rightX, 20, uiWidth, uiHeight), _solidBgTex);
+                GUI.Box(new Rect(rightX, 20, uiWidth, uiHeight), "<b>SBGL LEAGUE ASSISTANT</b>");
 
             // --- MATCHMAKING BUTTONS (WITH INITIALIZATION LOCK) ---
             if (_currentSession != null) {
@@ -1408,9 +1532,11 @@ namespace SBGLeagueAutomation
                     }
                 } else if (_currentSession.status == "ready") {
                     if (_isHost) {
+                        // Ruleset is applied via the Driving Range RuleSetDisplayManager panel.
+                        // Show initialize button directly.
                         GUI.backgroundColor = Color.cyan;
                         if (GUI.Button(new Rect(rightX + 10, 50, uiWidth - 20, 50), "INITIALIZE HOST")) {
-                            InitiateHostSequence(); 
+                            InitiateHostSequence();
                         }
                     } else {
                         // Non-host: Show auto-join status
@@ -1520,6 +1646,11 @@ namespace SBGLeagueAutomation
                     GUI.Label(new Rect(5, i * 20, 300, 20), $"<size=10>{_debugLogs[i]}</size>");
                 }
                 GUI.EndScrollView();
+            }
+            }
+            catch (System.Exception ex)
+            {
+                Log($"<color=red>[CRITICAL] Exception in OnGUI: {ex.Message} | StackTrace: {ex.StackTrace}</color>");
             }
         }
 
@@ -1719,6 +1850,11 @@ namespace SBGLeagueAutomation
             public string steam_lobby_link;
             public List<string> player_ids; // All players in the session
             public List<string> accepted_player_ids; // Players who accepted
+            
+            // Match configuration from API
+            public string match_type; // e.g., "ranked_season_1"
+            public string selected_course; // e.g., "Taiga Woods" - readable course name
+            public int season; // e.g., 1
         }
         public class MatchStats {
             public string matchmaking_session_id;
@@ -1729,10 +1865,15 @@ namespace SBGLeagueAutomation
             public int duration_seconds;
             public bool is_host;
             public string status;
+            
+            // Match configuration from ranked matches
+            public string course_name; // e.g., "Taiga Woods"
+            public string match_type; // e.g., "ranked_season_1"
+            public int season; // e.g., 1
+            
             // TODO: Add fields as we collect actual game data:
             // public int player_score;
             // public int opponent_score;
-            // public string course_name;
             // public List<int> hole_scores;
             // public string result; // "win" / "loss" / "tie"
         }

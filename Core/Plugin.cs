@@ -1,5 +1,6 @@
 using BepInEx;
 using BepInEx.Configuration;
+using HarmonyLib;
 using UnityEngine;
 using UnityEngine.Networking;
 using Newtonsoft.Json.Linq;
@@ -9,6 +10,7 @@ using System.Collections.Generic;
 using System;
 using SBGL.UnifiedMod.Features.CompetitivePluginCheck;
 using SBGL.UnifiedMod.Utils;
+using SBGL.UnifiedMod.Patches;
 using SBGLeagueAutomation;
 using SBGLLiveLeaderboard;
 //using SBGL.UnifiedMod.Features.Leaderboard;
@@ -97,6 +99,13 @@ namespace SBGL.UnifiedMod.Core
         public ConfigEntry<bool> MM_ShowFlowDebug;
 
         // ==========================================
+        // RULESET DISPLAY CONFIG
+        // ==========================================
+        public ConfigEntry<float> RS_PosX;
+        public ConfigEntry<float> RS_PosY;
+        public ConfigEntry<bool> RS_ShowDetails;
+
+        // ==========================================
         // LIVE LEADERBOARD CONFIG
         // ==========================================
         public ConfigEntry<float> LL_Width;
@@ -143,6 +152,14 @@ namespace SBGL.UnifiedMod.Core
             MM_ShowSystemLogs = Config.Bind("Matchmaking.UI Settings", "Show System Logs", true, "Display system event logs");
             MM_EnableEmulation = Config.Bind("Matchmaking.Debug", "Enable Emulation", true, "Show manual host emulation button");
             MM_ShowFlowDebug = Config.Bind("Matchmaking.UI Settings", "Show Flow Debug", false, "Display flow diagnostics");
+
+            // === RULESET DISPLAY CONFIG ===
+            RS_PosX = Config.Bind("RuleSetDisplay.UI", "X Position", -1f,
+                new ConfigDescription("Horizontal position. -1 = auto (right edge)", new AcceptableValueRange<float>(-1f, 4000f)));
+            RS_PosY = Config.Bind("RuleSetDisplay.UI", "Y Position", 20f,
+                new ConfigDescription("Vertical position", new AcceptableValueRange<float>(0f, 4000f)));
+            RS_ShowDetails = Config.Bind("RuleSetDisplay.UI", "Show Details Panel", false,
+                "Show match type, course, season and ruleset labels below the buttons");
 
             // === LIVE LEADERBOARD CONFIG ===
             LL_Width = Config.Bind("LiveLeaderboard.UI", "Width", 350f, 
@@ -494,6 +511,20 @@ namespace SBGL.UnifiedMod.Core
 
         private void InitializeFeatures()
         {
+            // Initialize Harmony patches for rule enforcement
+            Logger.LogInfo("[Init] Initializing Harmony patches...");
+            try
+            {
+                var harmony = new Harmony("com.sbgl.unified.patches");
+                harmony.PatchAll(typeof(RulePatches));
+                RulePatches.SetLogger(Logger);
+                Logger.LogInfo("[Init] ✓ Harmony patches initialized successfully");
+            }
+            catch (System.Exception ex)
+            {
+                Logger.LogError($"[Init] Failed to initialize Harmony patches: {ex.Message}");
+            }
+            
             // Sync config values to PlayerPrefs for component access
             SyncConfigToPlayerPrefs();
             
@@ -510,6 +541,12 @@ namespace SBGL.UnifiedMod.Core
             UnityEngine.Object.DontDestroyOnLoad(matchmakingObj);
             SBGLPlugin matchmaking = matchmakingObj.AddComponent<SBGLPlugin>();
             matchmaking.SetConfig(MM_ShowSystemLogs, MM_EnableEmulation, MM_ShowFlowDebug, Logger);
+            
+            // Initialize RuleSet Display Manager as a managed component
+            GameObject ruleSetObj = new GameObject("SBGL-RuleSetDisplayManager");
+            UnityEngine.Object.DontDestroyOnLoad(ruleSetObj);
+            Features.RuleSetDisplayManager ruleSetDisplay = ruleSetObj.AddComponent<Features.RuleSetDisplayManager>();
+            ruleSetDisplay.SetConfig(RS_PosX, RS_PosY, RS_ShowDetails);
             
             // Initialize Live Leaderboard as a managed component
             GameObject leaderboardObj = new GameObject("SBGL-LiveLeaderboard");

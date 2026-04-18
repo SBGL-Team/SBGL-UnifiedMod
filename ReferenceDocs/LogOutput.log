@@ -1,0 +1,283 @@
+[Message:   BepInEx] BepInEx 5.4.23.5 - Super Battle Golf (4/9/2026 4:41:04 PM)
+[Info   :   BepInEx] Running under Unity v6000.3.10.14901004
+[Info   :   BepInEx] CLR runtime version: 4.0.30319.42000
+[Info   :   BepInEx] Supports SRE: True
+[Info   :   BepInEx] System platform: Bits64, Windows
+[Message:   BepInEx] Preloader started
+[Info   :   BepInEx] Loaded 1 patcher method from [BepInEx.Preloader 5.4.23.5]
+[Info   :   BepInEx] Loaded 1 patcher method from [0.com.github.MonoDetour.BepInEx.5 0.7.13.0]
+[Info   :   BepInEx] 2 patcher plugins loaded
+[Error  :   BepInEx] Failed to run Initializer of MonoDetour.Logging.Patcher: System.TypeLoadException: Could not load type of field 'MonoDetour.Logging.Patcher+<>O:<0>__LogHandler' (0) due to: Could not load file or assembly 'com.github.MonoDetour, Version=0.7.13.0, Culture=neutral, PublicKeyToken=null' or one of its dependencies.
+  at BepInEx.Preloader.Patching.AssemblyPatcher.InitializePatchers () [0x0001e] in <79f09773f5a24b6e9759c0f39217b691>:0 
+[Info   :   BepInEx] Patching [UnityEngine.CoreModule] with [BepInEx.Chainloader]
+[Message:   BepInEx] Preloader finished
+[Message:   BepInEx] Chainloader ready
+[Message:   BepInEx] Chainloader started
+[Info   :   BepInEx] 3 plugins to load
+[Info   :   BepInEx] Loading [ModConfig 0.1.3]
+[Info   : ModConfig] Plugin ModConfig is loaded!
+[Info   :   BepInEx] Loading [SBGL Unified Mod 1.0.0]
+[Info   :SBGL Unified Mod] [Init] CompCheck_PlayerId initialized: 'PASTE_ID_HERE'
+[Info   :SBGL Unified Mod] [Init] Starting InitializeAsync()
+[Info   :SBGL Unified Mod] [Init] Staff list count before RefreshStaffList: 0
+[Info   :SBGL Unified Mod] [Init] Calling RefreshStaffList() coroutine...
+[Info   :SBGL Unified Mod] [Staff List] Starting RefreshStaffList() coroutine...
+[Info   :SBGL Unified Mod] [Staff List] Gist URL: https://gist.githubusercontent.com/Kingcox22/f1b51955d78305177533759cc4ae6024/raw/86f00f088db32e68e9cd5429b3695db22b435ba0/staff.txt
+[Info   :SBGL Unified Mod] [Staff List] Sending web request...
+[Info   :   BepInEx] Loading [Runtime Unity Editor 6.3]
+[Message:   BepInEx] Chainloader startup complete
+[Info   :SBGL Unified Mod] [Staff List] Web request completed. Result: Success
+[Info   :SBGL Unified Mod] [Staff List] Downloaded 154 characters
+[Info   :SBGL Unified Mod] [Staff List] Split into 5 lines
+[Info   :SBGL Unified Mod] [Staff List] Processing line: '76561198089918080 | KingCox22'
+[Info   :SBGL Unified Mod] [Staff List] Split by pipe: 2 parts
+[Info   :SBGL Unified Mod] [Staff List] Extracted username: 'KingCox22'
+[Info   :SBGL Unified Mod] [Staff List] ✓ Added staff member: KingCox22
+[Info   :SBGL Unified Mod] [Staff List] Processing line: '76561198285526583 | Kaosys'
+[Info   :SBGL Unified Mod] [Staff List] Split by pipe: 2 parts
+[Info   :SBGL Unified Mod] [Staff List] Extracted username: 'Kaosys'
+[Info   :SBGL Unified Mod] [Staff List] ✓ Added staff member: Kaosys
+[Info   :SBGL Unified Mod] [Staff List] Processing line: '76561198168289353 | grootami841'
+[Info   :SBGL Unified Mod] [Staff List] Split by pipe: 2 parts
+[Info   :SBGL Unified Mod] [Staff List] Extracted username: 'grootami841'
+[Info   :SBGL Unified Mod] [Staff List] ✓ Added staff member: grootami841
+[Info   :SBGL Unified Mod] [Staff List] Processing line: '76561198264342000 | MonkeyPilot72'
+[Info   :SBGL Unified Mod] [Staff List] Split by pipe: 2 parts
+[Info   :SBGL Unified Mod] [Staff List] Extracted username: 'MonkeyPilot72'
+[Info   :SBGL Unified Mod] [Staff List] ✓ Added staff member: MonkeyPilot72
+[Info   :SBGL Unified Mod] [Staff List] Processing line: '76561198778113705 | FishBoy623 '
+[Info   :SBGL Unified Mod] [Staff List] Split by pipe: 2 parts
+[Info   :SBGL Unified Mod] [Staff List] Extracted username: 'FishBoy623'
+[Info   :SBGL Unified Mod] [Staff List] ✓ Added staff member: FishBoy623
+[Info   :SBGL Unified Mod] [Staff List] ✓ Final staff list has 5 members
+[Warning:SBGL Unified Mod] [Steam Detection] TargetInvocationException in broad search (Steam not initialized yet): NullReferenceException: Object reference not set to an instance of an object
+[Warning:SBGL Unified Mod] [Steam Detection] Could not retrieve Steam username via any method
+[Info   :SBGL Unified Mod] [Staff Detection] Steam username: '' | Staff list contains 5 members
+[Warning:SBGL Unified Mod] [Staff Detection] Could not retrieve Steam username
+[Info   :SBGL Unified Mod] [API Setup] Cleared cached profile for environment switch
+[Info   :SBGL Unified Mod] [API Setup] _isStaffUser=False, API_Environment.Value='PreProd'
+[Info   :SBGL Unified Mod] [API Setup] User is not staff - using Production only
+[Info   :SBGL Unified Mod] ==========================================
+[Info   :SBGL Unified Mod] API CONFIGURATION LOADED (Production (Standard))
+[Info   :SBGL Unified Mod] Endpoint:  https://sbgleague.com/api/apps/69b0f4aba3975f2440fbf070/entities/Player
+[Info   :SBGL Unified Mod] App ID:    69b0f4aba3975f2440fbf070
+[Info   :SBGL Unified Mod] Auth:      eyJhbGciOi...-i-gU
+[Info   :SBGL Unified Mod] ==========================================
+[Info   :SBGL Unified Mod] [API Setup] Re-resolving player profile for new API environment...
+[Warning:SBGL Unified Mod] [Steam Detection] TargetInvocationException in broad search (Steam not initialized yet): NullReferenceException: Object reference not set to an instance of an object
+[Warning:SBGL Unified Mod] [Steam Detection] Could not retrieve Steam username via any method
+[Warning:SBGL Unified Mod] [Player Lookup] Player ID not configured and Steam username unavailable. Skipping profile resolution.
+[Info   :SBGL Unified Mod] [API Setup] ✓ Notifying components of API configuration change
+[Info   :SBGL Unified Mod] [Init] RefreshStaffList() completed. Staff list now has 5 members
+[Info   :SBGL Unified Mod] [Init] Calling DetectStaffUser()...
+[Warning:SBGL Unified Mod] [Steam Detection] TargetInvocationException in broad search (Steam not initialized yet): NullReferenceException: Object reference not set to an instance of an object
+[Warning:SBGL Unified Mod] [Steam Detection] Could not retrieve Steam username via any method
+[Info   :SBGL Unified Mod] [Staff Detection] Steam username: '' | Staff list contains 5 members
+[Warning:SBGL Unified Mod] [Staff Detection] Could not retrieve Steam username
+[Info   :SBGL Unified Mod] [Init] DetectStaffUser() completed. _isStaffUser = False
+[Info   :SBGL Unified Mod] [Init] Calling SetupApiEndpoints()...
+[Info   :SBGL Unified Mod] [API Setup] Cleared cached profile for environment switch
+[Info   :SBGL Unified Mod] [API Setup] _isStaffUser=False, API_Environment.Value='PreProd'
+[Info   :SBGL Unified Mod] [API Setup] User is not staff - using Production only
+[Info   :SBGL Unified Mod] ==========================================
+[Info   :SBGL Unified Mod] API CONFIGURATION LOADED (Production (Standard))
+[Info   :SBGL Unified Mod] Endpoint:  https://sbgleague.com/api/apps/69b0f4aba3975f2440fbf070/entities/Player
+[Info   :SBGL Unified Mod] App ID:    69b0f4aba3975f2440fbf070
+[Info   :SBGL Unified Mod] Auth:      eyJhbGciOi...-i-gU
+[Info   :SBGL Unified Mod] ==========================================
+[Info   :SBGL Unified Mod] [API Setup] Re-resolving player profile for new API environment...
+[Warning:SBGL Unified Mod] [Steam Detection] TargetInvocationException in broad search (Steam not initialized yet): NullReferenceException: Object reference not set to an instance of an object
+[Warning:SBGL Unified Mod] [Steam Detection] Could not retrieve Steam username via any method
+[Warning:SBGL Unified Mod] [Player Lookup] Player ID not configured and Steam username unavailable. Skipping profile resolution.
+[Info   :SBGL Unified Mod] [API Setup] ✓ Notifying components of API configuration change
+[Info   :SBGL Unified Mod] [Init] SetupApiEndpoints() completed
+[Info   :SBGL Unified Mod] SBGL-UnifiedMod is awake and managing features!
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Scene] Loaded: Main menu
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] Returned to Menu: State Reset.
+[Info   :Runtime Unity Editor] Successfully initialized 15/15 features: ContextMenu, CursorUnlocker, MouseInspect, WireframeFeature, Taskbar, ReplWindow, ProfilerWindow, ObjectViewWindow, Inspector, ClipboardWindow, ChangeHistoryWindow, BreakpointsWindow, ObjectTreeViewer, DnSpyHelper, GizmoDrawer
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Init] GET /Player (resolving profile for KingCox22)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Init] Full URL: https://sbgleague.com/api/apps/69b0f4aba3975f2440fbf070/entities/Player?q=%7b%22display_name%22%3a%22KingCox22%22%7d...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] Profile Sync: KingCox22 from VT
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingQueue (fetching queued players)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbgleague.com/api/apps/69b0f4aba3975f2440fbf070/entities/MatchmakingQueue?q=%7b%22%24or%22%3a%5b%7b%22status%22%3a%22queued%22%7d%2c%7b%22stat...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] Initialization Complete: Queue Unlocked.
+[Info   :SBGL Unified Mod] [Init] Retrying staff detection after Steam initialization...
+[Info   :SBGL Unified Mod] [Steam Detection] ✓ Found Steam username via broad search: 'KingCox22'
+[Info   :SBGL Unified Mod] [Init] ✓ Steam username finally retrieved: 'KingCox22'
+[Info   :SBGL Unified Mod] [Steam Detection] ✓ Found Steam username via broad search: 'KingCox22'
+[Info   :SBGL Unified Mod] [Staff Detection] Steam username: 'KingCox22' | Staff list contains 5 members
+[Info   :SBGL Unified Mod] [Staff Detection] Is 'KingCox22' in staff list: True
+[Info   :SBGL Unified Mod] ✓ Staff user detected: KingCox22. API environment switching enabled!
+[Info   :SBGL Unified Mod] [Init] ✓ Staff status changed to TRUE! Updating API configuration...
+[Info   :SBGL Unified Mod] [API Setup] Cleared cached profile for environment switch
+[Info   :SBGL Unified Mod] [API Setup] _isStaffUser=True, API_Environment.Value='PreProd'
+[Info   :SBGL Unified Mod] [API Setup] ✓ Switched to PreProd configuration
+[Info   :SBGL Unified Mod] ==========================================
+[Info   :SBGL Unified Mod] API CONFIGURATION LOADED (PreProd)
+[Info   :SBGL Unified Mod] Endpoint:  https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/Player
+[Info   :SBGL Unified Mod] App ID:    69d5bc0bb18e58e435ff4e3f
+[Info   :SBGL Unified Mod] Auth:      eyJhbGciOi...wUqvk
+[Info   :SBGL Unified Mod] ==========================================
+[Info   :SBGL Unified Mod] [API Setup] Re-resolving player profile for new API environment...
+[Info   :SBGL Unified Mod] [Steam Detection] ✓ Found Steam username via broad search: 'KingCox22'
+[Info   :SBGL Unified Mod] [Player Lookup] No Player ID configured, using Steam username: KingCox22
+[Info   :SBGL Unified Mod] [Player Lookup] Resolving player profile for: KingCox22
+[Info   :SBGL Unified Mod] [API Setup] ✓ Notifying components of API configuration change
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] ⚡ API Configuration changed - Switching environments and refreshing profile
+[Info   :SBGL Unified Mod] [Init] API endpoints updated for staff member
+[Info   :SBGL Unified Mod] [Init] Retrying player profile resolution with Steam username...
+[Info   :SBGL Unified Mod] [Steam Detection] ✓ Found Steam username via broad search: 'KingCox22'
+[Info   :SBGL Unified Mod] [Player Lookup] No Player ID configured, using Steam username: KingCox22
+[Info   :SBGL Unified Mod] [Player Lookup] Resolving player profile for: KingCox22
+[Info   :SBGL Unified Mod] [PlayerProfileFetcher] ✓ Found profile: KingCox22 (ID: 69de6bf3c825828f44ed5326)
+[Info   :SBGL Unified Mod] [Player Lookup] ✓ Profile resolved: KingCox22 (ID: 69de6bf3c825828f44ed5326)
+[Info   :SBGL Unified Mod] [Player Lookup] Downloading profile picture: https://base44.app/api/apps/69b0f4aba3975f2440fbf070/files/mp/public/69b0f4aba3975f2440fbf070/5f24f6454_6877886.png
+[Info   :SBGL Unified Mod] [PlayerProfileFetcher] ✓ Found profile: KingCox22 (ID: 69de6bf3c825828f44ed5326)
+[Info   :SBGL Unified Mod] [Player Lookup] ✓ Profile resolved: KingCox22 (ID: 69de6bf3c825828f44ed5326)
+[Info   :SBGL Unified Mod] [Player Lookup] Downloading profile picture: https://base44.app/api/apps/69b0f4aba3975f2440fbf070/files/mp/public/69b0f4aba3975f2440fbf070/5f24f6454_6877886.png
+[Info   :SBGL Unified Mod] [Player Lookup] ✓ Profile picture downloaded: 260x260
+[Info   :SBGL Unified Mod] [Init] Player profile resolution retry completed
+[Info   :SBGL Unified Mod] [Player Lookup] ✓ Profile picture downloaded: 260x260
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] ✓ Using shared profile: KingCox22 (1132 MMR)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingQueue (fetching queued players)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingQueue?q=%7b%22%24or%22%3a%5b%7b%22status%22%3a%22q...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] Initialization Complete: Queue Unlocked.
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingQueue (fetching queued players)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingQueue?q=%7b%22%24or%22%3a%5b%7b%22status%22%3a%22q...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingQueue (fetching queued players)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingQueue?q=%7b%22%24or%22%3a%5b%7b%22status%22%3a%22q...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingQueue (fetching queued players)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingQueue?q=%7b%22%24or%22%3a%5b%7b%22status%22%3a%22q...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingQueue (fetching queued players)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingQueue?q=%7b%22%24or%22%3a%5b%7b%22status%22%3a%22q...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingQueue (fetching queued players)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingQueue?q=%7b%22%24or%22%3a%5b%7b%22status%22%3a%22q...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingQueue (fetching queued players)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingQueue?q=%7b%22%24or%22%3a%5b%7b%22status%22%3a%22q...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingQueue (fetching queued players)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingQueue?q=%7b%22%24or%22%3a%5b%7b%22status%22%3a%22q...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingQueue (fetching queued players)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingQueue?q=%7b%22%24or%22%3a%5b%7b%22status%22%3a%22q...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingQueue (fetching queued players)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingQueue?q=%7b%22%24or%22%3a%5b%7b%22status%22%3a%22q...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingQueue (fetching queued players)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingQueue?q=%7b%22%24or%22%3a%5b%7b%22status%22%3a%22q...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingQueue (fetching queued players)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingQueue?q=%7b%22%24or%22%3a%5b%7b%22status%22%3a%22q...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [API] POST /MatchmakingQueue
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [API] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingQueue
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [API] POST /MatchmakingQueue - Success
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] Queue request sent.
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingQueue (fetching queued players)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingQueue?q=%7b%22%24or%22%3a%5b%7b%22status%22%3a%22q...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingQueue (fetching queued players)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingQueue?q=%7b%22%24or%22%3a%5b%7b%22status%22%3a%22q...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingQueue (fetching queued players)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingQueue?q=%7b%22%24or%22%3a%5b%7b%22status%22%3a%22q...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingQueue (fetching queued players)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingQueue?q=%7b%22%24or%22%3a%5b%7b%22status%22%3a%22q...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingQueue (fetching queued players)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingQueue?q=%7b%22%24or%22%3a%5b%7b%22status%22%3a%22q...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingQueue (fetching queued players)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingQueue?q=%7b%22%24or%22%3a%5b%7b%22status%22%3a%22q...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingQueue (fetching queued players)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingQueue?q=%7b%22%24or%22%3a%5b%7b%22status%22%3a%22q...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingQueue (fetching queued players)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingQueue?q=%7b%22%24or%22%3a%5b%7b%22status%22%3a%22q...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession (checking for pending matches)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession?q=%7b%22%24or%22%3a%5b%7b%22host_player_id...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [ParseSession] Entering ParseSession method
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [ParseSession] Attempting to parse session data
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [ParseSession] Session data parsed successfully
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Session] Parsed 2 total players, 1 accepted
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] Match Found! Accept needed.
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession/69e3b6be56310c9a83ea1f02 (polling status)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession/69e3b6be56310c9a83ea1f02
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Status from API: pending_accept
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Updated accepted_player_ids: 1 players have accepted
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Accept] Refreshing session data before accepting...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession/69e3b6be56310c9a83ea1f02 (polling status)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession/69e3b6be56310c9a83ea1f02
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Status from API: pending_accept
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Updated accepted_player_ids: 1 players have accepted
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Accept] Current player accepting: 69de6bf3c825828f44ed5326
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Accept] Total accepted players: 2
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Accept] JSON payload: {"accepted_player_ids":["69e1aa0264ad767a52dd9b44","69de6bf3c825828f44ed5326"]}
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [API] PUT /MatchmakingSession/69e3b6be56310c9a83ea1f02
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [API] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession/69e3b6be56310c9a83ea1f02
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [API] PUT /MatchmakingSession/69e3b6be56310c9a83ea1f02 - Success
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] ✓ Match Accepted. Waiting for all players to accept before transitioning to ready...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingQueue (fetching queued players)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingQueue?q=%7b%22%24or%22%3a%5b%7b%22status%22%3a%22q...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] GET /MatchmakingSession/69e3b6be56310c9a83ea1f02 (polling status)
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession/69e3b6be56310c9a83ea1f02
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Status from API: pending_accept
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Updated accepted_player_ids: 2 players have accepted
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] All 2 players have accepted! Transitioning to ready...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [API] PUT /MatchmakingSession/69e3b6be56310c9a83ea1f02
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [API] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession/69e3b6be56310c9a83ea1f02
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [API] PUT /MatchmakingSession/69e3b6be56310c9a83ea1f02 - Success
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] ✓ Session transitioned to READY
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Sync] Session is READY - Host should start game
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] Host selected ruleset: RANKED
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] Host ruleset stored: ranked
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] Host lobby initiated. Waiting for Steamworks lobby creation callback...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [API] PUT /MatchmakingSession/69e3b6be56310c9a83ea1f02
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [API] Full URL: https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/MatchmakingSession/69e3b6be56310c9a83ea1f02
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [API] PUT /MatchmakingSession/69e3b6be56310c9a83ea1f02 - Success
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] [Scene] Loaded: Driving range
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] Lobby created! ID: 109775242332785904, uploading link...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] Uploading Steam Lobby Link to API...
+[Info   :SBGL Unified Mod] [MatchmakingAssistant] Steam Lobby Link uploaded successfully.

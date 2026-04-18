@@ -25,10 +25,12 @@ namespace SBGLeagueAutomation
         private Dictionary<string, int> _lastSubmittedScoresVsPar = new Dictionary<string, int>();
         private Dictionary<string, int> _cachedLeaderboardScores = new Dictionary<string, int>();
         private Dictionary<string, int> _cachedLeaderboardScoresVsPar = new Dictionary<string, int>();
+#pragma warning disable CS0414
         private bool _matchEntriesCreated = false;
         private bool _isInGameplay = false;
         private DateTime? _matchStartTime = null;
         private bool _matchStatsSubmitted = false;
+#pragma warning restore CS0414
 
         // Dependencies (callbacks to parent MatchmakingAssistant)
         private Func<string> _getBaseApiUrl;
@@ -80,6 +82,11 @@ namespace SBGLeagueAutomation
             _matchStartTime = DateTime.UtcNow;
 
             // Step 1: Create Match record
+            // Retrieve course and match type from PlayerPrefs (set by API during matchmaking)
+            string courseName = PlayerPrefs.GetString("SelectedCourse", "Unknown");
+            string matchType = PlayerPrefs.GetString("MatchType", "unranked");
+            int season = PlayerPrefs.GetInt("Season", 1);
+
             SBGLPlugin.MatchStats matchStats = new SBGLPlugin.MatchStats
             {
                 matchmaking_session_id = _currentSession.id,
@@ -89,8 +96,13 @@ namespace SBGLeagueAutomation
                 match_date = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
                 duration_seconds = 0,
                 is_host = false,
-                status = "completed"
+                status = "completed",
+                course_name = courseName,
+                match_type = matchType,
+                season = season
             };
+
+            Log($"<color=cyan>[Match Creation] Match configuration - Course: {courseName}, Type: {matchType}, Season: {season}</color>");
 
             string matchId = null;
             yield return SubmitMatchEntry(matchStats, (id) => matchId = id);
@@ -332,7 +344,8 @@ namespace SBGLeagueAutomation
                 $"\"matchmaking_session_id\":\"{_currentSession.id}\"," +
                 $"\"season_id\":\"{seasonId}\"," +
                 $"\"match_date\":\"{stats.match_date}\"," +
-                $"\"match_type\":\"mmr\"," +
+                $"\"match_type\":\"{stats.match_type}\"," +
+                $"\"course_name\":\"{stats.course_name}\"," +
                 $"\"player_count\":2," +
                 $"\"status\":\"Pending\"," +
                 $"\"submitted_by_name\":\"{stats.player_name}\"," +
