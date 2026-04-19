@@ -116,6 +116,23 @@ namespace SBGLeagueAutomation
             _currentMatchId = matchId;
             Log($"<color=green>[Match Creation] ✓ Match created: {matchId}</color>");
 
+            // Step 1b: Link Match ID back to the MatchmakingSession so the website can detect mod-submitted matches
+            yield return _callApi($"/MatchmakingSession/{_currentSession.id}", "PUT", $"{{\"match_id\":\"{matchId}\"}}", (res) =>
+            {
+                try
+                {
+                    JObject response = _parseApiSingleObject(res);
+                    if (response != null)
+                        Log($"<color=green>[Match Creation] ✓ MatchmakingSession {_currentSession.id} linked to match: {matchId}</color>");
+                    else
+                        Log($"<color=yellow>[Match Creation] Could not confirm MatchmakingSession update</color>");
+                }
+                catch (System.Exception ex)
+                {
+                    Log($"<color=yellow>[Match Creation] Error updating MatchmakingSession: {ex.Message}</color>");
+                }
+            });
+
             // Step 2: Create initial MatchEntry records for all players
             _playerMatchEntryIds.Clear();
             _lastSubmittedScores.Clear();
@@ -340,6 +357,8 @@ namespace SBGLeagueAutomation
 
             string seasonId = "69de6bf4fb103cb0d5eb00c5"; // Placeholder - should be dynamic
 
+            string mode = stats.match_type != null && stats.match_type.Contains("pro_series") ? "Pro Series" : "Ranked";
+
             string json = "{" +
                 $"\"matchmaking_session_id\":\"{_currentSession.id}\"," +
                 $"\"season_id\":\"{seasonId}\"," +
@@ -349,7 +368,7 @@ namespace SBGLeagueAutomation
                 $"\"player_count\":2," +
                 $"\"status\":\"Pending\"," +
                 $"\"submitted_by_name\":\"{stats.player_name}\"," +
-                $"\"mode\":\"\"," +
+                $"\"mode\":\"{mode}\"," +
                 $"\"notes\":\"Auto-submitted via SBGL Unified Mod\"" +
             "}";
 
