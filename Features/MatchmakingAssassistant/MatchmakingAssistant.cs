@@ -199,7 +199,7 @@ namespace SBGLeagueAutomation
             // Create match and entries when starting a ranked game (entering course/gameplay scene)
             // Typically scenes like "Forest" "Desert" etc are the actual gameplay scenes
             // Only create if session is 'ready' (all players accepted) to avoid premature creation
-            if (IsRankedTriggered && _currentSession != null && _currentSession.status == "ready" && !_matchEntriesCreated && !sceneName.Contains("menu")) {
+            if (IsRankedTriggered && _currentSession != null && (_currentSession.status == "ready" || _currentSession.status == "in_progress") && !_matchEntriesCreated && !sceneName.Contains("menu")) {
                 if (!sceneName.Contains("drivingrange") && !sceneName.Contains("driving range") && !sceneName.Contains("lobby")) {
                     Log("<color=yellow>[Match] Entering gameplay - creating match records...</color>");
                     _isInGameplay = true;
@@ -235,6 +235,7 @@ namespace SBGLeagueAutomation
                 if (IsRankedTriggered && _currentSession != null && _matchEntriesCreated) {
                     Log("<color=green>[Match Stats] Returned to Driving Range - match already finalized. Skipping redundant update.</color>");
                     _matchStatsSubmitted = true;
+                    StartCoroutine(UpdateSessionStatus("completed"));
                 }
             }
             
@@ -1011,6 +1012,15 @@ namespace SBGLeagueAutomation
             _currentMatchId = matchId;
             Log($"<color=green>[Match Creation] ✓ Match created: {matchId}</color>");
 
+            // Link Match ID back to the MatchmakingSession so the website can detect mod-submitted matches
+            yield return CallAPI($"/MatchmakingSession/{_currentSession.id}", "PUT", $"{{\"match_id\":\"{matchId}\"}}", (res) => {
+                JObject response = ParseApiSingleObject(res);
+                if (response != null)
+                    Log($"<color=green>[Match Creation] ✓ MatchmakingSession {_currentSession.id} linked to match: {matchId}</color>");
+                else
+                    Log($"<color=yellow>[Match Creation] Could not confirm MatchmakingSession update</color>");
+            });
+
             // Step 2: Create initial MatchEntry records for all players
             _playerMatchEntryIds.Clear();
             _lastSubmittedScores.Clear();
@@ -1297,6 +1307,15 @@ namespace SBGLeagueAutomation
                 Log("<color=red>[Match Stats] Failed to get Match ID from submission</color>");
                 yield break;
             }
+
+            // Link Match ID back to the MatchmakingSession so the website can detect mod-submitted matches
+            yield return CallAPI($"/MatchmakingSession/{_currentSession.id}", "PUT", $"{{\"match_id\":\"{matchId}\"}}", (res) => {
+                JObject response = ParseApiSingleObject(res);
+                if (response != null)
+                    Log($"<color=green>[Match Stats] ✓ MatchmakingSession {_currentSession.id} linked to match: {matchId}</color>");
+                else
+                    Log($"<color=yellow>[Match Stats] Could not confirm MatchmakingSession update</color>");
+            });
 
             // Pre-fetch leaderboard data for ALL players to avoid missing scores
             Dictionary<string, int> playerScores = new Dictionary<string, int>();
