@@ -13,7 +13,7 @@ using SBGL.UnifiedMod.Utils;
 using SBGL.UnifiedMod.Patches;
 using SBGLeagueAutomation;
 using SBGLLiveLeaderboard;
-//using SBGL.UnifiedMod.Features.Leaderboard;
+
 
 namespace SBGL.UnifiedMod.Core
 {
@@ -26,7 +26,7 @@ namespace SBGL.UnifiedMod.Core
         public string ProfilePicUrl { get; set; }
         public bool IsResolved { get; set; }
     }
-    [BepInPlugin("com.sbgl.unified", "SBGL Unified Mod", "1.0.0")]
+    [BepInPlugin("com.sbgl.unified", "SBGL Unified Mod", "0.0.4")]
     public class UnifiedPlugin : BaseUnityPlugin
     {
         // ==========================================
@@ -49,12 +49,12 @@ namespace SBGL.UnifiedMod.Core
         // Production API
         private const string PROD_PLAYER_API = "https://sbgleague.com/api/apps/69b0f4aba3975f2440fbf070/entities/Player";
         private const string PROD_APP_ID = "69b0f4aba3975f2440fbf070";
-        private const string PROD_AUTH_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJraW5nY294MjJAZ21haWwuY29tIiwiZXhwIjoxNzgyNzg5NDU0LCJpYXQiOjE3NzUwMTM0NTR9.2pCmAKXH98n3fvUaheN-e6kx3BoJflStfUb-Kq-i-gU";
+        private const string PROD_AUTH_TOKEN = "3f7c84bf7a734c6a86bbc34245a1e6e4";
         
         // PreProd API
         private const string PREPROD_PLAYER_API = "https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/Player";
         private const string PREPROD_APP_ID = "69d5bc0bb18e58e435ff4e3f";
-        private const string PREPROD_AUTH_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJraW5nY294MjJAZ21haWwuY29tIiwiZXhwIjoxNzgzNjU2MjQ0LCJpYXQiOjE3NzU4ODAyNDR9.zApbrIgaGMF_UeB1X3ugPbxVUtdcBvBA8YU_1fwUqvk";
+        private const string PREPROD_AUTH_TOKEN = "1ec5fe0220c041939070ac4690933ba3";
         
         // Dynamic API properties
         private string _currentPlayerApi;
@@ -86,16 +86,17 @@ namespace SBGL.UnifiedMod.Core
         public ConfigEntry<float> CompCheck_Width;
         public ConfigEntry<float> CompCheck_Alpha;
         public ConfigEntry<bool> CompCheck_ShowModList;
-        public ConfigEntry<bool> CompCheck_ShowLobbyMods;
         public ConfigEntry<bool> CompCheck_ShowDebugWindow;
         public ConfigEntry<float> CompCheck_UpdateInterval;
         public ConfigEntry<string> CompCheck_PlayerId;
+        public ConfigEntry<float> CompCheck_CompliancePanelX;
+        public ConfigEntry<float> CompCheck_CompliancePanelY;
+        public ConfigEntry<bool> CompCheck_MelonLoaderChatEnabled;
 
         // ==========================================
         // MATCHMAKING ASSISTANT CONFIG
         // ==========================================
         public ConfigEntry<bool> MM_ShowSystemLogs;
-        public ConfigEntry<bool> MM_EnableEmulation;
         public ConfigEntry<bool> MM_ShowFlowDebug;
 
         // ==========================================
@@ -128,6 +129,9 @@ namespace SBGL.UnifiedMod.Core
 
         void Awake()
         {
+            // Initialize MelonLoader detection bridge (runs before everything else)
+            MelonLoaderBridge.Initialize();
+            
             // Set singleton instance
             Instance = this;
             
@@ -141,16 +145,20 @@ namespace SBGL.UnifiedMod.Core
             CompCheck_Alpha = Config.Bind("CompetitiveCheck.UI Appearance", "Opacity", 0.85f, 
                 new ConfigDescription("Panel transparency", new AcceptableValueRange<float>(0f, 1f)));
             CompCheck_ShowModList = Config.Bind("CompetitiveCheck.UI Appearance", "Show My Mods", false, "Display local mod list");
-            CompCheck_ShowLobbyMods = Config.Bind("CompetitiveCheck.UI Appearance", "Show Lobby Mods", true, "Display remote mod lists");
             CompCheck_ShowDebugWindow = Config.Bind("CompetitiveCheck.UI Appearance", "Show Debug Window", false, "Display debug information");
             CompCheck_UpdateInterval = Config.Bind("CompetitiveCheck.Logic", "Update Interval", 5f, 
                 new ConfigDescription("Update frequency in minutes", new AcceptableValueRange<float>(1f, 60f)));
             CompCheck_PlayerId = Config.Bind("CompetitiveCheck.League", "Player ID", "PASTE_ID_HERE", "Your SBGL player ID");
             Logger.LogInfo($"[Init] CompCheck_PlayerId initialized: '{CompCheck_PlayerId.Value}'");
+            CompCheck_CompliancePanelX = Config.Bind("CompetitiveCheck.Debug Panel", "Compliance Panel X", 0f, 
+                new ConfigDescription("Compliance debug panel X position (0 = auto)", new AcceptableValueRange<float>(0f, 4000f)));
+            CompCheck_CompliancePanelY = Config.Bind("CompetitiveCheck.Debug Panel", "Compliance Panel Y", 0f, 
+                new ConfigDescription("Compliance debug panel Y position (0 = auto)", new AcceptableValueRange<float>(0f, 4000f)));
+            CompCheck_MelonLoaderChatEnabled = Config.Bind("CompetitiveCheck.Notifications", "Announce MelonLoader In Chat", false,
+                "When enabled, broadcasts a chat message in SBGL lobbies when MelonLoader is detected on your client.");
 
             // === MATCHMAKING ASSISTANT CONFIG ===
             MM_ShowSystemLogs = Config.Bind("Matchmaking.UI Settings", "Show System Logs", true, "Display system event logs");
-            MM_EnableEmulation = Config.Bind("Matchmaking.Debug", "Enable Emulation", true, "Show manual host emulation button");
             MM_ShowFlowDebug = Config.Bind("Matchmaking.UI Settings", "Show Flow Debug", false, "Display flow diagnostics");
 
             // === RULESET DISPLAY CONFIG ===
@@ -533,14 +541,16 @@ namespace SBGL.UnifiedMod.Core
             UnityEngine.Object.DontDestroyOnLoad(compCheckObj);
             CompetitivePluginCheck compCheck = compCheckObj.AddComponent<CompetitivePluginCheck>();
             compCheck.SetConfig(CompCheck_X, CompCheck_Y, CompCheck_Width, CompCheck_Alpha, 
-                CompCheck_ShowModList, CompCheck_ShowLobbyMods, CompCheck_ShowDebugWindow, 
-                CompCheck_UpdateInterval, CompCheck_PlayerId);
+                CompCheck_ShowModList, CompCheck_ShowDebugWindow, 
+                CompCheck_UpdateInterval, CompCheck_PlayerId,
+                CompCheck_CompliancePanelX, CompCheck_CompliancePanelY,
+                CompCheck_MelonLoaderChatEnabled);
             
             // Initialize Matchmaking Assistant as a managed component
             GameObject matchmakingObj = new GameObject("SBGL-MatchmakingAssistant");
             UnityEngine.Object.DontDestroyOnLoad(matchmakingObj);
             SBGLPlugin matchmaking = matchmakingObj.AddComponent<SBGLPlugin>();
-            matchmaking.SetConfig(MM_ShowSystemLogs, MM_EnableEmulation, MM_ShowFlowDebug, Logger);
+            matchmaking.SetConfig(MM_ShowSystemLogs, MM_ShowFlowDebug, Logger);
             
             // Initialize RuleSet Display Manager as a managed component
             GameObject ruleSetObj = new GameObject("SBGL-RuleSetDisplayManager");
@@ -659,14 +669,14 @@ namespace SBGL.UnifiedMod.Core
             PlayerPrefs.SetFloat("CompCheck_Width", CompCheck_Width.Value);
             PlayerPrefs.SetFloat("CompCheck_Alpha", CompCheck_Alpha.Value);
             PlayerPrefs.SetInt("CompCheck_ShowModList", CompCheck_ShowModList.Value ? 1 : 0);
-            PlayerPrefs.SetInt("CompCheck_ShowLobbyMods", CompCheck_ShowLobbyMods.Value ? 1 : 0);
             PlayerPrefs.SetInt("CompCheck_ShowDebugWindow", CompCheck_ShowDebugWindow.Value ? 1 : 0);
             PlayerPrefs.SetFloat("CompCheck_UpdateInterval", CompCheck_UpdateInterval.Value);
             PlayerPrefs.SetString("CompCheck_PlayerId", CompCheck_PlayerId.Value);
-
+            PlayerPrefs.SetFloat("CompCheck_ComplianceX", CompCheck_CompliancePanelX.Value);
+            PlayerPrefs.SetFloat("CompCheck_ComplianceY", CompCheck_CompliancePanelY.Value);
             // === MATCHMAKING CONFIG SYNC ===
+
             PlayerPrefs.SetInt("MM_ShowSystemLogs", MM_ShowSystemLogs.Value ? 1 : 0);
-            PlayerPrefs.SetInt("MM_EnableEmulation", MM_EnableEmulation.Value ? 1 : 0);
 
             // === LEADERBOARD CONFIG SYNC ===
             PlayerPrefs.SetFloat("LL_Width", LL_Width.Value);

@@ -7,6 +7,7 @@ namespace SBGL.UnifiedMod.Core
         public const int SEASON = 1;
         public const string SEASON_ID = "season_1";
         public const string MATCH_TYPE_RANKED = "ranked_season_1";
+        public const string MATCH_TYPE_PRO_SERIES = "pro_series_season_1";
 
         /// <summary>
         /// Items banned in Season 1 — kept for reference; weights are set to 0f in GetItemSpawnWeights().
@@ -118,6 +119,20 @@ namespace SBGL.UnifiedMod.Core
             return w;
         }
 
+        /// <summary>
+        /// Pro Series rule overrides applied on top of the game's default preset.
+        /// Only contains rules that differ from game defaults.
+        /// Item weights are NOT included — the game default preset handles those.
+        /// </summary>
+        public static Dictionary<MatchSetupRules.Rule, float> GetProSeriesRulesSettings()
+        {
+            return new Dictionary<MatchSetupRules.Rule, float>
+            {
+                { MatchSetupRules.Rule.Wind,     1f }, // Low — enabled
+                { MatchSetupRules.Rule.Comeback, 0f }, // Disabled
+            };
+        }
+
         public static Dictionary<MatchSetupRules.Rule, float> GetRulesSettings()
         {
             return new Dictionary<MatchSetupRules.Rule, float>
@@ -142,7 +157,7 @@ namespace SBGL.UnifiedMod.Core
                 { MatchSetupRules.Rule.KnockoutSpeedBoost,       1f },
                 { MatchSetupRules.Rule.RepeatRecoveryProtection, 1f },
                 { MatchSetupRules.Rule.DominationProtection,     1f },
-                { MatchSetupRules.Rule.WhiteFlag,                1f },
+                { MatchSetupRules.Rule.WhiteFlag,                0f },
             };
         }
     }

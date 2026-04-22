@@ -37,13 +37,41 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
     {
         // Config entry references (injected by UnifiedPlugin)
         private ConfigEntry<float> _configX, _configY, _configWidth, _configAlpha, _configUpdateInterval;
-        private ConfigEntry<bool> _configShowModList, _configShowLobbyMods, _configShowDebugWindow;
+        private ConfigEntry<float> _configCompliancePanelX, _configCompliancePanelY;
+        private ConfigEntry<bool> _configShowModList, _configShowDebugWindow;
+        private ConfigEntry<bool> _configMelonLoaderChatEnabled;
         private ConfigEntry<string> _configPlayerId;
         private const string ALLOWED_MODS_URL = "https://gist.githubusercontent.com/Kingcox22/32b1bcf1bdbec4ec47d086fec70628c1/raw/allowed_mods.txt";
 
         // --- NETWORKING CONSTANTS ---
         private const int SBGL_NET_CHANNEL = 2622;
         private Dictionary<ulong, string> _remotePlayerMods = new Dictionary<ulong, string>();
+        private Dictionary<ulong, string> _playerDisplayNames = new Dictionary<ulong, string>();
+        
+        // --- PLAYER COMPLIANCE TRACKING ---
+        private class PlayerComplianceStatus
+        {
+            public ulong SteamId { get; set; }
+            public bool HasReportedMods { get; set; }
+            public bool IsCompliant { get; set; } // Has ⚡SBGL.UnifiedMod
+            public bool HasMelonLoader { get; set; }
+            public string ModList { get; set; }
+            public float FirstSeenTime { get; set; }
+        }
+        private Dictionary<ulong, PlayerComplianceStatus> _playerComplianceStatus = new Dictionary<ulong, PlayerComplianceStatus>();
+        private HashSet<ulong> _playersNotifiedAbout = new HashSet<ulong>(); // Track players we've already notified
+        private HashSet<ulong> _knownPeers = new HashSet<ulong>(); // All peers we've discovered (from P2P or Mirror)
+        private Dictionary<ulong, float> _playerFirstSeenTime = new Dictionary<ulong, float>(); // When we first saw each player in lobby
+        private const float COMPLIANCE_TIMEOUT = 15f; // Mark as non-compliant if no report received after 15 seconds
+        private bool _hasLoggedDiscoveryInfo = false; // Only log discovery info once per scene
+        private string _lastDiscoveryScene = ""; // Track the last scene where we discovered players
+        private float _lastMelonLoaderAnnouncementTime = -100f; // Track when we last announced MelonLoader (init to far past)
+        // Lobby name captured in real-time by Harmony patch on BNetworkManager.set_LobbyName
+        internal static string _currentLobbyName = "";
+        private int _lastPlayerCosmeticsCount = 0; // Track count of PlayerCosmetics to detect when players join/leave
+        private Rect _compliancePanelRect;
+        private bool _compliancePanelRectInit = false;
+        private GUIStyle _compWindowStyle;
 
 #pragma warning disable CS0649, CS0169
         private GameObject _canvasObj, _profilePicContainer, _bgObj, _warnContainer, _debugWindowObj;
@@ -55,6 +83,8 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
 
         private Dictionary<string, string> _allowedModsMap = new Dictionary<string, string>();
         private List<string> _missingModNames = new List<string>();
+        private Steamworks.Data.Lobby _currentLobby;
+        private bool _inLobby = false;
         public List<ProSeriesEvent> _upcomingEvents = new List<ProSeriesEvent>();
         public List<MatchEntry> _recentMatches = new List<MatchEntry>();
 
@@ -72,25 +102,123 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         private float ConfigY { get => _configY?.Value ?? PlayerPrefs.GetFloat("CompCheck_Y", 100f); }
         private float ConfigWidth { get => _configWidth?.Value ?? PlayerPrefs.GetFloat("CompCheck_Width", 200f); }
         private float ConfigAlpha { get => _configAlpha?.Value ?? PlayerPrefs.GetFloat("CompCheck_Alpha", 0.85f); }
+        private float ConfigCompliancePanelX { get => _configCompliancePanelX?.Value ?? PlayerPrefs.GetFloat("CompCheck_ComplianceX", Screen.width - 420f); set { if (_configCompliancePanelX != null) _configCompliancePanelX.Value = value; } }
+        private float ConfigCompliancePanelY { get => _configCompliancePanelY?.Value ?? PlayerPrefs.GetFloat("CompCheck_ComplianceY", Screen.height - 350f); set { if (_configCompliancePanelY != null) _configCompliancePanelY.Value = value; } }
         private bool ConfigShowModList { get => _configShowModList?.Value ?? (PlayerPrefs.GetInt("CompCheck_ShowModList", 0) == 1); set { if (_configShowModList != null) _configShowModList.Value = value; } }
-        private bool ConfigShowLobbyMods { get => _configShowLobbyMods?.Value ?? (PlayerPrefs.GetInt("CompCheck_ShowLobbyMods", 1) == 1); }
         private bool ConfigShowDebugWindow { get => _configShowDebugWindow?.Value ?? (PlayerPrefs.GetInt("CompCheck_ShowDebugWindow", 0) == 1); set { if (_configShowDebugWindow != null) _configShowDebugWindow.Value = value; } }
         internal string ConfigPlayerId { get => _configPlayerId?.Value ?? PlayerPrefs.GetString("CompCheck_PlayerId", "PASTE_ID_HERE"); set { if (_configPlayerId != null) _configPlayerId.Value = value; } }
+        private bool ConfigMelonLoaderChatEnabled { get => _configMelonLoaderChatEnabled?.Value ?? false; }
 
         // Set config entries from parent plugin
         public void SetConfig(ConfigEntry<float> x, ConfigEntry<float> y, ConfigEntry<float> width, ConfigEntry<float> alpha,
-            ConfigEntry<bool> showModList, ConfigEntry<bool> showLobbyMods, ConfigEntry<bool> showDebugWindow,
-            ConfigEntry<float> updateInterval, ConfigEntry<string> playerId)
+            ConfigEntry<bool> showModList, ConfigEntry<bool> showDebugWindow,
+            ConfigEntry<float> updateInterval, ConfigEntry<string> playerId,
+            ConfigEntry<float> compliancePanelX = null, ConfigEntry<float> compliancePanelY = null,
+            ConfigEntry<bool> melonLoaderChatEnabled = null)
         {
             _configX = x;
             _configY = y;
             _configWidth = width;
             _configAlpha = alpha;
             _configShowModList = showModList;
-            _configShowLobbyMods = showLobbyMods;
             _configShowDebugWindow = showDebugWindow;
             _configUpdateInterval = updateInterval;
             _configPlayerId = playerId;
+            _configCompliancePanelX = compliancePanelX;
+            _configCompliancePanelY = compliancePanelY;
+            _configMelonLoaderChatEnabled = melonLoaderChatEnabled;
+        }
+
+        void OnEnable()
+        {
+            try { Steamworks.SteamMatchmaking.OnLobbyEntered += OnLobbyEntered; } catch { }
+            try { Steamworks.SteamMatchmaking.OnLobbyMemberJoined += OnLobbyMemberJoined; } catch { }
+            try { Steamworks.SteamMatchmaking.OnLobbyMemberLeave += OnLobbyMemberLeave; } catch { }
+            try { Steamworks.SteamNetworking.OnP2PSessionRequest += OnP2PSessionRequest; } catch { }
+        }
+
+        void OnDisable()
+        {
+            try { Steamworks.SteamMatchmaking.OnLobbyEntered -= OnLobbyEntered; } catch { }
+            try { Steamworks.SteamMatchmaking.OnLobbyMemberJoined -= OnLobbyMemberJoined; } catch { }
+            try { Steamworks.SteamMatchmaking.OnLobbyMemberLeave -= OnLobbyMemberLeave; } catch { }
+            try { Steamworks.SteamNetworking.OnP2PSessionRequest -= OnP2PSessionRequest; } catch { }
+        }
+
+        private void OnP2PSessionRequest(Steamworks.SteamId remoteId)
+        {
+            // Auto-accept from anyone in our current lobby
+            if (_inLobby && _currentLobby.Members.Any(m => m.Id == remoteId))
+            {
+                Steamworks.SteamNetworking.AcceptP2PSessionWithUser(remoteId);
+                if (!_playerDisplayNames.ContainsKey(remoteId.Value))
+                {
+                    // Record display name from lobby member list
+                    foreach (var member in _currentLobby.Members)
+                    {
+                        if (member.Id == remoteId)
+                        {
+                            _playerDisplayNames[remoteId.Value] = member.Name;
+                            break;
+                        }
+                    }
+                }
+                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] ✓ Accepted P2P session request from {remoteId.Value}");
+            }
+        }
+
+        private void OnLobbyEntered(Steamworks.Data.Lobby lobby)
+        {
+            _currentLobby = lobby;
+            _inLobby = true;
+            float now = Time.time;
+            UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] ✓ OnLobbyEntered: {lobby.Id.Value}, member count: {lobby.MemberCount}");
+            foreach (var member in lobby.Members)
+            {
+                if (member.Id.Value == (ulong)Steamworks.SteamClient.SteamId) continue;
+                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] ✓ Lobby member: {member.Name} ({member.Id.Value})");
+                _playerDisplayNames[member.Id.Value] = member.Name;
+                AddPlayerToTracking(member.Id.Value, now);
+            }
+        }
+
+        private void OnLobbyMemberJoined(Steamworks.Data.Lobby lobby, Steamworks.Friend friend)
+        {
+            if (friend.Id.Value == (ulong)Steamworks.SteamClient.SteamId) return;
+            float now = Time.time;
+            UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] ✓ Lobby member joined: {friend.Name} ({friend.Id.Value})");
+            _playerDisplayNames[friend.Id.Value] = friend.Name;
+            AddPlayerToTracking(friend.Id.Value, now);
+        }
+
+        private void OnLobbyMemberLeave(Steamworks.Data.Lobby lobby, Steamworks.Friend friend)
+        {
+            ulong id = friend.Id.Value;
+            if (id == (ulong)Steamworks.SteamClient.SteamId)
+            {
+                // We left — clear all lobby state
+                _inLobby = false;
+                _playerComplianceStatus.Clear();
+                _playerFirstSeenTime.Clear();
+                _knownPeers.Clear();
+                _playersNotifiedAbout.Clear();
+                _playerDisplayNames.Clear();
+                _remotePlayerMods.Clear();
+                _hasLoggedDiscoveryInfo = false;
+                PlayerPrefs.SetString("LobbyName", ""); // prevent stale name from triggering chat spam
+                UnityEngine.Debug.Log("[SBGL-CompPluginCheck] Left lobby — cleared all player tracking");
+            }
+            else
+            {
+                // Another player left — remove them
+                _playerComplianceStatus.Remove(id);
+                _playerFirstSeenTime.Remove(id);
+                _knownPeers.Remove(id);
+                _playersNotifiedAbout.Remove(id);
+                _playerDisplayNames.Remove(id);
+                _remotePlayerMods.Remove(id);
+                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Player left lobby: {friend.Name} ({id}) — removed from tracking");
+            }
         }
 
         void Awake()
@@ -102,9 +230,15 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             if (!PlayerPrefs.HasKey("CompCheck_Alpha")) PlayerPrefs.SetFloat("CompCheck_Alpha", 0.85f);
             if (!PlayerPrefs.HasKey("CompCheck_UpdateInterval")) PlayerPrefs.SetFloat("CompCheck_UpdateInterval", 5f);
             if (!PlayerPrefs.HasKey("CompCheck_ShowModList")) PlayerPrefs.SetInt("CompCheck_ShowModList", 0);
-            if (!PlayerPrefs.HasKey("CompCheck_ShowLobbyMods")) PlayerPrefs.SetInt("CompCheck_ShowLobbyMods", 1);
             if (!PlayerPrefs.HasKey("CompCheck_ShowDebugWindow")) PlayerPrefs.SetInt("CompCheck_ShowDebugWindow", 0);
             if (!PlayerPrefs.HasKey("CompCheck_PlayerId")) PlayerPrefs.SetString("CompCheck_PlayerId", "PASTE_ID_HERE");
+            
+            // Startup check for MelonLoader (runs once at initialization)
+            if (HasMelonLoaderLoaded())
+            {
+                UnityEngine.Debug.LogError("[SBGL-CompPluginCheck] ⚠️⚠️⚠️ STARTUP DETECTION: MELONLOADER IS LOADED ⚠️⚠️⚠️");
+                // Will be announced every 10 seconds in Update() loop
+            }
             
             // Subscribe to API configuration changes
             UnifiedPlugin.ApiConfigChanged += OnApiConfigChanged;
@@ -158,40 +292,602 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             }
 
             // --- NETWORKING LOGIC IN UPDATE ---
+            // Check if player count has changed - if so, discover immediately (don't wait for 5-second timer)
+            int currentPlayerCount = 0;
+            try
+            {
+                currentPlayerCount = UnityEngine.Object.FindObjectsByType<PlayerCosmetics>(UnityEngine.FindObjectsSortMode.None).Length;
+            }
+            catch { }
+            
+            if (currentPlayerCount != _lastPlayerCosmeticsCount)
+            {
+                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] PlayerCosmetics count changed: {_lastPlayerCosmeticsCount} → {currentPlayerCount}, triggering immediate discovery");
+                _lastPlayerCosmeticsCount = currentPlayerCount;
+                _hasLoggedDiscoveryInfo = false; // Reset flag to allow fresh logging for new players
+                DiscoverLobbyPlayers();
+            }
+            
+            // Periodically discover all lobby players (fallback in case count doesn't change)
+            if (Time.frameCount % 300 == 0) // Every 5 seconds
+            {
+                DiscoverLobbyPlayers();
+            }
+            
+            // Announce MelonLoader presence every 10 seconds if detected, but only in SBGL- lobbies
+            if (HasMelonLoaderLoaded() && _inLobby)
+            {
+                float timeSinceLastAnnouncement = Time.time - _lastMelonLoaderAnnouncementTime;
+                if (timeSinceLastAnnouncement >= 10f)
+                {
+                    AnnounceOwnMelonLoaderToChat();
+                    _lastMelonLoaderAnnouncementTime = Time.time;
+                }
+            }
+            
+            // Accept P2P sessions from all peers we're trying to communicate with
+            AcceptIncomingP2PSessions();
+            
             ListenForModReports();
-            if (Time.frameCount % 600 == 0) BroadcastMyMods(); // Broadcast roughly every 10 seconds
+            if (Time.frameCount % 600 == 0)
+            {
+                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Frame {Time.frameCount}: Triggering BroadcastMyMods()");
+                BroadcastMyMods(); // Broadcast roughly every 10 seconds
+            }
+        }
+
+        void OnGUI()
+        {
+            if (!ConfigShowDebugWindow) return;
+            if (!SceneManager.GetActiveScene().name.ToLower().Contains("driving range")) return;
+            
+            // Draw player compliance debug panel
+            DrawPlayerComplianceDebugUI();
+        }
+
+        private void DrawPlayerComplianceDebugUI()
+        {
+            if (_compWindowStyle == null)
+            {
+                _compWindowStyle = new GUIStyle(GUI.skin.box)
+                {
+                    padding = new RectOffset(12, 12, 12, 12)
+                };
+            }
+
+            if (!_compliancePanelRectInit)
+            {
+                float startX = ConfigCompliancePanelX > 0 ? ConfigCompliancePanelX : Screen.width - 480f;
+                float startY = ConfigCompliancePanelY > 0 ? ConfigCompliancePanelY : Screen.height - 350f;
+                _compliancePanelRect = new Rect(startX, startY, 10, 10);
+                _compliancePanelRectInit = true;
+            }
+
+            GUI.backgroundColor = new Color(0.07f, 0.07f, 0.07f, 0.95f);
+            _compliancePanelRect = GUILayout.Window(42424, _compliancePanelRect, DrawComplianceWindowContent, "",
+                _compWindowStyle, GUILayout.MinWidth(300f), GUILayout.MaxWidth(500f), GUILayout.MaxHeight(Screen.height - 40f));
+            GUI.backgroundColor = Color.white;
+        }
+
+        private void DrawComplianceWindowContent(int windowId)
+        {
+            var titleStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 15, fontStyle = FontStyle.Bold,
+                normal = { textColor = Color.white }
+            };
+            var summaryStyle = new GUIStyle(GUI.skin.label) { richText = true, fontSize = 12, normal = { textColor = Color.white } };
+            var nameStyle = new GUIStyle(GUI.skin.label)
+            {
+                richText = true, fontSize = 13, fontStyle = FontStyle.Bold,
+                normal = { textColor = Color.white }
+            };
+            var modStyle = new GUIStyle(GUI.skin.label)
+            {
+                richText = true, fontSize = 11,
+                normal = { textColor = Color.white }
+            };
+
+            GUILayout.Label("PLAYER COMPLIANCE", titleStyle);
+            GUILayout.Space(4);
+
+            int total     = _playerComplianceStatus.Count;
+            int compliant = _playerComplianceStatus.Values.Count(s => s.IsCompliant && s.HasReportedMods && !s.HasMelonLoader);
+            int flagged   = _playerComplianceStatus.Values.Count(s => s.HasReportedMods && (!s.IsCompliant || s.HasMelonLoader));
+            int pending   = _playerComplianceStatus.Values.Count(s => !s.HasReportedMods);
+            GUILayout.Label(
+                $"<color=white>Players: <b>{total}</b></color>    <color=lime>✓ {compliant}</color>    <color=red>✗ {flagged}</color>    <color=yellow>? {pending}</color>",
+                summaryStyle
+            );
+
+            GUILayout.Space(6);
+
+            if (_playerComplianceStatus.Count == 0)
+            {
+                GUILayout.Label("Waiting for players...",
+                    new GUIStyle(GUI.skin.label) { fontSize = 12, normal = { textColor = new Color(0.6f, 0.6f, 0.6f) } });
+            }
+            else
+            {
+                var allowedNames = new HashSet<string>(_allowedModsMap.Values.Select(v => v.ToLowerInvariant()));
+
+                foreach (var kvp in _playerComplianceStatus)
+                {
+                    var status = kvp.Value;
+                    string icon, color;
+
+                    if (!status.HasReportedMods)    { icon = "?"; color = "yellow"; }
+                    else if (status.HasMelonLoader) { icon = "⚠"; color = "orange"; }
+                    else if (status.IsCompliant)    { icon = "✓"; color = "lime"; }
+                    else                            { icon = "✗"; color = "red"; }
+
+                    string displayName = _playerDisplayNames.TryGetValue(status.SteamId, out string dn) ? dn : status.SteamId.ToString();
+                    GUILayout.Label($"<color={color}>[{icon}]</color>  {displayName}", nameStyle);
+
+                    if (status.HasMelonLoader)
+                        GUILayout.Label("      <color=orange>⚠ MelonLoader detected</color>", modStyle);
+
+                    if (_remotePlayerMods.TryGetValue(status.SteamId, out string modList))
+                    {
+                        foreach (var m in modList.Split(';'))
+                        {
+                            if (string.IsNullOrEmpty(m) || m.Contains("USER_HAS_MELONLOADER")) continue;
+                            string modName = m.Split('|')[0];
+                            bool isOurMod = modName.StartsWith("⚡");
+                            bool isAllowed = isOurMod || allowedNames.Contains(modName.ToLowerInvariant());
+                            string modColor = isAllowed ? "#AAFFAA" : "#FF4444";
+                            string modPrefix = isAllowed ? "✓" : "✗";
+                            GUILayout.Label($"      <color={modColor}>{modPrefix} {modName}</color>", modStyle);
+                        }
+                    }
+
+                    GUILayout.Space(5);
+                }
+            }
+
+            GUI.DragWindow();
         }
 
         // --- NEW P2P NETWORKING LOGIC ---
 
-        private void BroadcastMyMods()
+        private bool HasMelonLoaderLoaded()
+        {
+            // Use the shared bridge for consistent detection across all components
+            return MelonLoaderBridge.IsMelonLoaderLoaded;
+        }
+
+        private void DiscoverLobbyPlayers()
         {
             if (!SteamClient.IsValid) return;
+            
             try
             {
-                StringBuilder sb = new StringBuilder("SBGL_REPORT:");
-                foreach (var plugin in Chainloader.PluginInfos.Values)
+                var now = Time.time;
+                
+                // Check if we've changed scenes - if so, reset discovery flag and clear old players
+                string currentScene = SceneManager.GetActiveScene().name;
+                if (currentScene != _lastDiscoveryScene)
                 {
-                    if (plugin.Metadata.GUID.StartsWith("BepInEx") || plugin.Metadata.GUID.ToLower().Contains("compplugincheck")) continue;
-                    sb.Append($"{plugin.Metadata.Name}|{plugin.Metadata.Version};");
+                    _hasLoggedDiscoveryInfo = false;
+                    _lastDiscoveryScene = currentScene;
+                    _lastPlayerCosmeticsCount = 0; // Reset player count tracker for new scene
+                    
+                    // Clear old player tracking for new scene
+                    _playerComplianceStatus.Clear();
+                    _playerFirstSeenTime.Clear();
+                    _knownPeers.Clear();
+                    _playersNotifiedAbout.Clear();
+                    _playerDisplayNames.Clear();
+                    _remotePlayerMods.Clear();
+                    
+                    UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Scene changed to: {currentScene} - cleared player tracking and resetting discovery");
                 }
                 
-                // Add debug logging
-                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Broadcasting mods: {sb.ToString()}");
-
-                byte[] data = Encoding.UTF8.GetBytes(sb.ToString());
-
-                // Facepunch Steamworks API differs across builds; broadcast to peers we've already seen.
-                foreach (var peer in _remotePlayerMods.Keys.ToArray())
+                bool isFirstDiscovery = !_hasLoggedDiscoveryInfo;
+                
+                // Add ourselves to the tracking immediately with our mod list
+                // We know we have the mod since we're running it!
+                if (isFirstDiscovery && !_playerComplianceStatus.ContainsKey(SteamClient.SteamId))
                 {
-                    if (peer == SteamClient.SteamId) continue;
-                    UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Sending to peer {peer}: {sb.ToString()}");
-                    SteamNetworking.SendP2PPacket(peer, data, -1, SBGL_NET_CHANNEL, P2PSend.Reliable);
+                    bool selfHasMelon = HasMelonLoaderLoaded();
+                    _playerComplianceStatus[SteamClient.SteamId] = new PlayerComplianceStatus
+                    {
+                        SteamId = SteamClient.SteamId,
+                        FirstSeenTime = now,
+                        IsCompliant = true,
+                        HasReportedMods = true,
+                        HasMelonLoader = selfHasMelon,
+                        ModList = "⚡SBGL.UnifiedMod|1.0.0"
+                    };
+                    if (!_playerFirstSeenTime.ContainsKey(SteamClient.SteamId))
+                    {
+                        _playerFirstSeenTime[SteamClient.SteamId] = now;
+                    }
+                    UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] ✓ Added self ({SteamClient.SteamId}) to tracking as COMPLIANT (MelonLoader={selfHasMelon})");
+                    _playerDisplayNames[SteamClient.SteamId] = SteamClient.Name ?? "Me";
+                }
+                
+                // SIMPLE METHOD: Look for all PlayerCosmetics components in the scene
+                // These represent all players currently in the game
+                PlayerCosmetics[] allCosmeticComponents = new PlayerCosmetics[0];
+                try
+                {
+                    allCosmeticComponents = UnityEngine.Object.FindObjectsByType<PlayerCosmetics>(UnityEngine.FindObjectsSortMode.None);
+                    
+                    if (isFirstDiscovery)
+                    {
+                        UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] 🔍 Scene discovery: Found {allCosmeticComponents.Length} PlayerCosmetics components");
+                    }
+                    
+                    foreach (var cosmetics in allCosmeticComponents)
+                    {
+                        try
+                        {
+                            var playerObj = cosmetics.gameObject;
+                            string objName = playerObj.name;
+                            
+                            if (isFirstDiscovery)
+                            {
+                                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck]   → PlayerCosmetics object: '{objName}'");
+                            }
+                            
+                            // Try to get Steam ID from the NetworkIdentity's owner
+                            var netIdentity = playerObj.GetComponent<Mirror.NetworkIdentity>();
+                            if (netIdentity != null)
+                            {
+                                if (isFirstDiscovery)
+                                {
+                                    UnityEngine.Debug.Log($"[SBGL-CompPluginCheck]     → Has NetworkIdentity, checking for owner info");
+                                }
+                                
+                                // Try to get the owner's Steam ID from the connectionToServer or connectionToClient
+                                ulong extractedSteamId = 0;
+                                bool foundSteamId = false;
+                                
+                                // Attempt 1: Check if connection has a connectionToClient (server-side)
+                                try
+                                {
+                                    var connToClientProp = typeof(Mirror.NetworkIdentity).GetProperty("connectionToClient", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                                    if (connToClientProp != null)
+                                    {
+                                        var connToClient = connToClientProp.GetValue(netIdentity);
+                                        if (connToClient != null && isFirstDiscovery)
+                                        {
+                                            UnityEngine.Debug.Log($"[SBGL-CompPluginCheck]       → Has connectionToClient: {connToClient.GetType().Name}");
+                                            
+                                            // Try to extract Steam ID from connection
+                                            var connType = connToClient.GetType();
+                                            var authProp = connType.GetProperty("authenticationData", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                                            if (authProp != null)
+                                            {
+                                                var authData = authProp.GetValue(connToClient);
+                                                if (authData != null)
+                                                {
+                                                    UnityEngine.Debug.Log($"[SBGL-CompPluginCheck]       → Auth data: {authData}");
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                catch { }
+                                
+                                // Attempt 2: Try parsing the object name as Steam ID
+                                if (ulong.TryParse(objName, out ulong steamId))
+                                {
+                                    extractedSteamId = steamId;
+                                    foundSteamId = true;
+                                    if (isFirstDiscovery)
+                                    {
+                                        UnityEngine.Debug.Log($"[SBGL-CompPluginCheck]     ✓ Extracted Steam ID from name: {steamId}");
+                                    }
+                                }
+                                
+                                if (foundSteamId)
+                                {
+                                    // Successfully extracted Steam ID
+                                    if (extractedSteamId == SteamClient.SteamId)
+                                    {
+                                        if (isFirstDiscovery)
+                                        {
+                                            UnityEngine.Debug.Log($"[SBGL-CompPluginCheck]     ✓ Skipping self ({extractedSteamId})");
+                                        }
+                                        continue;
+                                    }
+                                    
+                                    if (isFirstDiscovery)
+                                    {
+                                        UnityEngine.Debug.Log($"[SBGL-CompPluginCheck]     ✓ Discovered player: {extractedSteamId}");
+                                    }
+                                    
+                                    AddPlayerToTracking(extractedSteamId, now);
+                                }
+                                else
+                                {
+                                    // Name is not a Steam ID
+                                    if (isFirstDiscovery)
+                                    {
+                                        UnityEngine.Debug.Log($"[SBGL-CompPluginCheck]     ⚠️ PlayerCosmetics '{objName}' has no Steam ID in name. Logging details...");
+                                        
+                                        // Log all properties we can find
+                                        var niType = netIdentity.GetType();
+                                        var ownerIdProp = niType.GetProperty("ownerId", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                                        if (ownerIdProp != null)
+                                        {
+                                            var ownerId = ownerIdProp.GetValue(netIdentity);
+                                            UnityEngine.Debug.Log($"[SBGL-CompPluginCheck]       → ownerId: {ownerId}");
+                                        }
+                                        
+                                        var netIdProp = niType.GetProperty("netId", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                                        if (netIdProp != null)
+                                        {
+                                            var netId = netIdProp.GetValue(netIdentity);
+                                            UnityEngine.Debug.Log($"[SBGL-CompPluginCheck]       → netId: {netId}");
+                                        }
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                if (isFirstDiscovery)
+                                {
+                                    UnityEngine.Debug.Log($"[SBGL-CompPluginCheck]     ⚠️ PlayerCosmetics has no NetworkIdentity");
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            if (isFirstDiscovery)
+                            {
+                                UnityEngine.Debug.LogError($"[SBGL-CompPluginCheck] Error processing PlayerCosmetics: {ex.Message}");
+                            }
+                        }
+                    }
+                    
+                    if (isFirstDiscovery)
+                    {
+                        UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] ✓ Discovery complete: {_playerComplianceStatus.Count} players added to tracking");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (isFirstDiscovery)
+                    {
+                        UnityEngine.Debug.LogError($"[SBGL-CompPluginCheck] Error in PlayerCosmetics discovery: {ex.Message}");
+                    }
+                }
+                
+                // FALLBACK: Refresh from the current Steam lobby if we have one
+                if (_inLobby)
+                {
+                    try
+                    {
+                        foreach (var member in _currentLobby.Members)
+                        {
+                            if (member.Id.Value == 0) continue; // skip invalid/stale entries
+                            if (member.Id.Value == (ulong)Steamworks.SteamClient.SteamId) continue;
+                            if (!_knownPeers.Contains(member.Id.Value))
+                            {
+                                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] ✓ Lobby refresh found new peer: {member.Name} ({member.Id.Value})");
+                                AddPlayerToTracking(member.Id.Value, now);
+                            }
+                            // Always refresh display name — it gets cleared on scene change
+                            if (!string.IsNullOrEmpty(member.Name))
+                                _playerDisplayNames[member.Id.Value] = member.Name;
+                        }
+                    }
+                    catch (Exception lobbyEx)
+                    {
+                        if (isFirstDiscovery)
+                        {
+                            UnityEngine.Debug.LogWarning($"[SBGL-CompPluginCheck] Lobby member refresh error: {lobbyEx.Message}");
+                        }
+                    }
+                }
+                else if (isFirstDiscovery)
+                {
+                    UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] ⚠️ Not in a tracked lobby yet - OnLobbyEntered has not fired");
+                }
+                
+                _hasLoggedDiscoveryInfo = true;
+                
+                // Mark players as having timed out if they haven't reported mods
+                var playersToMarkNonCompliant = new List<ulong>();
+                
+                foreach (var kvp in _playerComplianceStatus)
+                {
+                    var steamId = kvp.Key;
+                    var status = kvp.Value;
+                    
+                    // Skip if they already reported
+                    if (status.HasReportedMods) continue;
+                    
+                    // Check if enough time has passed since we first saw them
+                    if (_playerFirstSeenTime.TryGetValue(steamId, out float firstSeenTime))
+                    {
+                        if (now - firstSeenTime >= COMPLIANCE_TIMEOUT)
+                        {
+                            playersToMarkNonCompliant.Add(steamId);
+                        }
+                    }
+                }
+                
+                // Mark timed-out players as non-compliant (missing mod)
+                foreach (var steamId in playersToMarkNonCompliant)
+                {
+                    var status = _playerComplianceStatus[steamId];
+                    if (!status.HasReportedMods)
+                    {
+                        UnityEngine.Debug.LogWarning($"[SBGL-CompPluginCheck] Player {steamId} timed out without reporting mods - marking as non-compliant");
+                        status.IsCompliant = false; // They don't have the mod
+                        status.ModList = "(No report received)";
+                        SendComplianceNotification(steamId, status);
+                        UpdateUIReport();
+                    }
                 }
             }
             catch (Exception ex)
             {
-                UnityEngine.Debug.LogError($"[SBGL-CompPluginCheck] Error in BroadcastMyMods: {ex.Message}");
+                UnityEngine.Debug.LogError($"[SBGL-CompPluginCheck] Fatal error in DiscoverLobbyPlayers: {ex.Message}\n{ex.StackTrace}");
+            }
+        }
+        
+        private void AddPlayerToTracking(ulong steamId, float now)
+        {
+            // Add player to tracking if not already there
+            if (!_playerComplianceStatus.ContainsKey(steamId))
+            {
+                _playerComplianceStatus[steamId] = new PlayerComplianceStatus 
+                { 
+                    SteamId = steamId,
+                    FirstSeenTime = now,
+                    IsCompliant = false, // Assume non-compliant until they report
+                    HasReportedMods = false
+                };
+                
+                if (!_playerFirstSeenTime.ContainsKey(steamId))
+                {
+                    _playerFirstSeenTime[steamId] = now;
+                }
+                
+                _knownPeers.Add(steamId);
+                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Added player {steamId} to tracking (knownPeers={_knownPeers.Count})");
+                UpdateUIReport();
+            }
+        }
+
+        private void AcceptIncomingP2PSessions()
+        {
+            if (!SteamClient.IsValid) return;
+            
+            try
+            {
+                // Accept P2P sessions from all discovered peers
+                foreach (var peerId in _playerComplianceStatus.Keys.ToList())
+                {
+                    if (peerId != SteamClient.SteamId)
+                    {
+                        try
+                        {
+                            SteamNetworking.AcceptP2PSessionWithUser(peerId);
+                        }
+                        catch { }
+                    }
+                }
+                
+                // Also accept from peers we've heard from via P2P
+                foreach (var peerId in _knownPeers.ToList())
+                {
+                    if (peerId != SteamClient.SteamId)
+                    {
+                        try
+                        {
+                            SteamNetworking.AcceptP2PSessionWithUser(peerId);
+                        }
+                        catch { }
+                    }
+                }
+                
+                // Log SteamClient state for diagnostics
+                if (Time.frameCount % 1200 == 0) // Every 20 seconds
+                {
+                    UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] SteamClient.IsValid={SteamClient.IsValid}, SteamClient.SteamId={SteamClient.SteamId}, Known Peers={_knownPeers.Count}, Tracked Players={_playerComplianceStatus.Count}");
+                }
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogWarning($"[SBGL-CompPluginCheck] Error in AcceptIncomingP2PSessions: {ex.Message}");
+            }
+        }
+
+        private void BroadcastMyMods()
+        {
+            if (!SteamClient.IsValid)
+            {
+                UnityEngine.Debug.Log("[SBGL-CompPluginCheck] BroadcastMyMods: SteamClient not valid");
+                return;
+            }
+            try
+            {
+                StringBuilder sb = new StringBuilder("SBGL_REPORT:");
+                
+                // Broadcast our own mod signature FIRST so others know we're compliant
+                sb.Append("⚡SBGL.UnifiedMod|1.0.0;");
+                
+                // Check for MelonLoader first
+                bool hasMelonLoader = HasMelonLoaderLoaded();
+                if (hasMelonLoader)
+                {
+                    sb.Append("⚠️USER_HAS_MELONLOADER;");
+                    UnityEngine.Debug.LogError("[SBGL-CompPluginCheck] ⚠️⚠️⚠️ MELONLOADER DETECTED - This player may be using unauthorized mod loader! ⚠️⚠️⚠️");
+                }
+                
+                foreach (var plugin in Chainloader.PluginInfos.Values)
+                {
+                    if (plugin.Metadata.GUID.StartsWith("BepInEx") || plugin.Metadata.GUID.ToLower().Contains("compplugincheck") || plugin.Metadata.GUID == "com.sbgl.unified") continue;
+                    sb.Append($"{plugin.Metadata.Name}|{plugin.Metadata.Version};");
+                }
+                
+                // Add debug logging
+                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Broadcasting mods (MelonLoader detected: {hasMelonLoader}): {sb.ToString()}");
+
+                // Store our own mod list locally so the UI can display it (same format as received reports)
+                // Keep the MelonLoader token so the UI renders the warning line
+                string selfModList = sb.ToString().Substring("SBGL_REPORT:".Length);
+                _remotePlayerMods[SteamClient.SteamId] = selfModList;
+                // Also keep compliance status in sync with current MelonLoader state
+                if (_playerComplianceStatus.TryGetValue(SteamClient.SteamId, out var selfStatus))
+                    selfStatus.HasMelonLoader = hasMelonLoader;
+                if (!_playerDisplayNames.ContainsKey(SteamClient.SteamId))
+                    _playerDisplayNames[SteamClient.SteamId] = SteamClient.Name ?? "Me";
+
+                byte[] data = Encoding.UTF8.GetBytes(sb.ToString());
+
+                // Collect all known peers
+                var peersToSend = new HashSet<ulong>(_knownPeers);
+                peersToSend.UnionWith(_remotePlayerMods.Keys);
+                
+                // Also add peers from active P2P connections
+                try
+                {
+                    var networkManager = UnityEngine.Object.FindFirstObjectByType<Mirror.NetworkManager>();
+                    if (networkManager != null && networkManager.isNetworkActive)
+                    {
+                        // Try to get Steam IDs from connections
+                        // This is context-dependent on the game's implementation
+                        UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Found active NetworkManager");
+                    }
+                }
+                catch { }
+                
+                // Remove self
+                peersToSend.Remove(SteamClient.SteamId);
+                
+                int peerCount = peersToSend.Count;
+                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Broadcasting to {peerCount} peers (from _knownPeers={_knownPeers.Count}, _remotePlayerMods={_remotePlayerMods.Count})");
+                
+                if (peerCount == 0)
+                {
+                    UnityEngine.Debug.LogWarning($"[SBGL-CompPluginCheck] No peers found to broadcast to. This is normal if other players don't have the SBGL mod installed.");
+                }
+                
+                // Send to all discovered peers
+                foreach (var peer in peersToSend)
+                {
+                    try
+                    {
+                        UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Sending to peer {peer}");
+                        bool success = SteamNetworking.SendP2PPacket(peer, data, -1, SBGL_NET_CHANNEL, P2PSend.Reliable);
+                        UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] SendP2PPacket to {peer} returned: {success}");
+                    }
+                    catch (Exception sendEx)
+                    {
+                        UnityEngine.Debug.LogWarning($"[SBGL-CompPluginCheck] Failed to send to peer {peer}: {sendEx.Message}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogError($"[SBGL-CompPluginCheck] Error in BroadcastMyMods: {ex.Message}\n{ex.StackTrace}");
             }
         }
 
@@ -210,9 +906,41 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                     string msg = Encoding.UTF8.GetString(buffer);
                     UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Received from peer {remoteId.Value}: {msg}");
                     
+                    // Add this peer to our known peers so we broadcast back to them
+                    _knownPeers.Add(remoteId.Value);
+                    
                     if (msg.StartsWith("SBGL_REPORT:"))
                     {
-                        _remotePlayerMods[remoteId.Value] = msg.Replace("SBGL_REPORT:", "");
+                        string modList = msg.Replace("SBGL_REPORT:", "");
+                        
+                        // Create/update compliance status for this player
+                        if (!_playerComplianceStatus.ContainsKey(remoteId.Value))
+                        {
+                            _playerComplianceStatus[remoteId.Value] = new PlayerComplianceStatus { FirstSeenTime = Time.time };
+                        }
+                        
+                        var status = _playerComplianceStatus[remoteId.Value];
+                        status.SteamId = remoteId.Value;
+                        status.HasReportedMods = true;
+                        status.ModList = modList;
+                        status.IsCompliant = modList.Contains("⚡SBGL.UnifiedMod");
+                        status.HasMelonLoader = modList.Contains("⚠️USER_HAS_MELONLOADER");
+                        
+                        // Check for MelonLoader alert in the mod list
+                        if (status.HasMelonLoader)
+                        {
+                            UnityEngine.Debug.LogError($"[SBGL-CompPluginCheck] ⚠️⚠️⚠️ ALERT: Player {remoteId.Value} HAS MELONLOADER INSTALLED ⚠️⚠️⚠️");
+                            modList = modList.Replace("⚠️USER_HAS_MELONLOADER;", "");
+                        }
+                        
+                        // Check if player is missing the SBGL mod
+                        if (!status.IsCompliant)
+                        {
+                            UnityEngine.Debug.LogError($"[SBGL-CompPluginCheck] ⚠️ MISSING MOD ALERT: Player {remoteId.Value} does NOT have SBGL.UnifiedMod installed! Their mod list: {modList}");
+                            SendComplianceNotification(remoteId.Value, status);
+                        }
+                        
+                        _remotePlayerMods[remoteId.Value] = modList;
                         UpdateUIReport();
                     }
                 }
@@ -220,6 +948,209 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         }
 
         // --- END NEW P2P NETWORKING LOGIC ---
+
+        private void SendComplianceNotification(ulong steamId, PlayerComplianceStatus status)
+        {
+            if (_playersNotifiedAbout.Contains(steamId)) return; // Already notified about this player
+            
+            _playersNotifiedAbout.Add(steamId);
+            
+            string message = $"[SBGL] ⚠️ Player {steamId} failed compliance check: {(status.HasMelonLoader ? "MelonLoader detected" : "Missing SBGL.UnifiedMod")}";
+            
+            // Log the notification
+            UnityEngine.Debug.LogWarning($"[SBGL-CompPluginCheck] NOTIFICATION: {message}");
+            
+            // Attempt to send via game chat API (using reflection)
+            try
+            {
+                // Try to find and use game chat system
+                var chatType = System.Type.GetType("GameAssembly+Chat, GameAssembly");
+                if (chatType != null)
+                {
+                    var sendMethod = chatType.GetMethod("SendChatMessage", 
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                    if (sendMethod != null)
+                    {
+                        sendMethod.Invoke(null, new object[] { message });
+                        UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Chat message sent via game API");
+                    }
+                }
+            }
+            catch (System.Exception ex)
+            {
+                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Chat API not available (this is OK): {ex.Message}");
+            }
+        }
+
+        private void AnnounceOwnMelonLoaderToChat()
+        {
+            UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] ✓ AnnounceOwnMelonLoaderToChat() called");
+            
+            // Only announce if the config option is enabled
+            if (!ConfigMelonLoaderChatEnabled)
+            {
+                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] MelonLoader chat announcement is disabled in config - skipping");
+                return;
+            }
+
+            // Only announce in SBGL-marked lobbies (lobby name starts with "SBGL-")
+            // Must be in an active lobby first
+            if (!_inLobby) return;
+
+            // Use the lobby name captured in real-time by the Harmony patch on BNetworkManager.set_LobbyName
+            string lobbyName = _currentLobbyName;
+
+            UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Lobby name check: '{lobbyName}'");
+            if (!lobbyName.StartsWith("SBGL-"))
+            {
+                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Lobby '{lobbyName}' is not an SBGL lobby - skipping announcement");
+                return;
+            }
+            
+            // Send chat announcement about our own MelonLoader installation
+            // This is sent EVERY 10 SECONDS - security concern overrides config preference
+            
+            // Get display name - try to get from shared player profile, fallback to Steam ID
+            string displayName = UnifiedPlugin.GetPlayerProfile()?.DisplayName;
+            if (string.IsNullOrEmpty(displayName))
+            {
+                displayName = SteamClient.SteamId.ToString();
+            }
+            
+            string message = $"⚠️ MELONLOADER DETECTED: Player {displayName} is running MelonLoader!";
+            
+            UnityEngine.Debug.LogWarning($"[SBGL-CompPluginCheck] Announcing MelonLoader presence: {message}");
+            
+            // Attempt to send via game chat API (using reflection) - try multiple API paths
+            bool sentSuccessfully = TrySendChatMessage(message);
+            
+            if (!sentSuccessfully)
+            {
+                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] ℹ️ Chat API not available (game may not have public chat API). MelonLoader detection is still being broadcast via P2P to other SBGL mod users.");
+            }
+        }
+        
+        private bool TrySendChatMessage(string message)
+        {
+            // Try TextChatManager - the in-game chat system
+            string[] textChatManagerPaths = new[]
+            {
+                "GameAssembly+TextChatManager, GameAssembly",
+                "GameAssembly.TextChatManager, GameAssembly",
+                "TextChatManager, GameAssembly"
+            };
+            
+            string[] methodNames = new[] 
+            { 
+                "SendChatMessage", 
+                "PostMessage", 
+                "AddMessage",
+                "Send",
+                "SendMessage"
+            };
+            
+            foreach (var typePath in textChatManagerPaths)
+            {
+                try
+                {
+                    var chatType = System.Type.GetType(typePath);
+                    if (chatType == null) continue;
+                    
+                    UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Found TextChatManager type: {typePath}");
+                    
+                    // Try static methods
+                    foreach (var methodName in methodNames)
+                    {
+                        try
+                        {
+                            var sendMethod = chatType.GetMethod(methodName, 
+                                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static,
+                                null, new System.Type[] { typeof(string) }, null);
+                            
+                            if (sendMethod != null)
+                            {
+                                sendMethod.Invoke(null, new object[] { message });
+                                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] ✓ Chat message sent via static {typePath}.{methodName}");
+                                return true;
+                            }
+                        }
+                        catch { }
+                    }
+                    
+                    // Try instance method through singleton (Instance, Singleton, or _instance)
+                    var instanceProp = chatType.GetProperty("Instance", 
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static) 
+                        ?? chatType.GetProperty("Singleton",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+                        ?? chatType.GetField("_instance",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static 
+                        | System.Reflection.BindingFlags.NonPublic)?.DeclaringType?.GetProperty("_instance", 
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                    
+                    if (instanceProp == null)
+                    {
+                        // Try to find Instance field
+                        var instanceField = chatType.GetField("Instance",
+                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+                        if (instanceField != null)
+                        {
+                            var instance = instanceField.GetValue(null);
+                            if (instance != null)
+                            {
+                                foreach (var methodName in methodNames)
+                                {
+                                    try
+                                    {
+                                        var sendMethod = chatType.GetMethod(methodName,
+                                            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                                        if (sendMethod != null)
+                                        {
+                                            sendMethod.Invoke(instance, new object[] { message });
+                                            UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] ✓ Chat message sent via {typePath}.{methodName}() [instance field]");
+                                            return true;
+                                        }
+                                    }
+                                    catch { }
+                                }
+                            }
+                        }
+                    }
+                    else if (instanceProp is System.Reflection.PropertyInfo prop)
+                    {
+                        var instance = prop.GetValue(null);
+                        if (instance != null)
+                        {
+                            foreach (var methodName in methodNames)
+                            {
+                                try
+                                {
+                                    var sendMethod = chatType.GetMethod(methodName,
+                                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                                    if (sendMethod != null)
+                                    {
+                                        sendMethod.Invoke(instance, new object[] { message });
+                                        UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] ✓ Chat message sent via {typePath}.{methodName}() [singleton]");
+                                        return true;
+                                    }
+                                }
+                                catch { }
+                            }
+                        }
+                    }
+                    
+                    // List available methods for debugging
+                    var methods = chatType.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Instance);
+                    UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Available methods on {typePath}: {string.Join(", ", System.Linq.Enumerable.Select(methods, m => m.Name).Distinct())}");
+                }
+                catch (System.Exception ex)
+                {
+                    UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Error trying {typePath}: {ex.Message}");
+                }
+            }
+            
+            UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] TextChatManager not found or no compatible method available");
+            return false;
+        }
 
         public void TriggerManualSync()
         {
@@ -379,7 +1310,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             using (UnityWebRequest r = UnityWebRequest.Get(url))
             {
                 r.SetRequestHeader("X-App-Id", appId);
-                r.SetRequestHeader("Authorization", "Bearer " + authToken);
+                r.SetRequestHeader("api_key", authToken);
                 r.certificateHandler = new BypassCertificate();
                 yield return r.SendWebRequest();
                 if (r.result == UnityWebRequest.Result.Success)
@@ -426,7 +1357,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             using (UnityWebRequest r = UnityWebRequest.Get(url))
             {
                 r.SetRequestHeader("X-App-Id", appId);
-                r.SetRequestHeader("Authorization", "Bearer " + authToken);
+                r.SetRequestHeader("api_key", authToken);
                 r.certificateHandler = new BypassCertificate();
                 yield return r.SendWebRequest();
                 if (r.result == UnityWebRequest.Result.Success)
@@ -464,7 +1395,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             using (UnityWebRequest r = UnityWebRequest.Get(url))
             {
                 r.SetRequestHeader("X-App-Id", appId);
-                r.SetRequestHeader("Authorization", "Bearer " + authToken);
+                r.SetRequestHeader("api_key", authToken);
                 r.certificateHandler = new BypassCertificate();
                 yield return r.SendWebRequest();
                 if (r.result == UnityWebRequest.Result.Success)
@@ -494,7 +1425,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             using (UnityWebRequest r = UnityWebRequest.Get(url))
             {
                 r.SetRequestHeader("X-App-Id", appId);
-                r.SetRequestHeader("Authorization", "Bearer " + authToken);
+                r.SetRequestHeader("api_key", authToken);
                 r.certificateHandler = new BypassCertificate();
                 yield return r.SendWebRequest();
                 if (r.result == UnityWebRequest.Result.Success)
@@ -532,7 +1463,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             using (UnityWebRequest r = UnityWebRequest.Get(url))
             {
                 r.SetRequestHeader("X-App-Id", appId);
-                r.SetRequestHeader("Authorization", "Bearer " + authToken);
+                r.SetRequestHeader("api_key", authToken);
                 r.certificateHandler = new BypassCertificate();
 
                 yield return r.SendWebRequest();
@@ -647,22 +1578,6 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 {
                     if (plugin.Metadata.GUID.ToLower().Contains("compplugincheck") || plugin.Metadata.GUID.StartsWith("BepInEx")) continue;
                     sb.AppendLine($"{(_allowedModsMap.ContainsKey(plugin.Metadata.GUID) ? "<color=#00FF00>O</color>" : "<color=#FF0000>X</color>")} <size=11>{plugin.Metadata.Name}</size>");
-                }
-            }
-
-            // --- LOBBY MOD VIEW INJECTION ---
-            if (ConfigShowLobbyMods && _remotePlayerMods.Count > 0)
-            {
-                sb.AppendLine("--- <color=#AAAAAA>LOBBY MODS</color> ---");
-                foreach (var player in _remotePlayerMods)
-                {
-                    sb.AppendLine($"<color=#00FFFF>Player {player.Key.ToString().Substring(0, 5)}</color>:");
-                    string[] mods = player.Value.Split(';');
-                    foreach (var m in mods)
-                    {
-                        if (string.IsNullOrEmpty(m)) continue;
-                        sb.AppendLine($" <size=10>- {m.Split('|')[0]}</size>");
-                    }
                 }
             }
 
@@ -984,4 +1899,15 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             }
         }
     }
+
+    // Harmony patch to capture lobby name whenever BNetworkManager.LobbyName is set
+    [HarmonyPatch(typeof(BNetworkManager), nameof(BNetworkManager.LobbyName), MethodType.Setter)]
+    public static class LobbyNameCapturePatch
+    {
+        public static void Postfix(string value)
+        {
+            CompetitivePluginCheck._currentLobbyName = value ?? "";
+        }
+    }
 }
+

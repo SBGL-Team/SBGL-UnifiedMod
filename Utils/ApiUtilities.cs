@@ -137,7 +137,7 @@ namespace SBGL.UnifiedMod.Utils
             var headers = new Dictionary<string, string>
             {
                 { "X-App-Id", appId },
-                { "Authorization", "Bearer " + authToken }
+                { "api_key", authToken }
             };
 
             bool found = false;
@@ -198,7 +198,7 @@ namespace SBGL.UnifiedMod.Utils
             var headers = new Dictionary<string, string>
             {
                 { "X-App-Id", appId },
-                { "Authorization", "Bearer " + authToken }
+                { "api_key", authToken }
             };
 
             bool found = false;

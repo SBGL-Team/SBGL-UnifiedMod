@@ -29,16 +29,14 @@ namespace SBGLeagueAutomation
 
         // Config Entries
         private ConfigEntry<bool> _showLogsConfig;
-        private ConfigEntry<bool> _debugMode;
         private ConfigEntry<bool> _showFlowDebugConfig;
         private ManualLogSource _bepinexLogger;
         private bool _isInitializing = true;
         private int _onlineCount = 0;
 
-        public void SetConfig(ConfigEntry<bool> showLogs, ConfigEntry<bool> debugMode, ConfigEntry<bool> showFlowDebug, ManualLogSource bepinexLogger)
+        public void SetConfig(ConfigEntry<bool> showLogs, ConfigEntry<bool> showFlowDebug, ManualLogSource bepinexLogger)
         {
             _showLogsConfig = showLogs;
-            _debugMode = debugMode;
             _showFlowDebugConfig = showFlowDebug;
             _bepinexLogger = bepinexLogger;
         }
@@ -76,7 +74,7 @@ namespace SBGLeagueAutomation
         // UI Helpers
         private List<string> _debugLogs = new List<string>();
         private List<PlayerData> _queuedPlayers = new List<PlayerData>();
-        private Vector2 _logScroll, _playerScroll;
+        private Vector2 _logScroll;
         private Texture2D _profileTexture = null;
         private Texture2D _solidBgTex = null;
         private bool _hasFetchedProfilePic = false;
@@ -236,6 +234,12 @@ namespace SBGLeagueAutomation
                     Log("<color=green>[Match Stats] Returned to Driving Range - match already finalized. Skipping redundant update.</color>");
                     _matchStatsSubmitted = true;
                     StartCoroutine(UpdateSessionStatus("completed"));
+                }
+                
+                // Cancel queue if player enters Driving Range while queued (but not if they already accepted a match)
+                if (_isQueueing && !_hasAccepted) {
+                    Log("<color=orange>[Queue] Player entered Driving Range while queued - cancelling queue entry...</color>");
+                    StartCoroutine(LeaveQueue());
                 }
             }
             
@@ -416,8 +420,13 @@ namespace SBGLeagueAutomation
 
                 // Only proceed with sync if the profile is successfully loaded
                 if (_userProfile != null) {
-                    // Skip queue polling if we're in an active match (ranked gameplay)
-                    if (!IsRankedTriggered) {
+                    // Check for a queued entry created via the website (on init and whenever idle)
+                    if (!_isQueueing && _currentSession == null && !_isInGameplay) {
+                        yield return CheckExistingQueueEntry();
+                    }
+
+                    // Poll queue only on first init (to unlock the button) or while actively queuing
+                    if (!IsRankedTriggered && !_isInGameplay && (_isInitializing || _isQueueing)) {
                         yield return RefreshPlayerList();
                     }
                     
@@ -524,6 +533,34 @@ namespace SBGLeagueAutomation
             }
         }
 
+        private IEnumerator CheckExistingQueueEntry() {
+            string checkQuery = $"{{\"player_id\":\"{_userProfile.id}\",\"status\":\"queued\"}}";
+            string checkUrl = $"{GetBaseApiUrl()}/MatchmakingQueue?q={UnityWebRequest.EscapeURL(checkQuery)}";
+            using (UnityWebRequest req = UnityWebRequest.Get(checkUrl)) {
+                ApplyApiHeaders(req);
+                yield return req.SendWebRequest();
+                if (req.result == UnityWebRequest.Result.Success) {
+                    List<JObject> existing = ParseApiObjectList(req.downloadHandler.text);
+                    if (existing != null && existing.Count > 0) {
+                        _currentQueueId = (string)existing[0]["id"];
+                        _isQueueing = true;
+                        _webStatus = "QUEUED";
+                        _queueStartTime = DateTime.Now;
+                        Log($"<color=yellow>[Queue] Detected existing queue entry {_currentQueueId} from website — rejoining.</color>");
+                        // Patch has_mod:true onto the web entry
+                        string patchJson = "{" +
+                            $"\"has_mod\":true," +
+                            $"\"created_by\":\"SBGL_UnifiedMod\"" +
+                        "}";
+                        yield return CallAPI($"/MatchmakingQueue/{_currentQueueId}", "PUT", patchJson, (res) => {
+                            if (ParseApiSingleObject(res) != null)
+                                Log($"<color=green>[Queue] ✓ Patched has_mod:true onto existing entry {_currentQueueId}.</color>");
+                        });
+                    }
+                }
+            }
+        }
+
         private IEnumerator MatchmakingLoop() {
             if (_userProfile == null) { Log("<color=red>No profile loaded.</color>"); yield break; }
 
@@ -531,24 +568,66 @@ namespace SBGLeagueAutomation
             _webStatus = "JOINING...";
             _queueStartTime = DateTime.Now;
 
-            // Inside MatchmakingLoop()
-            string json = "{" + 
-                $"\"player_id\":\"{_userProfile.id}\"," +
-                $"\"user_id\":\"{_userProfile.id}\"," + 
-                $"\"display_name\":\"{_userProfile.display_name}\"," +
-                $"\"mmr_snapshot\":{_userProfile.current_mmr}," +
-                $"\"region\":\"{_userProfile.region}\"," +
-                $"\"state_province\":\"{_userProfile.state_province ?? ""}\"," + // Added this
-                $"\"status\":\"queued\"," +
-                $"\"queued_at\":\"{DateTime.UtcNow:yyyy-MM-ddTHH:mm:ss.fffZ}\"" + 
-            "}";
-            
-            yield return CallAPI("/MatchmakingQueue", "POST", json, (res) => {
-                JObject queueResponse = ParseApiSingleObject(res);
-                _currentQueueId = (string)queueResponse?["id"] ?? _currentQueueId;
-                _webStatus = "QUEUED";
-                Log("Queue request sent.");
-            });
+            // Check if a queue entry already exists for this player (e.g. created via website).
+            // If so, PATCH has_mod onto it rather than creating a duplicate.
+            string existingId = null;
+            string checkQuery = $"{{\"player_id\":\"{_userProfile.id}\",\"status\":\"queued\"}}";
+            string checkUrl = $"{GetBaseApiUrl()}/MatchmakingQueue?q={UnityWebRequest.EscapeURL(checkQuery)}";
+            Log($"<color=cyan>[Queue] Checking for existing entry for player {_userProfile.id}...</color>");
+            using (UnityWebRequest checkReq = UnityWebRequest.Get(checkUrl)) {
+                ApplyApiHeaders(checkReq);
+                yield return checkReq.SendWebRequest();
+                if (checkReq.result == UnityWebRequest.Result.Success) {
+                    List<JObject> existing = ParseApiObjectList(checkReq.downloadHandler.text);
+                    if (existing != null && existing.Count > 0) {
+                        existingId = (string)existing[0]["id"];
+                        Log($"<color=yellow>[Queue] Found existing entry {existingId} — patching has_mod:true</color>");
+                    } else {
+                        Log("<color=cyan>[Queue] No existing entry found — will create new.</color>");
+                    }
+                } else {
+                    Log($"<color=orange>[Queue] Could not check existing entries: {checkReq.result} — will attempt POST anyway.</color>");
+                }
+            }
+
+            if (existingId != null) {
+                // Update the existing entry to mark has_mod:true and refresh queued_at
+                string patchJson = "{" +
+                    $"\"has_mod\":true," +
+                    $"\"created_by\":\"SBGL_UnifiedMod\"," +
+                    $"\"queued_at\":\"{DateTime.UtcNow:yyyy-MM-ddTHH:mm:ss.fffZ}\"" +
+                "}";
+                yield return CallAPI($"/MatchmakingQueue/{existingId}", "PUT", patchJson, (res) => {
+                    JObject updated = ParseApiSingleObject(res);
+                    if (updated != null) {
+                        _currentQueueId = existingId;
+                        _webStatus = "QUEUED";
+                        Log($"<color=green>[Queue] ✓ Updated existing entry {existingId} with has_mod:true.</color>");
+                    } else {
+                        Log($"<color=red>[Queue] Failed to update existing entry {existingId}.</color>");
+                    }
+                });
+            } else {
+                // No existing entry — create a fresh one with has_mod:true
+                string json = "{" +
+                    $"\"player_id\":\"{_userProfile.id}\"," +
+                    $"\"user_id\":\"{_userProfile.id}\"," +
+                    $"\"display_name\":\"{_userProfile.display_name}\"," +
+                    $"\"mmr_snapshot\":{_userProfile.current_mmr}," +
+                    $"\"region\":\"{_userProfile.region}\"," +
+                    $"\"state_province\":\"{_userProfile.state_province ?? ""}\"," +
+                    $"\"has_mod\":true," +
+                    $"\"created_by\":\"SBGL_UnifiedMod\"," +
+                    $"\"status\":\"queued\"," +
+                    $"\"queued_at\":\"{DateTime.UtcNow:yyyy-MM-ddTHH:mm:ss.fffZ}\"" +
+                "}";
+                yield return CallAPI("/MatchmakingQueue", "POST", json, (res) => {
+                    JObject queueResponse = ParseApiSingleObject(res);
+                    _currentQueueId = (string)queueResponse?["id"] ?? _currentQueueId;
+                    _webStatus = "QUEUED";
+                    Log($"<color=green>[Queue] ✓ Created new entry {_currentQueueId} with has_mod:true.</color>");
+                });
+            }
         }
 
         private IEnumerator LeaveQueue() {
@@ -967,6 +1046,13 @@ namespace SBGLeagueAutomation
                 yield break;
             }
 
+            // Pro Series match submission is handled manually — skip automated entry creation
+            string currentMatchType = PlayerPrefs.GetString("MatchType", "");
+            if (currentMatchType.Contains("pro_series")) {
+                Log("<color=yellow>[Match Creation] Pro Series match — skipping automated submission (handled manually)</color>");
+                yield break;
+            }
+
             Log($"<color=cyan>[Match Creation] Starting new match for session {_currentSession.id}</color>");
             _matchStartTime = DateTime.UtcNow;
 
@@ -1226,6 +1312,13 @@ namespace SBGLeagueAutomation
             // Wait for leaderboard to finalize
             yield return new WaitForSeconds(1.5f);
 
+            // Pro Series match submission is handled manually
+            if (PlayerPrefs.GetString("MatchType", "").Contains("pro_series")) {
+                Log("<color=yellow>[Match Finalize] Pro Series match — skipping automated finalization (handled manually)</color>");
+                _matchStatsSubmitted = true;
+                yield break;
+            }
+
             Log($"<color=cyan>[Match Finalize] Performing final score update...</color>");
 
             // Get final leaderboard data (uses snapshot captured when leaving gameplay)
@@ -1281,7 +1374,14 @@ namespace SBGLeagueAutomation
                 Log("<color=red>[Match Stats] Failed: Missing profile or session</color>");
                 yield break;
             }
-            
+
+            // Pro Series match submission is handled manually
+            if (PlayerPrefs.GetString("MatchType", "").Contains("pro_series")) {
+                Log("<color=yellow>[Match Stats] Pro Series match — skipping automated submission (handled manually)</color>");
+                _matchStatsSubmitted = true;
+                yield break;
+            }
+
             Log($"<color=cyan>[Match Stats] Collecting data for session: {_currentSession.id}</color>");
 
             // Calculate match duration
@@ -1401,12 +1501,14 @@ namespace SBGLeagueAutomation
             // Map to Match schema - these are the fields the API expects
             // TODO: Get the actual season_id from the current season configuration
             string seasonId = "69de6bf4fb103cb0d5eb00c5"; // Placeholder - should be dynamic
-            
+            string rawMatchType = PlayerPrefs.GetString("MatchType", "mmr");
+            string apiMatchType = rawMatchType.Contains("pro_series") ? "pro_series" : "mmr";
+
             string json = "{" +
                 $"\"matchmaking_session_id\":\"{_currentSession.id}\"," +
                 $"\"season_id\":\"{seasonId}\"," +
                 $"\"match_date\":\"{stats.match_date}\"," +
-                $"\"match_type\":\"mmr\"," +
+                $"\"match_type\":\"{apiMatchType}\"," +
                 $"\"player_count\":2," +
                 $"\"status\":\"Pending\"," +
                 $"\"submitted_by_name\":\"{stats.player_name}\"," +
@@ -1535,8 +1637,7 @@ namespace SBGLeagueAutomation
 
                 float uiWidth = 350f;
                 float rightX = Screen.width - uiWidth - 30;
-                float uiHeight = (_showLogsConfig?.Value ?? false) ? 450f : 350f; 
-                if ((_debugMode?.Value ?? false)) uiHeight += 30f;
+                float uiHeight = (_showLogsConfig?.Value ?? false) ? 340f : 230f; 
                 if ((_showFlowDebugConfig?.Value ?? false)) uiHeight += 145f;
 
                 GUI.DrawTexture(new Rect(rightX, 20, uiWidth, uiHeight), _solidBgTex);
@@ -1595,7 +1696,7 @@ namespace SBGLeagueAutomation
                 GUI.enabled = true;
             }
 
-            float offset = _debugMode.Value ? 30f : 0f;
+            float offset = 0f;
             GUI.Box(new Rect(rightX + 10, 110 + offset, uiWidth - 20, 100), ""); 
 
             if (_userProfile != null) {
@@ -1649,16 +1750,16 @@ namespace SBGLeagueAutomation
                 contentY += debugBoxHeight + 5f;
             }
 
-            // --- ACTIVE QUEUE LIST ---
-            GUI.Label(new Rect(rightX + 15, contentY, uiWidth, 25), "<b>ACTIVE QUEUE:</b>");
-            _playerScroll = GUI.BeginScrollView(new Rect(rightX + 10, contentY + 25, uiWidth - 20, 70), _playerScroll, new Rect(0,0, uiWidth - 40, _queuedPlayers.Count * 22));
-            for (int i = 0; i < _queuedPlayers.Count; i++) {
-                GUI.Label(new Rect(5, i * 22, 300, 22), $"• {_queuedPlayers[i].name} <color=#4CAF50>({_queuedPlayers[i].mmr} MMR)</color>");
-            }
-            GUI.EndScrollView();
+            // --- ACTIVE QUEUE LIST (hidden) ---
+            // GUI.Label(new Rect(rightX + 15, contentY, uiWidth, 25), "<b>ACTIVE QUEUE:</b>");
+            // _playerScroll = GUI.BeginScrollView(new Rect(rightX + 10, contentY + 25, uiWidth - 20, 70), _playerScroll, new Rect(0,0, uiWidth - 40, _queuedPlayers.Count * 22));
+            // for (int i = 0; i < _queuedPlayers.Count; i++) {
+            //     GUI.Label(new Rect(5, i * 22, 300, 22), $"• {_queuedPlayers[i].name} <color=#4CAF50>({_queuedPlayers[i].mmr} MMR)</color>");
+            // }
+            // GUI.EndScrollView();
 
             if (_showLogsConfig.Value) {
-                float logsY = contentY + 100;
+                float logsY = contentY + 5;
                 GUI.Label(new Rect(rightX + 15, logsY, uiWidth, 25), "<b>SYSTEM LOGS:</b>");
                 _logScroll = GUI.BeginScrollView(new Rect(rightX + 10, logsY + 25, uiWidth - 20, 70), _logScroll, new Rect(0,0, uiWidth - 40, _debugLogs.Count * 20));
                 for (int i = 0; i < _debugLogs.Count; i++) {
@@ -1763,7 +1864,7 @@ namespace SBGLeagueAutomation
 
             // Use unified plugin's auth token
             req.SetRequestHeader("Content-Type", "application/json");
-            req.SetRequestHeader("Authorization", "Bearer " + GetAuthToken());
+            req.SetRequestHeader("api_key", GetAuthToken());
             req.SetRequestHeader("X-App-Id", GetAppId());
         }
 

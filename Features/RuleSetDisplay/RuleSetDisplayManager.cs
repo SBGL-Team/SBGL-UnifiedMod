@@ -91,10 +91,10 @@ namespace SBGL.UnifiedMod.Features {
             GUI.backgroundColor = Color.white;
 
             if (showDetails) {
-                string matchType   = PlayerPrefs.GetString("MatchType",     "—");
-                string course      = PlayerPrefs.GetString("SelectedCourse","—");
+                string matchType   = PlayerPrefs.GetString("MatchType",      "—");
+                string course      = PlayerPrefs.GetString("SelectedCourse", "—");
                 int    season      = PlayerPrefs.GetInt("Season", 0);
-                string ruleset     = PlayerPrefs.GetString("HostRuleset",   "—");
+                string ruleset     = PlayerPrefs.GetString("HostRuleset",    "—");
 
                 float lx = panelX + 10f;
                 float ly = btnY + buttonHeight + 8f;

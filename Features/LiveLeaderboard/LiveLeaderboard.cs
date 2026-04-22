@@ -358,7 +358,7 @@ namespace SBGLLiveLeaderboard
             using (UnityWebRequest r = UnityWebRequest.Get(url)) {
                 // Replace APP_ID and AUTH_TOKEN with UnifiedPlugin accessors
                 r.SetRequestHeader("X-App-Id", SBGL.UnifiedMod.Core.UnifiedPlugin.GetCurrentAppId());
-                r.SetRequestHeader("Authorization", "Bearer " + SBGL.UnifiedMod.Core.UnifiedPlugin.GetCurrentAuthToken());
+                r.SetRequestHeader("api_key", SBGL.UnifiedMod.Core.UnifiedPlugin.GetCurrentAuthToken());
                 
                 yield return r.SendWebRequest();
 
@@ -383,7 +383,7 @@ namespace SBGLLiveLeaderboard
             using (UnityWebRequest r = UnityWebRequest.Get(url)) {
                 // Replace APP_ID and AUTH_TOKEN here as well
                 r.SetRequestHeader("X-App-Id", SBGL.UnifiedMod.Core.UnifiedPlugin.GetCurrentAppId());
-                r.SetRequestHeader("Authorization", "Bearer " + SBGL.UnifiedMod.Core.UnifiedPlugin.GetCurrentAuthToken());
+                r.SetRequestHeader("api_key", SBGL.UnifiedMod.Core.UnifiedPlugin.GetCurrentAuthToken());
                 
                 yield return r.SendWebRequest();
                 string val = "--";

@@ -75,7 +75,21 @@ namespace SBGL.UnifiedMod.Patches
         /// </summary>
         public static void ApplyRulesToMatchSetup(MatchSetupRules matchSetup)
         {
-            var rulesDict = Season1RuleSet.GetRulesSettings();
+            string hostRuleset = PlayerPrefs.GetString("HostRuleset", "ranked");
+            bool isProSeries = hostRuleset == "pro_series";
+
+            // For Pro Series: reset to Classic preset first so items and rules start from game defaults,
+            // then apply only the Pro Series-specific overrides on top.
+            if (isProSeries)
+            {
+                matchSetup.SetPreset(MatchSetupRules.Preset.Classic);
+                Log("✓ Reset to Classic preset (game defaults)");
+            }
+
+            var rulesDict = isProSeries
+                ? Season1RuleSet.GetProSeriesRulesSettings()
+                : Season1RuleSet.GetRulesSettings();
+
             int appliedCount = 0;
 
             foreach (var kvp in rulesDict)
@@ -111,20 +125,24 @@ namespace SBGL.UnifiedMod.Patches
 
             Log($"✓ Applied {appliedCount}/{rulesDict.Count} rules");
 
-            // Apply explicit item spawn weights for all 6 pools
-            var itemWeights = Season1RuleSet.GetItemSpawnWeights();
-            foreach (var kvp in itemWeights)
-                matchSetup.SetSpawnChance(kvp.Key.itemPoolIndex, kvp.Key.itemType, kvp.Value);
-
-            // ServerUpdateSpawnChanceValue syncs each pool's ItemPool.SpawnChances array.
-            // Call it once per distinct pool index — it updates all items in that pool.
-            var seenPools = new System.Collections.Generic.HashSet<int>();
-            foreach (var key in itemWeights.Keys)
+            if (!isProSeries)
             {
-                if (seenPools.Add(key.itemPoolIndex))
-                    matchSetup.ServerUpdateSpawnChanceValue(key);
+                // Apply explicit Season 1 item spawn weights for all 6 pools
+                var itemWeights = Season1RuleSet.GetItemSpawnWeights();
+                foreach (var kvp in itemWeights)
+                    matchSetup.SetSpawnChance(kvp.Key.itemPoolIndex, kvp.Key.itemType, kvp.Value);
+
+                // ServerUpdateSpawnChanceValue syncs each pool's ItemPool.SpawnChances array.
+                // Call it once per distinct pool index — it updates all items in that pool.
+                var seenPools = new System.Collections.Generic.HashSet<int>();
+                foreach (var key in itemWeights.Keys)
+                {
+                    if (seenPools.Add(key.itemPoolIndex))
+                        matchSetup.ServerUpdateSpawnChanceValue(key);
+                }
+                Log($"✓ Applied Season 1 item weights for {seenPools.Count} pools ({itemWeights.Count} entries)");
             }
-            Log($"✓ Applied item weights for {seenPools.Count} pools ({itemWeights.Count} entries)");
+            // Pro Series: item weights left at game defaults from SetPreset(Default) above
 
             matchSetup.SetPreset(MatchSetupRules.Preset.Custom);
             Log($"✓ Set Preset to Custom");
@@ -132,39 +150,52 @@ namespace SBGL.UnifiedMod.Patches
 
         public static void ApplyCourseSelection(MatchSetupMenu menu)
         {
-            // Build set of approved hole names from MapPoolConfig (all biomes combined)
-            var approvedNames = new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
-            foreach (var course in MapPoolConfig.GetApprovedCourses())
-                approvedNames.Add(course.Name);
+            string hostRuleset = PlayerPrefs.GetString("HostRuleset", "ranked");
+            bool isProSeries = hostRuleset == "pro_series";
 
-            // Filter allHoles to approved ones by ScriptableObject asset name
             var allHoles = GameManager.AllCourses.allHoles;
-            var approvedHoles = new System.Collections.Generic.List<HoleData>();
-            var matchedNames = new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
-            foreach (var hole in allHoles)
+            System.Collections.Generic.List<HoleData> eligibleHoles;
+
+            if (isProSeries)
             {
-                if (approvedNames.Contains(hole.name))
+                // Pro Series: all maps are eligible — no banned courses
+                eligibleHoles = new System.Collections.Generic.List<HoleData>(allHoles);
+                Log($"  Pro Series: all {eligibleHoles.Count} courses eligible (no banned maps)");
+            }
+            else
+            {
+                // Season 1 ranked: filter to approved courses only
+                var approvedNames = new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+                foreach (var course in MapPoolConfig.GetApprovedCourses())
+                    approvedNames.Add(course.Name);
+
+                eligibleHoles = new System.Collections.Generic.List<HoleData>();
+                var matchedNames = new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+                foreach (var hole in allHoles)
                 {
-                    approvedHoles.Add(hole);
-                    matchedNames.Add(hole.name);
+                    if (approvedNames.Contains(hole.name))
+                    {
+                        eligibleHoles.Add(hole);
+                        matchedNames.Add(hole.name);
+                    }
+                }
+
+                // Log any approved names that had no matching hole asset — helps fix MapPoolConfig mismatches
+                foreach (var name in approvedNames)
+                {
+                    if (!matchedNames.Contains(name))
+                        LogError($"  [UNMATCHED] Approved name '{name}' not found in allHoles — check MapPoolConfig spelling");
                 }
             }
 
-            // Log any approved names that had no matching hole asset — helps fix MapPoolConfig mismatches
-            foreach (var name in approvedNames)
+            if (eligibleHoles.Count == 0)
             {
-                if (!matchedNames.Contains(name))
-                    LogError($"  [UNMATCHED] Approved name '{name}' not found in allHoles — check MapPoolConfig spelling");
-            }
-
-            if (approvedHoles.Count == 0)
-            {
-                LogError("  No approved holes matched — aborting course selection");
+                LogError("  No eligible holes found — aborting course selection");
                 return;
             }
 
-            // Inject approved holes into CustomCourseData and switch to custom mode
-            MatchSetupMenu.CustomCourseData.OverrideHoles(approvedHoles.ToArray());
+            // Inject eligible holes into CustomCourseData and switch to custom mode
+            MatchSetupMenu.CustomCourseData.OverrideHoles(eligibleHoles.ToArray());
             menu.SetCourse(-1);
 
             // Enable random order and set 18 holes
@@ -173,7 +204,7 @@ namespace SBGL.UnifiedMod.Patches
             menu.NetworkrandomCupNumHoles = 18;
             menu.numberOfHolesSlider.value = 18;
 
-            Log($"  ✓ Set {approvedHoles.Count} approved holes, random order ON, 18 holes");
+            Log($"  ✓ Set {eligibleHoles.Count} eligible holes, random order ON, 18 holes");
         }
     }
 }
