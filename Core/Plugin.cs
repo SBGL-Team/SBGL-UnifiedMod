@@ -3,16 +3,20 @@ using BepInEx.Configuration;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.Networking;
+using UnityEngine.SceneManagement;
 using Newtonsoft.Json.Linq;
 using System.Collections;
 using System.Linq;
 using System.Collections.Generic;
 using System;
+using System.IO;
+using System.Security.Cryptography;
 using SBGL.UnifiedMod.Features.CompetitivePluginCheck;
 using SBGL.UnifiedMod.Utils;
 using SBGL.UnifiedMod.Patches;
 using SBGLeagueAutomation;
 using SBGLLiveLeaderboard;
+using Steamworks;
 
 
 namespace SBGL.UnifiedMod.Core
@@ -129,6 +133,10 @@ namespace SBGL.UnifiedMod.Core
         // API ENVIRONMENT CONFIG (Staff Only)
         // ==========================================
         public ConfigEntry<string> API_Environment;
+        public ConfigEntry<string> Staff_ModManifestOutputPath;
+
+        private readonly Rect _staffToolsRect = new Rect(20f, 20f, 340f, 110f);
+        private string _staffManifestStatus = "Ready";
 
         // ==========================================
         // API CONFIGURATION CHANGE EVENT
@@ -209,6 +217,9 @@ namespace SBGL.UnifiedMod.Core
             API_Environment = Config.Bind("API.Environment", "API Environment", "Production", 
                 new ConfigDescription("Select API environment: Production or PreProd (Staff Only)", 
                     new AcceptableValueList<string>("Production", "PreProd")));
+            Staff_ModManifestOutputPath = Config.Bind("Staff.Tools", "Approved Mod Manifest Output Path",
+                Path.Combine(Paths.ConfigPath, "sbgl-approved-mods.generated.json"),
+                "Staff-only output path for exporting the approved mod hash manifest.");
             
             // Subscribe to environment changes with logging and steam recheck
             API_Environment.SettingChanged += (sender, args) => 
@@ -336,82 +347,20 @@ namespace SBGL.UnifiedMod.Core
         {
             try
             {
-                // Approach 1: Try direct Steamworks access with minimal property checks
-                var steamAssembly = System.AppDomain.CurrentDomain.GetAssemblies()
-                    .FirstOrDefault(a => a.GetName().Name == "com.rlabrecque.steamworks.net");
-
-                if (steamAssembly != null)
+                if (!SteamClient.IsValid)
                 {
-                    try
-                    {
-                        var steamClientType = steamAssembly.GetType("Steamworks.SteamClient");
-                        if (steamClientType != null)
-                        {
-                            // Just try to get the Name property directly
-                            var nameProp = steamClientType.GetProperty("Name", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-                            if (nameProp != null)
-                            {
-                                try
-                                {
-                                    string foundName = nameProp.GetValue(null)?.ToString();
-                                    if (!string.IsNullOrEmpty(foundName))
-                                    {
-                                        Logger.LogInfo($"[Steam Detection] ✓ Retrieved Steam username: '{foundName}'");
-                                        return foundName;
-                                    }
-                                }
-                                catch (System.Reflection.TargetInvocationException tie)
-                                {
-                                    Logger.LogWarning($"[Steam Detection] TargetInvocationException (Steam not initialized yet): {tie.InnerException?.GetType().Name}: {tie.InnerException?.Message}");
-                                }
-                            }
-                        }
-                    }
-                    catch (System.Exception ex)
-                    {
-                        Logger.LogWarning($"[Steam Detection] Direct Steamworks approach failed: {ex.GetType().Name}: {ex.Message}");
-                    }
+                    Logger.LogWarning("[Steam Detection] SteamClient is not initialized yet");
+                    return string.Empty;
                 }
 
-                // Approach 2: Try via reflection on any assembly (with better error handling)
-                try
+                string foundName = SteamClient.Name;
+                if (!string.IsNullOrEmpty(foundName))
                 {
-                    var steamType = AppDomain.CurrentDomain.GetAssemblies()
-                        .SelectMany(a => 
-                        {
-                            try { return a.GetTypes(); }
-                            catch (System.Reflection.ReflectionTypeLoadException) { return new Type[0]; }
-                            catch { return new Type[0]; }
-                        })
-                        .FirstOrDefault(t => t.Name == "SteamClient");
-
-                    if (steamType != null)
-                    {
-                        var nameProp = steamType.GetProperty("Name", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-                        if (nameProp != null)
-                        {
-                            try
-                            {
-                                string foundName = nameProp.GetValue(null)?.ToString();
-                                if (!string.IsNullOrEmpty(foundName))
-                                {
-                                    Logger.LogInfo($"[Steam Detection] ✓ Found Steam username via broad search: '{foundName}'");
-                                    return foundName;
-                                }
-                            }
-                            catch (System.Reflection.TargetInvocationException tie)
-                            {
-                                Logger.LogWarning($"[Steam Detection] TargetInvocationException in broad search (Steam not initialized yet): {tie.InnerException?.GetType().Name}: {tie.InnerException?.Message}");
-                            }
-                        }
-                    }
-                }
-                catch (System.Exception ex)
-                {
-                    Logger.LogWarning($"[Steam Detection] Broad search approach failed: {ex.GetType().Name}: {ex.Message}");
+                    Logger.LogInfo($"[Steam Detection] Retrieved Steam username: '{foundName}'");
+                    return foundName;
                 }
 
-                Logger.LogWarning("[Steam Detection] Could not retrieve Steam username via any method");
+                Logger.LogWarning("[Steam Detection] SteamClient returned an empty username");
             }
             catch (System.Exception ex)
             {
@@ -476,6 +425,127 @@ namespace SBGL.UnifiedMod.Core
                         Logger.LogWarning($"[Staff List] Response Text: {webRequest.downloadHandler.text}");
                     }
                 }
+            }
+        }
+
+        void OnGUI()
+        {
+            if (!_isStaffUser) return;
+
+            string sceneName = SceneManager.GetActiveScene().name?.ToLowerInvariant() ?? string.Empty;
+            bool isMenuScene = sceneName.Contains("menu");
+            if (!isMenuScene) return;
+
+            GUI.Box(_staffToolsRect, "SBGL Staff Tools");
+
+            Rect buttonRect = new Rect(_staffToolsRect.x + 10f, _staffToolsRect.y + 28f, _staffToolsRect.width - 20f, 30f);
+            if (GUI.Button(buttonRect, "Generate Approved Mods JSON"))
+            {
+                ExportApprovedModsManifest();
+            }
+
+            Rect statusRect = new Rect(_staffToolsRect.x + 10f, _staffToolsRect.y + 65f, _staffToolsRect.width - 20f, 36f);
+            GUI.Label(statusRect, _staffManifestStatus);
+        }
+
+        private void ExportApprovedModsManifest()
+        {
+            try
+            {
+                string outputPath = Staff_ModManifestOutputPath?.Value;
+                if (string.IsNullOrWhiteSpace(outputPath))
+                {
+                    throw new InvalidOperationException("Staff manifest output path is empty.");
+                }
+
+                string manifestJson = BuildApprovedModsManifestJson();
+                string directory = Path.GetDirectoryName(outputPath);
+                if (!string.IsNullOrWhiteSpace(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+
+                File.WriteAllText(outputPath, manifestJson);
+                _staffManifestStatus = $"Manifest written: {outputPath}";
+                Logger.LogInfo($"[Staff Tools] Approved mod manifest exported to '{outputPath}'");
+            }
+            catch (Exception ex)
+            {
+                _staffManifestStatus = $"Export failed: {ex.Message}";
+                Logger.LogError($"[Staff Tools] Failed to export approved mod manifest: {ex}");
+            }
+        }
+
+        private string BuildApprovedModsManifestJson()
+        {
+            var mods = new JArray();
+
+            foreach (var plugin in BepInEx.Bootstrap.Chainloader.PluginInfos.Values.OrderBy(p => p.Metadata.Name, StringComparer.OrdinalIgnoreCase))
+            {
+                var pluginInstanceProperty = plugin.GetType().GetProperty("Instance");
+                var pluginInstance = pluginInstanceProperty?.GetValue(plugin);
+                var pluginAssembly = pluginInstance?.GetType().Assembly;
+                if (pluginAssembly == null || string.IsNullOrWhiteSpace(pluginAssembly.Location))
+                {
+                    continue;
+                }
+
+                string pluginAssemblyPath = Path.GetFullPath(pluginAssembly.Location);
+                var assemblies = new JArray();
+                assemblies.Add(new JObject
+                {
+                    ["file"] = Path.GetFileName(pluginAssemblyPath),
+                    ["relativePath"] = MakeRelativeToPluginsRoot(pluginAssemblyPath),
+                    ["sha256"] = ComputeSha256(pluginAssemblyPath)
+                });
+
+                mods.Add(new JObject
+                {
+                    ["name"] = plugin.Metadata.Name,
+                    ["guid"] = plugin.Metadata.GUID,
+                    ["version"] = plugin.Metadata.Version?.ToString() ?? string.Empty,
+                    ["assemblies"] = assemblies
+                });
+            }
+
+            var manifest = new JObject
+            {
+                ["version"] = 1,
+                ["generatedAtUtc"] = DateTime.UtcNow.ToString("o"),
+                ["generatedBy"] = GetSteamUsername(),
+                ["mods"] = mods
+            };
+
+            return manifest.ToString(Newtonsoft.Json.Formatting.Indented);
+        }
+
+        private static string MakeRelativeToPluginsRoot(string fullPath)
+        {
+            try
+            {
+                string normalizedFullPath = Path.GetFullPath(fullPath).Replace('\\', '/');
+                const string pluginsMarker = "/BepInEx/plugins/";
+                int markerIndex = normalizedFullPath.IndexOf(pluginsMarker, StringComparison.OrdinalIgnoreCase);
+                if (markerIndex >= 0)
+                {
+                    return normalizedFullPath.Substring(markerIndex + pluginsMarker.Length);
+                }
+
+                return Path.GetRelativePath(AppDomain.CurrentDomain.BaseDirectory, fullPath).Replace('\\', '/');
+            }
+            catch
+            {
+                return fullPath;
+            }
+        }
+
+        private static string ComputeSha256(string filePath)
+        {
+            using (var stream = File.OpenRead(filePath))
+            using (var sha256 = SHA256.Create())
+            {
+                byte[] hashBytes = sha256.ComputeHash(stream);
+                return BitConverter.ToString(hashBytes).Replace("-", string.Empty).ToLowerInvariant();
             }
         }
 

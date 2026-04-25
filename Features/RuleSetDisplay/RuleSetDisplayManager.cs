@@ -18,6 +18,8 @@ namespace SBGL.UnifiedMod.Features {
 
         private GUIStyle _labelStyle;
         private Texture2D _bgTexture;
+        private string _lastSceneName = string.Empty;
+        private bool _defaultAppliedForScene = false;
 
         public void SetConfig(
             ConfigEntry<float> posX,
@@ -37,15 +39,43 @@ namespace SBGL.UnifiedMod.Features {
             try {
                 // Only show on the Driving Range
                 string scene = SceneManager.GetActiveScene().name.ToLower();
+                if (!string.Equals(scene, _lastSceneName, System.StringComparison.Ordinal)) {
+                    _lastSceneName = scene;
+                    _defaultAppliedForScene = false;
+                }
                 if (!scene.Contains("drivingrange") && !scene.Contains("driving range")) return;
 
                 // Only show to the server host
                 if (!Mirror.NetworkServer.active) return;
 
+                // Default to ranked once per driving-range scene unless explicitly changed by button click.
+                EnsureDefaultRankedForScene();
+
                 RenderPanel();
             } catch (System.Exception ex) {
                 Debug.LogError($"[RuleSetDisplayManager] OnGUI error: {ex.Message}\n{ex.StackTrace}");
             }
+        }
+
+        private void EnsureDefaultRankedForScene()
+        {
+            if (_defaultAppliedForScene) return;
+
+            PlayerPrefs.SetString("HostRuleset", "ranked");
+            PlayerPrefs.SetString("MatchType", "ranked_season_1");
+            PlayerPrefs.SetInt("Season", 1);
+
+            // Keep existing course if present; otherwise seed with an approved ranked course.
+            string currentCourse = PlayerPrefs.GetString("SelectedCourse", "");
+            if (string.IsNullOrWhiteSpace(currentCourse))
+            {
+                var randomCourse = Core.MapPoolConfig.GetRandomApprovedCourse();
+                PlayerPrefs.SetString("SelectedCourse", randomCourse.Name);
+            }
+
+            PlayerPrefs.Save();
+            _defaultAppliedForScene = true;
+            Debug.Log("[RuleSetDisplayManager] Defaulted ruleset to ranked for this driving-range scene");
         }
 
         private void RenderPanel() {

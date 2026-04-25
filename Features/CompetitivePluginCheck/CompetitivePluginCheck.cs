@@ -13,6 +13,8 @@ using Newtonsoft.Json.Linq;
 using System.Linq;
 using System;
 using System.Reflection;
+using System.IO;
+using System.Security.Cryptography;
 using SBGL.UnifiedMod.Core;
 using SBGL.UnifiedMod.Utils;
 using HarmonyLib;
@@ -41,7 +43,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         private ConfigEntry<bool> _configHideUIWindow, _configShowModList, _configShowDebugWindow;
         private ConfigEntry<bool> _configMelonLoaderChatEnabled;
         private ConfigEntry<string> _configPlayerId;
-        private const string ALLOWED_MODS_URL = "https://gist.githubusercontent.com/Kingcox22/32b1bcf1bdbec4ec47d086fec70628c1/raw/allowed_mods.txt";
+        private const string ALLOWED_MODS_URL = "https://gist.githubusercontent.com/Kingcox22/59765f02af8dd87179ca920409ff3b27/raw/0d83e319856c884a802644864261f526888e05b1/Approved_Mods.json";
 
         // --- NETWORKING CONSTANTS ---
         private const int SBGL_NET_CHANNEL = 2622;
@@ -58,6 +60,156 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             public string ModList { get; set; }
             public float FirstSeenTime { get; set; }
         }
+
+        private class LocalPluginScanResult
+        {
+            public List<string> MissingModNames { get; } = new List<string>();
+            public List<string> TamperedModNames { get; } = new List<string>();
+            public List<string> SuspiciousRuntimeAssemblies { get; } = new List<string>();
+            public bool HasIllegalMods { get; set; }
+        }
+
+        private sealed class AllowedModsSnapshot
+        {
+            // allowedHashesByGuid: null value = guid present in manifest but no hash constraints (legacy text format)
+            // non-null value = set of acceptable sha256 hex strings for that guid's assemblies
+            public static readonly AllowedModsSnapshot Empty = new AllowedModsSnapshot(
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+                null);
+
+            private readonly HashSet<string> _allowedGuids;
+            private readonly Dictionary<string, string> _displayNamesByGuid;
+            private readonly Dictionary<string, HashSet<string>> _allowedHashesByGuid; // null = no hash enforcement
+
+            private AllowedModsSnapshot(
+                HashSet<string> allowedGuids,
+                Dictionary<string, string> displayNamesByGuid,
+                Dictionary<string, HashSet<string>> allowedHashesByGuid)
+            {
+                _allowedGuids = allowedGuids;
+                _displayNamesByGuid = displayNamesByGuid;
+                _allowedHashesByGuid = allowedHashesByGuid;
+            }
+
+            public int Count => _displayNamesByGuid.Count;
+            public bool HasHashConstraints => _allowedHashesByGuid != null;
+
+            public IEnumerable<string> DisplayNames => _displayNamesByGuid.Values;
+
+            public bool ContainsGuid(string guid)
+            {
+                return !string.IsNullOrWhiteSpace(guid) && _allowedGuids.Contains(guid);
+            }
+
+            /// <summary>Returns the set of allowed SHA-256 hashes for the given GUID, or null if no constraints.</summary>
+            public HashSet<string> GetAllowedHashes(string guid)
+            {
+                if (_allowedHashesByGuid == null || string.IsNullOrWhiteSpace(guid)) return null;
+                _allowedHashesByGuid.TryGetValue(guid, out var hashes);
+                return hashes;
+            }
+
+            public IEnumerable<string> GetMissingModNames(HashSet<string> installedGuids)
+            {
+                foreach (var entry in _displayNamesByGuid)
+                {
+                    if (ShouldIgnorePluginGuid(entry.Key) || installedGuids.Contains(entry.Key)) continue;
+                    yield return entry.Value;
+                }
+            }
+
+            /// <summary>Parses the new JSON manifest format (version 1).</summary>
+            public static AllowedModsSnapshot FromJson(string json)
+            {
+                var allowedGuids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var displayNamesByGuid = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                var allowedHashesByGuid = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+
+                try
+                {
+                    var root = JObject.Parse(json);
+                    var mods = root["mods"] as JArray;
+                    if (mods == null) return Empty;
+
+                    foreach (var mod in mods)
+                    {
+                        string guid = mod["guid"]?.Value<string>();
+                        string name = mod["name"]?.Value<string>();
+                        if (string.IsNullOrWhiteSpace(guid)) continue;
+
+                        allowedGuids.Add(guid);
+                        displayNamesByGuid[guid] = string.IsNullOrWhiteSpace(name) ? guid : name;
+
+                        var assemblies = mod["assemblies"] as JArray;
+                        if (assemblies != null && assemblies.Count > 0)
+                        {
+                            var hashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                            foreach (var asm in assemblies)
+                            {
+                                string sha256 = asm["sha256"]?.Value<string>();
+                                if (!string.IsNullOrWhiteSpace(sha256))
+                                    hashes.Add(sha256);
+                            }
+                            if (hashes.Count > 0)
+                                allowedHashesByGuid[guid] = hashes;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    UnityEngine.Debug.LogWarning($"[CompCheck] Failed to parse approved mods JSON manifest: {ex.Message}");
+                    return Empty;
+                }
+
+                return new AllowedModsSnapshot(allowedGuids, displayNamesByGuid, allowedHashesByGuid);
+            }
+
+            /// <summary>Parses the legacy pipe-delimited text format (fallback).</summary>
+            public static AllowedModsSnapshot FromText(string rawText)
+            {
+                var allowedGuids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var displayNamesByGuid = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+                foreach (string line in rawText.Split('\n'))
+                {
+                    if (string.IsNullOrWhiteSpace(line)) continue;
+
+                    string guid;
+                    string displayName;
+
+                    if (line.Contains("|"))
+                    {
+                        var parts = line.Split('|');
+                        if (parts.Length < 2) continue;
+                        displayName = parts[0].Trim();
+                        guid = parts[1].Trim();
+                    }
+                    else
+                    {
+                        guid = line.Trim();
+                        displayName = guid;
+                    }
+
+                    if (string.IsNullOrWhiteSpace(guid)) continue;
+
+                    allowedGuids.Add(guid);
+                    displayNamesByGuid[guid] = string.IsNullOrWhiteSpace(displayName) ? guid : displayName;
+                }
+
+                // No hash constraints when loading legacy text format
+                return new AllowedModsSnapshot(allowedGuids, displayNamesByGuid, null);
+            }
+
+            /// <summary>Auto-detects JSON vs legacy text and parses accordingly.</summary>
+            public static AllowedModsSnapshot Parse(string rawText)
+            {
+                if (string.IsNullOrWhiteSpace(rawText)) return Empty;
+                string trimmed = rawText.TrimStart();
+                return trimmed.StartsWith("{") ? FromJson(trimmed) : FromText(rawText);
+            }
+        }
+
         private Dictionary<ulong, PlayerComplianceStatus> _playerComplianceStatus = new Dictionary<ulong, PlayerComplianceStatus>();
         private HashSet<ulong> _playersNotifiedAbout = new HashSet<ulong>(); // Track players we've already notified
         private HashSet<ulong> _knownPeers = new HashSet<ulong>(); // All peers we've discovered (from P2P or Mirror)
@@ -81,14 +233,20 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         private RectTransform _bgRect, _debugWindowRect;
 #pragma warning restore CS0649, CS0169
 
-        private Dictionary<string, string> _allowedModsMap = new Dictionary<string, string>();
-        private List<string> _missingModNames = new List<string>();
+        private static readonly HashSet<string> IgnoredPluginGuids = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "BepInEx",
+            "com.sbgl.unified"
+        };
+
+        private AllowedModsSnapshot _allowedModsSnapshot = AllowedModsSnapshot.Empty;
+        private readonly HashSet<string> _observedRuntimeAssemblyPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private Steamworks.Data.Lobby _currentLobby;
         private bool _inLobby = false;
         public List<ProSeriesEvent> _upcomingEvents = new List<ProSeriesEvent>();
         public List<MatchEntry> _recentMatches = new List<MatchEntry>();
 
-        private bool _anyIllegalMods = false, _isSyncing = false;
+        private bool _isSyncing = false;
         private float _timeUntilNextUpdate = 0f;
         private string _lastSyncTime = "Never";
 
@@ -96,6 +254,211 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
 
         public string ResolvedName = "Not Found";
         public string ResolvedID = "None";
+
+        private static string NormalizePath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return string.Empty;
+            try
+            {
+                return Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            }
+            catch
+            {
+                return path;
+            }
+        }
+
+        private static string TryGetAssemblyLocation(Assembly assembly)
+        {
+            if (assembly == null) return string.Empty;
+            try
+            {
+                return NormalizePath(assembly.Location);
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private bool IsTrackedRuntimeAssemblyPath(string assemblyPath)
+        {
+            if (string.IsNullOrWhiteSpace(assemblyPath)) return false;
+
+            string normalizedPath = NormalizePath(assemblyPath);
+            string pluginsRoot = NormalizePath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "BepInEx", "plugins"));
+
+            if (normalizedPath.StartsWith(pluginsRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return normalizedPath.IndexOf(Path.DirectorySeparatorChar + "Cheats" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private void TrackRuntimeAssembly(Assembly assembly)
+        {
+            string assemblyPath = TryGetAssemblyLocation(assembly);
+            if (!IsTrackedRuntimeAssemblyPath(assemblyPath)) return;
+            _observedRuntimeAssemblyPaths.Add(assemblyPath);
+        }
+
+        private void CaptureLoadedRuntimeAssemblies()
+        {
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                TrackRuntimeAssembly(assembly);
+            }
+        }
+
+        private void OnRuntimeAssemblyLoaded(object sender, AssemblyLoadEventArgs args)
+        {
+            TrackRuntimeAssembly(args.LoadedAssembly);
+        }
+
+        private sealed class KnownVisibleRuntimeAssemblies
+        {
+            public HashSet<string> ExactAssemblyPaths { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            public HashSet<string> AllowedCompanionAssemblyNames { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        private static string TryGetAssemblySimpleName(string assemblyPath)
+        {
+            if (string.IsNullOrWhiteSpace(assemblyPath) || !File.Exists(assemblyPath)) return string.Empty;
+
+            try
+            {
+                return AssemblyName.GetAssemblyName(assemblyPath).Name ?? string.Empty;
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private static string ComputeSha256Hex(string filePath)
+        {
+            try
+            {
+                using (var sha256 = SHA256.Create())
+                using (var stream = File.OpenRead(filePath))
+                {
+                    byte[] hash = sha256.ComputeHash(stream);
+                    return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
+                }
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private KnownVisibleRuntimeAssemblies BuildKnownVisibleRuntimeAssemblies()
+        {
+            var knownAssemblies = new KnownVisibleRuntimeAssemblies();
+
+            foreach (var plugin in Chainloader.PluginInfos.Values)
+            {
+                try
+                {
+                    var instanceProperty = plugin.GetType().GetProperty("Instance", BindingFlags.Public | BindingFlags.Instance);
+                    var instance = instanceProperty?.GetValue(plugin);
+                    var pluginAssembly = instance?.GetType().Assembly;
+                    var assemblyPath = TryGetAssemblyLocation(pluginAssembly);
+                    if (string.IsNullOrWhiteSpace(assemblyPath)) continue;
+
+                    knownAssemblies.ExactAssemblyPaths.Add(assemblyPath);
+                    foreach (var referencedAssembly in pluginAssembly.GetReferencedAssemblies())
+                    {
+                        if (!string.IsNullOrWhiteSpace(referencedAssembly.Name))
+                        {
+                            knownAssemblies.AllowedCompanionAssemblyNames.Add(referencedAssembly.Name);
+                        }
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            return knownAssemblies;
+        }
+
+        private static bool ShouldIgnorePluginGuid(string guid)
+        {
+            return !string.IsNullOrWhiteSpace(guid) && IgnoredPluginGuids.Contains(guid);
+        }
+
+        private bool IsAllowedPluginGuid(string guid)
+        {
+            return _allowedModsSnapshot.ContainsGuid(guid);
+        }
+
+        private LocalPluginScanResult BuildLocalPluginScanResult()
+        {
+            var result = new LocalPluginScanResult();
+            var installedGuids = new HashSet<string>(
+                Chainloader.PluginInfos.Values.Select(plugin => plugin.Metadata.GUID).Where(guid => !string.IsNullOrWhiteSpace(guid)),
+                StringComparer.OrdinalIgnoreCase);
+            var knownVisibleAssemblies = BuildKnownVisibleRuntimeAssemblies();
+
+            result.MissingModNames.AddRange(_allowedModsSnapshot.GetMissingModNames(installedGuids));
+
+            foreach (var plugin in Chainloader.PluginInfos.Values)
+            {
+                if (ShouldIgnorePluginGuid(plugin.Metadata.GUID)) continue;
+                if (!IsAllowedPluginGuid(plugin.Metadata.GUID))
+                {
+                    result.HasIllegalMods = true;
+                    break;
+                }
+
+                // Hash verification: if the manifest has hash constraints for this GUID, the installed DLL must match
+                if (_allowedModsSnapshot.HasHashConstraints)
+                {
+                    var allowedHashes = _allowedModsSnapshot.GetAllowedHashes(plugin.Metadata.GUID);
+                    if (allowedHashes != null && allowedHashes.Count > 0)
+                    {
+                        try
+                        {
+                            var instanceProperty = plugin.GetType().GetProperty("Instance", BindingFlags.Public | BindingFlags.Instance);
+                            var instance = instanceProperty?.GetValue(plugin);
+                            var assemblyPath = TryGetAssemblyLocation(instance?.GetType().Assembly);
+                            if (!string.IsNullOrWhiteSpace(assemblyPath) && File.Exists(assemblyPath))
+                            {
+                                string actualHash = ComputeSha256Hex(assemblyPath);
+                                if (!string.IsNullOrWhiteSpace(actualHash) && !allowedHashes.Contains(actualHash))
+                                {
+                                    result.TamperedModNames.Add(plugin.Metadata.Name);
+                                    result.HasIllegalMods = true;
+                                }
+                            }
+                        }
+                        catch
+                        {
+                            // If we can't read the assembly, treat it as suspicious
+                        }
+                    }
+                }
+            }
+
+            foreach (var assemblyPath in _observedRuntimeAssemblyPaths.OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
+            {
+                if (knownVisibleAssemblies.ExactAssemblyPaths.Contains(assemblyPath)) continue;
+
+                string assemblySimpleName = TryGetAssemblySimpleName(assemblyPath);
+                bool isAllowedCompanion = !assemblyPath.Contains(Path.DirectorySeparatorChar + "Cheats" + Path.DirectorySeparatorChar)
+                    && !string.IsNullOrWhiteSpace(assemblySimpleName)
+                    && knownVisibleAssemblies.AllowedCompanionAssemblyNames.Contains(assemblySimpleName);
+
+                if (isAllowedCompanion) continue;
+
+                result.SuspiciousRuntimeAssemblies.Add(assemblyPath.Replace(NormalizePath(AppDomain.CurrentDomain.BaseDirectory) + Path.DirectorySeparatorChar, string.Empty));
+                result.HasIllegalMods = true;
+            }
+
+            return result;
+        }
 
         // Config value accessors using ConfigEntry references
         private float ConfigX { get => _configX?.Value ?? PlayerPrefs.GetFloat("CompCheck_X", 20f); }
@@ -174,7 +537,11 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             _currentLobby = lobby;
             _inLobby = true;
             float now = Time.time;
-            UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] ✓ OnLobbyEntered: {lobby.Id.Value}, member count: {lobby.MemberCount}");
+            // Capture lobby name from Steam metadata — available to all players (host and non-host)
+            string steamLobbyName = lobby.GetData("name");
+            if (!string.IsNullOrWhiteSpace(steamLobbyName))
+                _currentLobbyName = steamLobbyName;
+            UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] ✓ OnLobbyEntered: {lobby.Id.Value}, member count: {lobby.MemberCount}, lobby name: '{steamLobbyName}'");
             foreach (var member in lobby.Members)
             {
                 if (member.Id.Value == (ulong)Steamworks.SteamClient.SteamId) continue;
@@ -245,8 +612,16 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             
             // Subscribe to API configuration changes
             UnifiedPlugin.ApiConfigChanged += OnApiConfigChanged;
+            AppDomain.CurrentDomain.AssemblyLoad += OnRuntimeAssemblyLoaded;
+            CaptureLoadedRuntimeAssemblies();
             
             StartCoroutine(GetNetworkTime());
+        }
+
+        void OnDestroy()
+        {
+            UnifiedPlugin.ApiConfigChanged -= OnApiConfigChanged;
+            AppDomain.CurrentDomain.AssemblyLoad -= OnRuntimeAssemblyLoaded;
         }
 
         private void OnApiConfigChanged()
@@ -417,7 +792,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             }
             else
             {
-                var allowedNames = new HashSet<string>(_allowedModsMap.Values.Select(v => v.ToLowerInvariant()));
+                var allowedNames = new HashSet<string>(_allowedModsSnapshot.DisplayNames.Select(v => v.ToLowerInvariant()));
 
                 foreach (var kvp in _playerComplianceStatus)
                 {
@@ -833,7 +1208,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 
                 foreach (var plugin in Chainloader.PluginInfos.Values)
                 {
-                    if (plugin.Metadata.GUID.StartsWith("BepInEx") || plugin.Metadata.GUID.ToLower().Contains("compplugincheck") || plugin.Metadata.GUID == "com.sbgl.unified") continue;
+                    if (ShouldIgnorePluginGuid(plugin.Metadata.GUID)) continue;
                     sb.Append($"{plugin.Metadata.Name}|{plugin.Metadata.Version};");
                 }
                 
@@ -1544,13 +1919,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 yield return w.SendWebRequest();
                 if (w.result == UnityWebRequest.Result.Success)
                 {
-                    _allowedModsMap.Clear();
-                    foreach (string line in w.downloadHandler.text.Split('\n'))
-                    {
-                        if (string.IsNullOrWhiteSpace(line)) continue;
-                        if (line.Contains("|")) { var p = line.Split('|'); _allowedModsMap[p[1].Trim()] = p[0].Trim(); }
-                        else { _allowedModsMap[line.Trim()] = line.Trim(); }
-                    }
+                    _allowedModsSnapshot = AllowedModsSnapshot.Parse(w.downloadHandler.text);
                 }
             }
         }
@@ -1558,7 +1927,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         private void UpdateUIReport()
         {
             StringBuilder sb = new StringBuilder();
-            _anyIllegalMods = false;
+            var localPluginScan = BuildLocalPluginScanResult();
             sb.AppendLine($"User: <color=#FFFFFF>{_activeUsername}</color>");
             sb.AppendLine($"Rank: <color=#00FF00>#{_playerRank}</color> / {_totalPlayers}");
             sb.AppendLine($"Win Rate: <color=#FFA500>{_winRate}</color>");
@@ -1567,22 +1936,13 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             sb.AppendLine($"Avg. Par: <color=#CC88FF>{_avgScore}</color>");
             sb.AppendLine($"Matches: <color=#FFFFFF>{_matches}</color> | Top 3s: <color=#00FF00>{_top3s}</color>");
 
-            var instGuids = Chainloader.PluginInfos.Values.Select(p => p.Metadata.GUID).ToList();
-            _missingModNames = _allowedModsMap.Where(kvp => !kvp.Key.ToLower().Contains("compplugincheck") && !instGuids.Contains(kvp.Key)).Select(kvp => kvp.Value).ToList();
-
-            foreach (var plugin in Chainloader.PluginInfos.Values)
-            {
-                if (plugin.Metadata.GUID.ToLower().Contains("compplugincheck") || plugin.Metadata.GUID.StartsWith("BepInEx")) continue;
-                if (!_allowedModsMap.ContainsKey(plugin.Metadata.GUID)) _anyIllegalMods = true;
-            }
-
             if (ConfigShowModList)
             {
                 sb.AppendLine("--- <color=#AAAAAA>MY MODS</color> ---");
                 foreach (var plugin in Chainloader.PluginInfos.Values)
                 {
-                    if (plugin.Metadata.GUID.ToLower().Contains("compplugincheck") || plugin.Metadata.GUID.StartsWith("BepInEx")) continue;
-                    sb.AppendLine($"{(_allowedModsMap.ContainsKey(plugin.Metadata.GUID) ? "<color=#00FF00>O</color>" : "<color=#FF0000>X</color>")} <size=11>{plugin.Metadata.Name}</size>");
+                    if (ShouldIgnorePluginGuid(plugin.Metadata.GUID)) continue;
+                    sb.AppendLine($"{(IsAllowedPluginGuid(plugin.Metadata.GUID) ? "<color=#00FF00>O</color>" : "<color=#FF0000>X</color>")} <size=11>{plugin.Metadata.Name}</size>");
                 }
             }
 
@@ -1592,20 +1952,20 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             if (_statsText != null) _statsText.text = sb.ToString();
             
             // Update debug window content
-            UpdateDebugWindow();
+            UpdateDebugWindow(localPluginScan);
             
             // Update warning text UI elements
-            if (_illegalWarningText != null) _illegalWarningText.gameObject.SetActive(_anyIllegalMods);
+            if (_illegalWarningText != null) _illegalWarningText.gameObject.SetActive(localPluginScan.HasIllegalMods);
             if (_missingWarningText != null)
             {
                 string scene = SceneManager.GetActiveScene().name;
                 bool isRange = scene.Contains("Driving") || scene.Contains("Range");
-                _missingWarningText.gameObject.SetActive(_missingModNames.Count > 0 && isRange);
-                if (_missingWarningText.gameObject.activeSelf) _missingWarningText.text = "<color=yellow>MISSING MODS:</color>\n<size=18>" + string.Join(", ", _missingModNames) + "</size>";
+                _missingWarningText.gameObject.SetActive(localPluginScan.MissingModNames.Count > 0 && isRange);
+                if (_missingWarningText.gameObject.activeSelf) _missingWarningText.text = "<color=yellow>MISSING MODS:</color>\n<size=18>" + string.Join(", ", localPluginScan.MissingModNames) + "</size>";
             }
         }
         
-        private void UpdateDebugWindow()
+        private void UpdateDebugWindow(LocalPluginScanResult localPluginScan)
         {
             if (_debugWindowText == null || _debugWindowObj == null) return;
             
@@ -1615,13 +1975,30 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 debugSb.AppendLine("--- DEBUG INFORMATION ---");
                 debugSb.AppendLine($"Config Show Debug: {ConfigShowDebugWindow}");
                 debugSb.AppendLine($"Remote Players Count: {_remotePlayerMods.Count}");
-                debugSb.AppendLine($"Allowed Mods Count: {_allowedModsMap.Count}");
-                debugSb.AppendLine($"Missing Mods Count: {_missingModNames.Count}");
-                debugSb.AppendLine($"Any Illegal Mods: {_anyIllegalMods}");
+                debugSb.AppendLine($"Allowed Mods Count: {_allowedModsSnapshot.Count}");
+                debugSb.AppendLine($"Hash Enforcement: {(_allowedModsSnapshot.HasHashConstraints ? "ON" : "OFF (legacy)")}");
+                debugSb.AppendLine($"Missing Mods Count: {localPluginScan.MissingModNames.Count}");
+                debugSb.AppendLine($"Tampered Mods Count: {localPluginScan.TamperedModNames.Count}");
+                debugSb.AppendLine($"Suspicious Runtime Assemblies: {localPluginScan.SuspiciousRuntimeAssemblies.Count}");
+                debugSb.AppendLine($"Any Illegal Mods: {localPluginScan.HasIllegalMods}");
                 debugSb.AppendLine($"Sync Status: {_syncStatus}");
                 debugSb.AppendLine($"Last Sync Time: {_lastSyncTime}");
                 debugSb.AppendLine($"Player ID: {ConfigPlayerId}");
                 debugSb.AppendLine($"Resolved ID: {ResolvedID}");
+                if (localPluginScan.TamperedModNames.Count > 0)
+                {
+                    debugSb.AppendLine("--- HASH MISMATCH (TAMPERED) ---");
+                    foreach (var modName in localPluginScan.TamperedModNames)
+                        debugSb.AppendLine(modName);
+                }
+                if (localPluginScan.SuspiciousRuntimeAssemblies.Count > 0)
+                {
+                    debugSb.AppendLine("--- SUSPICIOUS RUNTIME ASSEMBLIES ---");
+                    foreach (var assemblyPath in localPluginScan.SuspiciousRuntimeAssemblies)
+                    {
+                        debugSb.AppendLine(assemblyPath);
+                    }
+                }
                 debugSb.AppendLine("--- REMOTE PLAYERS ---");
                 
                 foreach (var player in _remotePlayerMods)

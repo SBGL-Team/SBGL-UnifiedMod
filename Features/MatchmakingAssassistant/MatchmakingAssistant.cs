@@ -12,6 +12,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Text;
 using Newtonsoft.Json.Linq;
 using SBGL.UnifiedMod.Core;
@@ -55,7 +56,7 @@ namespace SBGLeagueAutomation
         private MatchmakingSession _currentSession = null;
         private bool _isHost = false;
         private bool _hasAccepted = false;
-        private string _hostRulesetSelection = ""; // "ranked" or "pro_series", empty until selected
+        private string _hostRulesetSelection = "ranked"; // "ranked" or "pro_series"
         private DateTime? _queueStartTime = null;
         private bool _hostLobbyStarted = false;
         private bool _hostServerWasActive = false;
@@ -70,14 +71,21 @@ namespace SBGLeagueAutomation
         // Progressive match tracking - for updating scores after each hole
         private string _currentMatchId = null;
         private Dictionary<string, string> _playerMatchEntryIds = new Dictionary<string, string>(); // player_id -> entry_id
+        private Dictionary<string, string> _playerIdsByName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); // player_name -> player_id
         private Dictionary<string, int> _lastSubmittedScores = new Dictionary<string, int>(); // player_name -> score
         private Dictionary<string, int> _lastSubmittedScoresVsPar = new Dictionary<string, int>(); // player_name -> vs_par
+        private int _matchExpectedPlayerCount = 2;
         private bool _matchEntriesCreated = false;
         private bool _matchCreationInProgress = false;
         private bool _isInGameplay = false;
         private Coroutine _monitorCoroutine = null;
         private Coroutine _lobbyMonitorCoroutine = null;
+        private float _nextEnsureMatchCreateAttemptAt = 0f;
         private string _localManualSessionId = null;
+        
+        // Active season cache - fetched from API at startup
+        private string _activeSeasonId = null;
+        private bool _activeSeasonFetched = false;
         
         // UI Helpers
         private List<string> _debugLogs = new List<string>();
@@ -94,6 +102,12 @@ namespace SBGLeagueAutomation
         private DateTime _uploadNotificationTime = DateTime.MinValue;
         private const float _uploadNotificationDuration = 4f; // Show for 4 seconds
         private Color _uploadNotificationColor = new Color(0.2f, 0.85f, 1f);
+        // Temporary live diagnostics for lobby-name resolution and mode/ruleset source.
+        private string _debugLobbySessionSource = "";
+        private string _debugLobbyPrefsSource = "";
+        private string _debugLobbyCapturedSource = "";
+        private string _debugLobbyResolved = "";
+        private string _debugLobbyResolvedBy = "none";
 
         // Match Result Submission Service
         private MatchResultSubmissionService _matchResultSubmission;
@@ -284,6 +298,11 @@ namespace SBGLeagueAutomation
                     }));
                 }
 
+                // Always keep monitor alive during gameplay so late creation can happen even if match-start creation was missed.
+                if (_monitorCoroutine == null) {
+                    _monitorCoroutine = StartCoroutine(MonitorAndUpdateScores());
+                }
+
                 // Start lobby rename monitor so a mid-round rename to SBGL-* triggers upload
                 if (_lobbyMonitorCoroutine != null) {
                     StopCoroutine(_lobbyMonitorCoroutine);
@@ -337,6 +356,7 @@ namespace SBGLeagueAutomation
                 // Reset per-match tracking so that starting a new round creates a fresh upload
                 _currentMatchId = null;
                 _playerMatchEntryIds.Clear();
+                _playerIdsByName.Clear();
                 _lastSubmittedScores.Clear();
                 _lastSubmittedScoresVsPar.Clear();
                 _matchEntriesCreated = false;
@@ -413,7 +433,7 @@ namespace SBGLeagueAutomation
             _currentSession = null;
             _isHost = false;
             _hasAccepted = false;
-            _hostRulesetSelection = "";
+            _hostRulesetSelection = "ranked";
             _queueStartTime = null;
             _hostLobbyStarted = false;
             _hostServerWasActive = false;
@@ -449,6 +469,7 @@ namespace SBGLeagueAutomation
             // Reset progressive match tracking
             _currentMatchId = null;
             _playerMatchEntryIds.Clear();
+            _playerIdsByName.Clear();
             _lastSubmittedScores.Clear();
             _lastSubmittedScoresVsPar.Clear();
             _matchCreationInProgress = false;
@@ -456,6 +477,7 @@ namespace SBGLeagueAutomation
             _isInGameplay = false;
             _cachedLeaderboardScores.Clear();
             _cachedLeaderboardScoresVsPar.Clear();
+            _nextEnsureMatchCreateAttemptAt = 0f;
         }
 
         private void OnDestroy() {
@@ -532,6 +554,11 @@ namespace SBGLeagueAutomation
 
                 // Only proceed with sync if the profile is successfully loaded
                 if (_userProfile != null) {
+                    // Fetch active season once after profile resolves
+                    if (!_activeSeasonFetched) {
+                        yield return FetchActiveSeasonId();
+                    }
+
                     bool isInMenuScene = SceneManager.GetActiveScene().name.ToLower().Contains("menu");
 
                     // Check for a queued entry created via the website (on init and whenever idle)
@@ -905,22 +932,20 @@ namespace SBGLeagueAutomation
             // If it's 'pending_accept', the website waits.
             _isHost = (_currentSession.host_player_id == _userProfile.id);
             
-            if (_currentSession.status == "ready") {
-                Log("All players accepted. Match is READY.");
-                
-                // Store match configuration in PlayerPrefs for Harmony patches to use
-                // Only if fields are present (backwards compatibility with older API)
-                if (!string.IsNullOrEmpty(_currentSession.match_type) && !string.IsNullOrEmpty(_currentSession.selected_course))
+            if (_currentSession.status == "ready" || _currentSession.status == "in_progress") {
+                Log(_currentSession.status == "ready"
+                    ? "All players accepted. Match is READY."
+                    : "Session is IN_PROGRESS - syncing match configuration for mid-match join.");
+
+                // Always attempt to store config; storage method applies safe ranked defaults when fields are missing.
+                try
                 {
-                    try
-                    {
-                        StoreMatchConfigurationInPlayerPrefs(_currentSession);
-                    }
-                    catch (System.Exception ex)
-                    {
-                        Log($"<color=yellow>[Session] Failed to store match configuration: {ex.Message}</color>");
-                        // Continue anyway - don't let this block the match flow
-                    }
+                    StoreMatchConfigurationInPlayerPrefs(_currentSession);
+                }
+                catch (System.Exception ex)
+                {
+                    Log($"<color=yellow>[Session] Failed to store match configuration: {ex.Message}</color>");
+                    // Continue anyway - don't let this block the match flow
                 }
             }
         }
@@ -1011,39 +1036,41 @@ namespace SBGLeagueAutomation
                     return;
                 }
 
-                if (string.IsNullOrEmpty(session.match_type) || string.IsNullOrEmpty(session.selected_course))
-                {
-                    Log("<color=yellow>[Config] Match type or course is empty, skipping configuration storage</color>");
-                    return;
-                }
+                string rawMatchType = session.match_type ?? string.Empty;
+                bool isProSeries = rawMatchType.IndexOf("pro_series", StringComparison.OrdinalIgnoreCase) >= 0;
+                string matchTypeToStore = isProSeries ? Season1RuleSet.MATCH_TYPE_PRO_SERIES : Season1RuleSet.MATCH_TYPE_RANKED;
+                int seasonToStore = session.season > 0 ? session.season : Season1RuleSet.SEASON;
 
                 // Validate course is approved before storing
                 try
                 {
                     RuleSetManager.SetLogger(_bepinexLogger);
-                    bool isCourseValid = RuleSetManager.ValidateCourseForRanked(session.selected_course);
+                    bool isCourseValid = !string.IsNullOrEmpty(session.selected_course)
+                        && RuleSetManager.ValidateCourseForRanked(session.selected_course);
                     
                     string courseToStore = isCourseValid ? session.selected_course : MapPoolConfig.GetRandomApprovedCourse().Name;
 
                     // Store configuration in PlayerPrefs for patches to access
-                    PlayerPrefs.SetString("MatchType", session.match_type);
+                    PlayerPrefs.SetString("MatchType", matchTypeToStore);
                     PlayerPrefs.SetString("SelectedCourse", courseToStore);
-                    PlayerPrefs.SetInt("Season", session.season);
+                    PlayerPrefs.SetInt("Season", seasonToStore);
+                    PlayerPrefs.SetString("HostRuleset", isProSeries ? "pro_series" : "ranked");
                     PlayerPrefs.Save();
 
-                    Log($"<color=cyan>[Config] Stored match configuration: Type={session.match_type}, Course={courseToStore}, Season={session.season}</color>");
+                    Log($"<color=cyan>[Config] Stored match configuration: Type={matchTypeToStore}, Course={courseToStore}, Season={seasonToStore}</color>");
 
                     // Log the configuration for audit trail
-                    RuleSetManager.LogMatchConfiguration(session.match_type, courseToStore, session.season);
+                    RuleSetManager.LogMatchConfiguration(matchTypeToStore, courseToStore, seasonToStore);
                 }
                 catch (System.Exception ruleEx)
                 {
-                    Log($"<color=yellow>[Config] Error during rule validation, storing raw config: {ruleEx.Message}</color>");
+                    Log($"<color=yellow>[Config] Error during rule validation, storing fallback config: {ruleEx.Message}</color>");
                     
-                    // Store raw config anyway as fallback
-                    PlayerPrefs.SetString("MatchType", session.match_type);
-                    PlayerPrefs.SetString("SelectedCourse", session.selected_course);
-                    PlayerPrefs.SetInt("Season", session.season);
+                    // Store fallback config anyway
+                    PlayerPrefs.SetString("MatchType", matchTypeToStore);
+                    PlayerPrefs.SetString("SelectedCourse", string.IsNullOrEmpty(session.selected_course) ? MapPoolConfig.GetRandomApprovedCourse().Name : session.selected_course);
+                    PlayerPrefs.SetInt("Season", seasonToStore);
+                    PlayerPrefs.SetString("HostRuleset", isProSeries ? "pro_series" : "ranked");
                     PlayerPrefs.Save();
                 }
             }
@@ -1078,8 +1105,9 @@ namespace SBGLeagueAutomation
 
             // Ensure ruleset has been selected (read from PlayerPrefs set by driving range panel)
             string rulesetFromPrefs = PlayerPrefs.GetString("HostRuleset", "");
-            if (string.IsNullOrEmpty(_hostRulesetSelection))
-                _hostRulesetSelection = string.IsNullOrEmpty(rulesetFromPrefs) ? "ranked" : rulesetFromPrefs;
+            _hostRulesetSelection = string.Equals(rulesetFromPrefs, "pro_series", StringComparison.OrdinalIgnoreCase)
+                ? "pro_series"
+                : "ranked";
             
             var mainMenu = UnityEngine.Object.FindAnyObjectByType<MainMenu>();
             if (mainMenu != null) {
@@ -1188,8 +1216,10 @@ namespace SBGLeagueAutomation
 
             // Pro Series match submission is handled manually — skip automated entry creation
             string currentMatchType = PlayerPrefs.GetString("MatchType", "");
-            if (currentMatchType.Contains("pro_series")) {
+            if (currentMatchType.IndexOf("pro_series", StringComparison.OrdinalIgnoreCase) >= 0) {
                 Log("<color=yellow>[Match Creation] Pro Series match — skipping automated submission (handled manually)</color>");
+                // Mark as handled for this round so the gameplay monitor does not keep retrying auto-creation.
+                _matchEntriesCreated = true;
                 yield break;
             }
 
@@ -1226,6 +1256,7 @@ namespace SBGLeagueAutomation
 
             _cachedLeaderboardScores = playerScores;
             _cachedLeaderboardScoresVsPar = playerScoresVsPar;
+            _matchExpectedPlayerCount = Mathf.Max(2, startingLeaderboard?.Count ?? 0);
 
             // Step 1: Check if another player already created the Match record for this round via P2P
             // Wait up to 8 seconds for a broadcast Match ID before creating our own
@@ -1283,12 +1314,16 @@ namespace SBGLeagueAutomation
 
             // Step 2: Create initial MatchEntry records for all players
             _playerMatchEntryIds.Clear();
+            _playerIdsByName.Clear();
             _lastSubmittedScores.Clear();
             _lastSubmittedScoresVsPar.Clear();
 
             List<string> playerIds = (_currentSession != null && _currentSession.player_ids != null && _currentSession.player_ids.Count > 0)
                 ? _currentSession.player_ids
                 : new List<string> { _userProfile.id };
+
+            yield return EnrichPlayerIdsFromLeaderboard(startingLeaderboard, playerIds);
+            _matchExpectedPlayerCount = Mathf.Max(2, playerIds.Count);
 
             foreach (string playerId in playerIds) {
                 string playerName = null;
@@ -1328,6 +1363,8 @@ namespace SBGLeagueAutomation
                 }
 
                 if (!string.IsNullOrEmpty(playerName)) {
+                    _playerIdsByName[playerName] = playerId;
+
                     if (_cachedLeaderboardScores.TryGetValue(playerName, out int score)) {
                         gamePoints = score;
                         _cachedLeaderboardScoresVsPar.TryGetValue(playerName, out scoreVsPar);
@@ -1376,7 +1413,9 @@ namespace SBGLeagueAutomation
             Log($"<color=green>[Match Creation] ✓ Match and entries initialized. Starting score monitoring...</color>");
 
             // Start monitoring for score changes during gameplay
-            _monitorCoroutine = StartCoroutine(MonitorAndUpdateScores());
+            if (_monitorCoroutine == null) {
+                _monitorCoroutine = StartCoroutine(MonitorAndUpdateScores());
+            }
         }
 
         private IEnumerator MonitorLobbyNameForUpload() {
@@ -1407,8 +1446,23 @@ namespace SBGLeagueAutomation
         private IEnumerator MonitorAndUpdateScores() {
             Log($"<color=cyan>[Match Monitor] Starting score monitoring for gameplay</color>");
             
-            while (_isInGameplay && _currentMatchId != null) {
+            while (_isInGameplay) {
                 yield return new WaitForSeconds(2f); // Check every 2 seconds
+
+                // If scene-load creation was missed, retry creating/adopting match mid-round for any mod user.
+                if (!_matchEntriesCreated
+                    && !_matchCreationInProgress
+                    && Time.realtimeSinceStartup >= _nextEnsureMatchCreateAttemptAt) {
+                    _nextEnsureMatchCreateAttemptAt = Time.realtimeSinceStartup + 6f;
+                    bool shouldUpload = false;
+                    yield return ValidateMatchUpload((ok) => shouldUpload = ok);
+                    if (shouldUpload) {
+                        Log("<color=yellow>[Match Monitor] Missing match records mid-round - attempting creation/adoption...</color>");
+                        yield return CreateMatchAndEntries();
+                    }
+                }
+
+                if (_currentMatchId == null) continue;
 
                 // Refresh leaderboard data
                 var liveLeaderboard = UnityEngine.Object.FindAnyObjectByType<SBGLLiveLeaderboard.LiveLeaderboardPlugin>(FindObjectsInactive.Include);
@@ -1440,24 +1494,8 @@ namespace SBGLeagueAutomation
 
                     if (scoresChanged) {
                         // Find the player ID and entry ID for this player
-                        string playerId = null;
-                        string entryId = null;
-
-                        if (player.Name == _userProfile.display_name) {
-                            playerId = _userProfile.id;
-                        } else {
-                            // Try to find in player match entry IDs
-                            if (_currentSession != null && _currentSession.player_ids != null) {
-                                foreach (var pid in _currentSession.player_ids) {
-                                    if (_playerMatchEntryIds.ContainsKey(pid)) {
-                                        // For opponents, we'd need name mapping - skip for now
-                                        continue;
-                                    }
-                                }
-                            }
-                        }
-
-                        if (!string.IsNullOrEmpty(playerId) && _playerMatchEntryIds.TryGetValue(playerId, out entryId)) {
+                        if (TryGetPlayerIdForName(player.Name, out string playerId)
+                            && _playerMatchEntryIds.TryGetValue(playerId, out string entryId)) {
                             int finishPosition = GetPlayerFinishPosition(player.Name, allLeaderboardPlayers);
                             yield return UpdateMatchEntry(entryId, playerId, player.Name, newGamePoints, newScoreVsPar, finishPosition);
                             _lastSubmittedScores[player.Name] = newGamePoints;
@@ -1468,6 +1506,7 @@ namespace SBGLeagueAutomation
             }
 
             Log($"<color=cyan>[Match Monitor] Score monitoring ended</color>");
+            _monitorCoroutine = null;
         }
 
         private IEnumerator UpdateMatchEntry(string entryId, string playerId, string playerName, int gamePoints, int scoreVsPar, int finishPosition = 0) {
@@ -1513,6 +1552,77 @@ namespace SBGLeagueAutomation
             return 0; // Not found
         }
 
+        private bool TryGetPlayerIdForName(string playerName, out string playerId) {
+            playerId = null;
+            if (string.IsNullOrWhiteSpace(playerName)) return false;
+
+            if (_playerIdsByName.TryGetValue(playerName, out string mappedId) && !string.IsNullOrWhiteSpace(mappedId)) {
+                playerId = mappedId;
+                return true;
+            }
+
+            if (_userProfile != null && string.Equals(playerName, _userProfile.display_name, StringComparison.OrdinalIgnoreCase)) {
+                playerId = _userProfile.id;
+                return !string.IsNullOrWhiteSpace(playerId);
+            }
+
+            return false;
+        }
+
+        private IEnumerator EnrichPlayerIdsFromLeaderboard(List<SBGLLiveLeaderboard.LiveLeaderboardPlugin.SBGLPlayer> startingLeaderboard, List<string> playerIds) {
+            if (startingLeaderboard == null || startingLeaderboard.Count == 0 || playerIds == null) yield break;
+
+            var knownIds = new HashSet<string>(playerIds.Where(id => !string.IsNullOrWhiteSpace(id)), StringComparer.OrdinalIgnoreCase);
+            var knownNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            if (_userProfile != null && !string.IsNullOrWhiteSpace(_userProfile.display_name) && !string.IsNullOrWhiteSpace(_userProfile.id)) {
+                knownNames.Add(_userProfile.display_name);
+                knownIds.Add(_userProfile.id);
+                if (!playerIds.Contains(_userProfile.id)) playerIds.Add(_userProfile.id);
+            }
+
+            // Learn names for already-known IDs so we don't duplicate via leaderboard lookup.
+            foreach (string existingId in knownIds.ToList()) {
+                if (_userProfile != null && string.Equals(existingId, _userProfile.id, StringComparison.OrdinalIgnoreCase)) continue;
+
+                yield return CallAPI($"/Player/{existingId}", "GET", "", (res) => {
+                    JObject profile = ParseApiSingleObject(res);
+                    string existingName = (string)profile?["display_name"];
+                    if (!string.IsNullOrWhiteSpace(existingName)) {
+                        knownNames.Add(existingName);
+                    }
+                });
+            }
+
+            // Resolve missing leaderboard players to player IDs via exact name lookup.
+            foreach (var lbPlayer in startingLeaderboard) {
+                if (lbPlayer == null || string.IsNullOrWhiteSpace(lbPlayer.Name)) continue;
+                if (knownNames.Contains(lbPlayer.Name)) continue;
+
+                string escapedName = Regex.Escape(lbPlayer.Name);
+                string query = "{\"display_name\":{\"$regex\":\"^" + escapedName + "$\",\"$options\":\"i\"}}";
+                string playerIdFromName = null;
+
+                yield return CallAPI($"/Player?q={UnityWebRequest.EscapeURL(query)}", "GET", "", (res) => {
+                    var rows = ParseApiObjectList(res);
+                    JObject first = rows.FirstOrDefault();
+                    if (first != null) {
+                        playerIdFromName = (string)first["id"];
+                    }
+                });
+
+                if (!string.IsNullOrWhiteSpace(playerIdFromName)) {
+                    knownNames.Add(lbPlayer.Name);
+                    if (knownIds.Add(playerIdFromName)) {
+                        playerIds.Add(playerIdFromName);
+                        Log($"<color=cyan>[Match Creation] Resolved leaderboard player {lbPlayer.Name} -> {playerIdFromName}</color>");
+                    }
+                } else {
+                    Log($"<color=yellow>[Match Creation] Could not resolve leaderboard player '{lbPlayer.Name}' to a Player ID</color>");
+                }
+            }
+        }
+
         private IEnumerator FinalizeMatchStats() {
             // Wait for leaderboard to finalize
             yield return new WaitForSeconds(1.5f);
@@ -1556,14 +1666,8 @@ namespace SBGLeagueAutomation
                 }
 
                 // Find entry ID for this player
-                string playerId = null;
-                string entryId = null;
-
-                if (player.Name == _userProfile.display_name) {
-                    playerId = _userProfile.id;
-                }
-
-                if (!string.IsNullOrEmpty(playerId) && _playerMatchEntryIds.TryGetValue(playerId, out entryId)) {
+                if (TryGetPlayerIdForName(player.Name, out string playerId)
+                    && _playerMatchEntryIds.TryGetValue(playerId, out string entryId)) {
                     // Perform final update
                     Log($"<color=cyan>[Match Finalize] Final update for {player.Name}: {finalGamePoints} pts, {finalScoreVsPar} vs par, Position: {finishPosition}</color>");
                     yield return UpdateMatchEntry(entryId, playerId, player.Name, finalGamePoints, finalScoreVsPar, finishPosition);
@@ -1702,11 +1806,34 @@ namespace SBGLeagueAutomation
             }
         }
 
+        private IEnumerator FetchActiveSeasonId() {
+            _activeSeasonFetched = true; // Mark as attempted so we don't retry every loop tick
+            string query = UnityWebRequest.EscapeURL("{\"status\":\"Active\"}");
+            yield return CallAPI($"/Season?q={query}&limit=1", "GET", "", (res) => {
+                if (string.IsNullOrEmpty(res)) return;
+                try {
+                    JToken token = JToken.Parse(res);
+                    JObject season = (token is JArray arr)
+                        ? arr.OfType<JObject>().FirstOrDefault()
+                        : token as JObject;
+                    string id = season?["id"]?.ToString();
+                    if (!string.IsNullOrEmpty(id)) {
+                        _activeSeasonId = id;
+                        Log($"<color=cyan>[Season] Active season resolved: {id}</color>");
+                    } else {
+                        Log($"<color=yellow>[Season] No active season found in API — falling back to hardcoded ID</color>");
+                    }
+                } catch (System.Exception ex) {
+                    Log($"<color=orange>[Season] Error parsing season response: {ex.Message}</color>");
+                }
+            });
+        }
+
         private IEnumerator SubmitMatchEntry(MatchStats stats, System.Action<string> onMatchIdReceived) {
             if (stats == null) yield break;
 
             // Map to Match schema - these are the fields the API expects
-            string seasonId = Season1RuleSet.SEASON_ID;
+            string seasonId = _activeSeasonId ?? Season1RuleSet.SEASON_ID;
             string rawMatchType = PlayerPrefs.GetString("MatchType", "mmr");
             string apiMatchType = rawMatchType.Contains("pro_series") ? "pro_series" : "mmr";
             bool isProSeries = apiMatchType == "pro_series";
@@ -1716,7 +1843,7 @@ namespace SBGLeagueAutomation
                 ["season_id"] = seasonId,
                 ["match_date"] = stats.match_date,
                 ["match_type"] = apiMatchType,
-                ["player_count"] = 2,
+                ["player_count"] = Mathf.Max(2, _matchExpectedPlayerCount),
                 ["status"] = "Pending",
                 ["submitted_by_name"] = stats.player_name,
                 ["mode"] = "",
@@ -1842,6 +1969,7 @@ namespace SBGLeagueAutomation
 
                 // Upload notification is relevant in gameplay too; draw it regardless of scene.
                 DrawUploadNotification();
+                DrawLiveUploadDebugOverlay();
 
                 // Only show menu UI in menu scenes
                 // Match configuration display is handled by RuleSetDisplayManager
@@ -2042,6 +2170,27 @@ namespace SBGLeagueAutomation
             string htmlColor = ColorUtility.ToHtmlStringRGB(_uploadNotificationColor);
             GUI.Label(new Rect(notificationX, notificationY + 10, notificationWidth, 30), $"<color=#{htmlColor}><b>{_uploadNotification}</b></color>", notificationStyle);
             GUI.color = Color.white;
+        }
+
+        private void DrawLiveUploadDebugOverlay()
+        {
+            if (!(_showFlowDebugConfig?.Value ?? false)) return;
+
+            float width = 860f;
+            float height = 62f;
+            float x = (Screen.width - width) / 2f;
+            float y = Screen.height - 170f;
+
+            GUIStyle style = GUI.skin != null ? new GUIStyle(GUI.skin.label) : new GUIStyle();
+            style.alignment = TextAnchor.MiddleLeft;
+            style.fontSize = 11;
+            style.richText = true;
+
+            GUI.Box(new Rect(x, y, width, height), "");
+            string line1 = $"LobbySources s='{Truncate(_debugLobbySessionSource, 24)}' p='{Truncate(_debugLobbyPrefsSource, 24)}' c='{Truncate(_debugLobbyCapturedSource, 24)}'";
+            string line2 = $"LobbyResolved '{Truncate(_debugLobbyResolved, 40)}' via={_debugLobbyResolvedBy} | SessionType='{Truncate(_currentSession?.match_type ?? "", 24)}' MatchType='{Truncate(PlayerPrefs.GetString("MatchType", ""), 24)}' HostRuleset='{Truncate(PlayerPrefs.GetString("HostRuleset", ""), 14)}'";
+            GUI.Label(new Rect(x + 10f, y + 7f, width - 20f, 20f), line1, style);
+            GUI.Label(new Rect(x + 10f, y + 29f, width - 20f, 20f), line2, style);
         }
 
         public async void JoinBySteamLink(string steamLink, string password) {
@@ -2261,8 +2410,21 @@ namespace SBGLeagueAutomation
             // Get lobby name from either session or PlayerPrefs/current lobby
             string lobbyName = ResolveCurrentLobbyName();
 
-            // Check: Validate lobby name starts with "SBGL-"
-            if (string.IsNullOrEmpty(lobbyName) || !lobbyName.StartsWith("SBGL-", StringComparison.OrdinalIgnoreCase))
+            if (string.IsNullOrEmpty(lobbyName))
+            {
+                bool allowFallback = _isInGameplay || IsRankedTriggered || (_currentSession != null);
+                if (allowFallback)
+                {
+                    Log("<color=orange>[Match Upload Validation] Lobby name unresolved (blank). Allowing upload due to active ranked/session context.</color>");
+                    ShowUploadNotification("Uploading match results (lobby name unresolved)...", "info");
+                    callback?.Invoke(true);
+                    yield break;
+                }
+            }
+
+            // "SBGL-*" means wildcard after the SBGL- prefix.
+            // Accept any normalized lobby name that starts with SBGL-.
+            if (!IsSbglLobbyName(lobbyName))
             {
                 Log($"<color=yellow>[Match Upload Validation] Lobby name '{lobbyName}' does not match 'SBGL-*' pattern</color>");
                 ShowUploadNotification($"Upload blocked: Lobby '{lobbyName}' is not SBGL-*", "warning");
@@ -2307,17 +2469,69 @@ namespace SBGLeagueAutomation
 
         private string ResolveCurrentLobbyName()
         {
-            if (_currentSession != null && !string.IsNullOrEmpty(_currentSession.lobby_name)) {
-                return _currentSession.lobby_name;
-            }
+            string sessionLobbyName = NormalizeLobbyName(_currentSession?.lobby_name);
+            string playerPrefsLobbyName = NormalizeLobbyName(PlayerPrefs.GetString("LobbyName", ""));
+            string capturedLobbyName = NormalizeLobbyName(SBGL.UnifiedMod.Features.CompetitivePluginCheck.CompetitivePluginCheck._currentLobbyName);
 
-            string playerPrefsLobbyName = PlayerPrefs.GetString("LobbyName", "");
-            if (!string.IsNullOrEmpty(playerPrefsLobbyName)) {
+            _debugLobbySessionSource = sessionLobbyName;
+            _debugLobbyPrefsSource = playerPrefsLobbyName;
+            _debugLobbyCapturedSource = capturedLobbyName;
+
+            Log($"<color=cyan>[LobbyName] Sources: session='{sessionLobbyName}', prefs='{playerPrefsLobbyName}', captured='{capturedLobbyName}'</color>");
+
+            // Prefer whichever source actually matches SBGL-* first, then fallback to any non-empty source.
+            if (IsSbglLobbyName(capturedLobbyName)) {
+                _debugLobbyResolved = capturedLobbyName;
+                _debugLobbyResolvedBy = "captured(sbgl)";
+                return capturedLobbyName;
+            }
+            if (IsSbglLobbyName(sessionLobbyName)) {
+                _debugLobbyResolved = sessionLobbyName;
+                _debugLobbyResolvedBy = "session(sbgl)";
+                return sessionLobbyName;
+            }
+            if (IsSbglLobbyName(playerPrefsLobbyName)) {
+                _debugLobbyResolved = playerPrefsLobbyName;
+                _debugLobbyResolvedBy = "prefs(sbgl)";
                 return playerPrefsLobbyName;
             }
 
-            string capturedLobbyName = SBGL.UnifiedMod.Features.CompetitivePluginCheck.CompetitivePluginCheck._currentLobbyName;
-            return capturedLobbyName ?? "";
+            if (!string.IsNullOrEmpty(capturedLobbyName)) {
+                _debugLobbyResolved = capturedLobbyName;
+                _debugLobbyResolvedBy = "captured";
+                return capturedLobbyName;
+            }
+            if (!string.IsNullOrEmpty(sessionLobbyName)) {
+                _debugLobbyResolved = sessionLobbyName;
+                _debugLobbyResolvedBy = "session";
+                return sessionLobbyName;
+            }
+            if (!string.IsNullOrEmpty(playerPrefsLobbyName)) {
+                _debugLobbyResolved = playerPrefsLobbyName;
+                _debugLobbyResolvedBy = "prefs";
+                return playerPrefsLobbyName;
+            }
+
+            _debugLobbyResolved = "";
+            _debugLobbyResolvedBy = "none";
+            return "";
+        }
+
+        private static string NormalizeLobbyName(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+
+            // Remove rich-text tags and invisible separators before comparison.
+            string cleaned = Regex.Replace(value, "<.*?>", string.Empty)
+                .Replace("\u200B", string.Empty)
+                .Trim();
+            return cleaned;
+        }
+
+        private static bool IsSbglLobbyName(string lobbyName)
+        {
+            return !string.IsNullOrEmpty(lobbyName)
+                && lobbyName.StartsWith("SBGL-", StringComparison.OrdinalIgnoreCase);
         }
 
         public class PlayerProfile 
@@ -2365,7 +2579,10 @@ namespace SBGLeagueAutomation
     [HarmonyPatch(typeof(BNetworkManager), nameof(BNetworkManager.LobbyName), MethodType.Setter)]
     public static class LobbyPatch { 
         public static void Prefix(ref string value) { 
-            if (SBGLPlugin.IsRankedTriggered) value = PlayerPrefs.GetString("LobbyName"); 
+            if (SBGLPlugin.IsRankedTriggered) {
+                var pref = PlayerPrefs.GetString("LobbyName");
+                if (!string.IsNullOrEmpty(pref)) value = pref;
+            }
         } 
     }
 }
