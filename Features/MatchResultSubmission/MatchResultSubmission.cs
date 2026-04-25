@@ -2,9 +2,12 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
+using SBGL.UnifiedMod.Core;
 using SBGLLiveLeaderboard;
+using Steamworks;
 
 namespace SBGLeagueAutomation
 {
@@ -17,6 +20,42 @@ namespace SBGLeagueAutomation
     /// </summary>
     public class MatchResultSubmissionService
     {
+        // ==========================================
+        // P2P MATCH ID COORDINATION
+        // Set by CompetitivePluginCheck when a SBGL_MATCH_ID: packet is received,
+        // so that non-host players adopt the same Match record instead of creating duplicates.
+        // ==========================================
+        private const int SBGL_NET_CHANNEL = 2622; // Same channel as CompetitivePluginCheck
+        internal static string ReceivedP2PMatchId = null;
+
+        /// <summary>Called by CompetitivePluginCheck when a SBGL_MATCH_ID: P2P packet arrives.</summary>
+        internal static void HandleIncomingMatchIdBroadcast(string matchId)
+        {
+            if (!string.IsNullOrEmpty(matchId))
+                ReceivedP2PMatchId = matchId;
+        }
+
+        /// <summary>Broadcasts a Match ID to all known peers over Steam P2P.</summary>
+        internal static void BroadcastMatchId(string matchId, IEnumerable<ulong> peers)
+        {
+            if (!SteamClient.IsValid || string.IsNullOrEmpty(matchId)) return;
+            try
+            {
+                byte[] data = Encoding.UTF8.GetBytes($"SBGL_MATCH_ID:{matchId}");
+                int sent = 0;
+                foreach (var peer in peers)
+                {
+                    try { SteamNetworking.SendP2PPacket(peer, data, -1, SBGL_NET_CHANNEL, P2PSend.Reliable); sent++; }
+                    catch { }
+                }
+                UnityEngine.Debug.Log($"[SBGL-MatchResult] Broadcast Match ID {matchId} to {sent} peers");
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogWarning($"[SBGL-MatchResult] BroadcastMatchId error: {ex.Message}");
+            }
+        }
+
         private SBGLPlugin.MatchmakingSession _currentSession;
         private SBGLPlugin.PlayerProfile _userProfile;
         private string _currentMatchId;
@@ -355,22 +394,37 @@ namespace SBGLeagueAutomation
         {
             if (stats == null || _currentSession == null) yield break;
 
-            string seasonId = "69de6bf4fb103cb0d5eb00c5"; // Placeholder - should be dynamic
+            string seasonId = Season1RuleSet.SEASON_ID;
+            bool isProSeries = stats.match_type != null && stats.match_type.Contains("pro_series");
+            string apiMatchType = isProSeries ? "pro_series" : "mmr";
+            string mode = isProSeries ? "Pro Series" : "Ranked";
 
-            string mode = stats.match_type != null && stats.match_type.Contains("pro_series") ? "Pro Series" : "Ranked";
+            var payload = new JObject {
+                ["matchmaking_session_id"] = _currentSession.id,
+                ["season_id"] = seasonId,
+                ["match_date"] = stats.match_date,
+                ["match_type"] = apiMatchType,
+                ["course_name"] = stats.course_name,
+                ["player_count"] = 2,
+                ["status"] = "Pending",
+                ["submitted_by_name"] = stats.player_name,
+                ["mode"] = mode,
+                ["notes"] = "Auto-submitted via SBGL Unified Mod"
+            };
 
-            string json = "{" +
-                $"\"matchmaking_session_id\":\"{_currentSession.id}\"," +
-                $"\"season_id\":\"{seasonId}\"," +
-                $"\"match_date\":\"{stats.match_date}\"," +
-                $"\"match_type\":\"{stats.match_type}\"," +
-                $"\"course_name\":\"{stats.course_name}\"," +
-                $"\"player_count\":2," +
-                $"\"status\":\"Pending\"," +
-                $"\"submitted_by_name\":\"{stats.player_name}\"," +
-                $"\"mode\":\"{mode}\"," +
-                $"\"notes\":\"Auto-submitted via SBGL Unified Mod\"" +
-            "}";
+            if (isProSeries) {
+                payload["pro_series_season_id"] = Season1RuleSet.PRO_SERIES_SEASON_ID;
+
+                int proSeriesWeek = PlayerPrefs.GetInt("ProSeriesWeek", 0);
+                if (proSeriesWeek > 0)
+                    payload["pro_series_week"] = proSeriesWeek;
+
+                string proSeriesEventName = PlayerPrefs.GetString("ProSeriesEventName", "");
+                if (!string.IsNullOrWhiteSpace(proSeriesEventName))
+                    payload["pro_series_event_name"] = proSeriesEventName;
+            }
+
+            string json = payload.ToString(Newtonsoft.Json.Formatting.None);
 
             Log($"<color=cyan>[Match Stats] Submitting Match entry to API</color>");
             Log($"<color=cyan>[Match Stats] Full URL: {_getBaseApiUrl()}/Match</color>");

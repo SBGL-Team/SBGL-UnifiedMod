@@ -153,39 +153,36 @@ namespace SBGL.UnifiedMod.Patches
             string hostRuleset = PlayerPrefs.GetString("HostRuleset", "ranked");
             bool isProSeries = hostRuleset == "pro_series";
 
-            var allHoles = GameManager.AllCourses.allHoles;
-            System.Collections.Generic.List<HoleData> eligibleHoles;
-
+            // Pro Series: maps are set manually — skip all course selection logic
             if (isProSeries)
             {
-                // Pro Series: all maps are eligible — no banned courses
-                eligibleHoles = new System.Collections.Generic.List<HoleData>(allHoles);
-                Log($"  Pro Series: all {eligibleHoles.Count} courses eligible (no banned maps)");
+                Log("  Pro Series: skipping course selection (maps set manually)");
+                return;
             }
-            else
+
+            var allHoles = GameManager.AllCourses.allHoles;
+
+            // Season 1 ranked: filter to approved courses only
+            var approvedNames = new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+            foreach (var course in MapPoolConfig.GetApprovedCourses())
+                approvedNames.Add(course.Name);
+
+            var eligibleHoles = new System.Collections.Generic.List<HoleData>();
+            var matchedNames = new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+            foreach (var hole in allHoles)
             {
-                // Season 1 ranked: filter to approved courses only
-                var approvedNames = new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
-                foreach (var course in MapPoolConfig.GetApprovedCourses())
-                    approvedNames.Add(course.Name);
-
-                eligibleHoles = new System.Collections.Generic.List<HoleData>();
-                var matchedNames = new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
-                foreach (var hole in allHoles)
+                if (approvedNames.Contains(hole.name))
                 {
-                    if (approvedNames.Contains(hole.name))
-                    {
-                        eligibleHoles.Add(hole);
-                        matchedNames.Add(hole.name);
-                    }
+                    eligibleHoles.Add(hole);
+                    matchedNames.Add(hole.name);
                 }
+            }
 
-                // Log any approved names that had no matching hole asset — helps fix MapPoolConfig mismatches
-                foreach (var name in approvedNames)
-                {
-                    if (!matchedNames.Contains(name))
-                        LogError($"  [UNMATCHED] Approved name '{name}' not found in allHoles — check MapPoolConfig spelling");
-                }
+            // Log any approved names that had no matching hole asset — helps fix MapPoolConfig mismatches
+            foreach (var name in approvedNames)
+            {
+                if (!matchedNames.Contains(name))
+                    LogError($"  [UNMATCHED] Approved name '{name}' not found in allHoles — check MapPoolConfig spelling");
             }
 
             if (eligibleHoles.Count == 0)

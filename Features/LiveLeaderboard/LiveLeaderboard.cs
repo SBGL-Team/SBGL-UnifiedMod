@@ -51,6 +51,8 @@ namespace SBGLLiveLeaderboard
         private List<SBGLPlayer> _persistentLeaderboard = new List<SBGLPlayer>();
         private List<SBGLPlayer> _finalLeaderboardSnapshot = new List<SBGLPlayer>(); // Store final scores when leaving gameplay
         private bool _showFinalSnapshot = false; // True when in driving range to freeze display
+        private readonly Dictionary<string, SBGLPlayer> _lastKnownRoundPlayers = new Dictionary<string, SBGLPlayer>(System.StringComparer.OrdinalIgnoreCase);
+        private bool _roundCacheActive = false;
         private Dictionary<string, (string mmr, float lastFetchTime)> _mmrCache = new Dictionary<string, (string, float)>();
         private HashSet<string> _pendingRequests = new HashSet<string>();
         
@@ -266,7 +268,16 @@ namespace SBGLLiveLeaderboard
         private void ScrapeData()
         {
             string scene = SceneManager.GetActiveScene().name;
-            if (scene.Contains("Driving") || scene.Contains("Range")) return;
+            if (scene.Contains("Driving") || scene.Contains("Range")) {
+                // End of round/lobby scene: next gameplay scene should start a fresh cache.
+                _roundCacheActive = false;
+                return;
+            }
+
+            if (!_roundCacheActive) {
+                _lastKnownRoundPlayers.Clear();
+                _roundCacheActive = true;
+            }
 
             if (_cachedScoreboard == null)
                 _cachedScoreboard = Object.FindAnyObjectByType<Scoreboard>(FindObjectsInactive.Include);
@@ -310,8 +321,36 @@ namespace SBGLLiveLeaderboard
                 });
             }
 
+            HashSet<string> liveNames = new HashSet<string>(newList.Select(p => p.Name), System.StringComparer.OrdinalIgnoreCase);
+
+            // Keep disconnected players visible with the score they had when they left.
+            foreach (var kvp in _lastKnownRoundPlayers) {
+                if (!liveNames.Contains(kvp.Key) && kvp.Value != null) {
+                    newList.Add(ClonePlayer(kvp.Value));
+                }
+            }
+
             if (newList.Count > 1) CalculateProjectedMMR(newList);
             _persistentLeaderboard = newList.OrderByDescending(p => p.AdjustedPoints).Take(ConfigMaxPlayers).ToList();
+
+            _lastKnownRoundPlayers.Clear();
+            foreach (var player in _persistentLeaderboard) {
+                if (player == null || string.IsNullOrEmpty(player.Name)) continue;
+                _lastKnownRoundPlayers[player.Name] = ClonePlayer(player);
+            }
+        }
+
+        private SBGLPlayer ClonePlayer(SBGLPlayer source)
+        {
+            if (source == null) return null;
+            return new SBGLPlayer {
+                Name = source.Name,
+                BaseScore = source.BaseScore,
+                AdjustedPoints = source.AdjustedPoints,
+                RawStrokes = source.RawStrokes,
+                MMR = source.MMR,
+                ProjectedDisplay = source.ProjectedDisplay
+            };
         }
 
         private void CalculateProjectedMMR(List<SBGLPlayer> players)
@@ -420,7 +459,7 @@ namespace SBGLLiveLeaderboard
         /// </summary>
         public void CaptureLeaderboardSnapshot()
         {
-            _finalLeaderboardSnapshot = new List<SBGLPlayer>(_persistentLeaderboard);
+            _finalLeaderboardSnapshot = _persistentLeaderboard.Select(ClonePlayer).Where(p => p != null).ToList();
             Debug.Log($"[LiveLeaderboard] Captured final snapshot: {_finalLeaderboardSnapshot.Count} players");
         }
 
@@ -431,9 +470,9 @@ namespace SBGLLiveLeaderboard
         public List<SBGLPlayer> GetFinalLeaderboardSnapshot()
         {
             if (_finalLeaderboardSnapshot.Count > 0) {
-                return new List<SBGLPlayer>(_finalLeaderboardSnapshot);
+                return _finalLeaderboardSnapshot.Select(ClonePlayer).Where(p => p != null).ToList();
             }
-            return new List<SBGLPlayer>(_persistentLeaderboard);
+            return _persistentLeaderboard.Select(ClonePlayer).Where(p => p != null).ToList();
         }
     }
 }

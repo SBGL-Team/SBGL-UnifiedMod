@@ -80,6 +80,9 @@
         <Reference Include="UnityEngine.IMGUIModule">
             <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
         </Reference>
+        <Reference Include="UnityEngine.AudioModule">
+            <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\UnityEngine.AudioModule.dll</HintPath>
+        </Reference>
         <Reference Include="UnityEngine.PhysicsModule">
             <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\UnityEngine.PhysicsModule.dll</HintPath>
         </Reference>
@@ -91,6 +94,10 @@
         </Reference>
         <Reference Include="Facepunch.Steamworks.Win64">
             <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\Facepunch.Steamworks.Win64.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
+        <Reference Include="FMODUnity">
+            <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\FMODUnity.dll</HintPath>
             <Private>False</Private>
         </Reference>
         <Reference Include="UnityEngine.InputLegacyModule">

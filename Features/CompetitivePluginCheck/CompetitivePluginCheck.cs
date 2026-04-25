@@ -38,7 +38,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         // Config entry references (injected by UnifiedPlugin)
         private ConfigEntry<float> _configX, _configY, _configWidth, _configAlpha, _configUpdateInterval;
         private ConfigEntry<float> _configCompliancePanelX, _configCompliancePanelY;
-        private ConfigEntry<bool> _configShowModList, _configShowDebugWindow;
+        private ConfigEntry<bool> _configHideUIWindow, _configShowModList, _configShowDebugWindow;
         private ConfigEntry<bool> _configMelonLoaderChatEnabled;
         private ConfigEntry<string> _configPlayerId;
         private const string ALLOWED_MODS_URL = "https://gist.githubusercontent.com/Kingcox22/32b1bcf1bdbec4ec47d086fec70628c1/raw/allowed_mods.txt";
@@ -104,6 +104,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         private float ConfigAlpha { get => _configAlpha?.Value ?? PlayerPrefs.GetFloat("CompCheck_Alpha", 0.85f); }
         private float ConfigCompliancePanelX { get => _configCompliancePanelX?.Value ?? PlayerPrefs.GetFloat("CompCheck_ComplianceX", Screen.width - 420f); set { if (_configCompliancePanelX != null) _configCompliancePanelX.Value = value; } }
         private float ConfigCompliancePanelY { get => _configCompliancePanelY?.Value ?? PlayerPrefs.GetFloat("CompCheck_ComplianceY", Screen.height - 350f); set { if (_configCompliancePanelY != null) _configCompliancePanelY.Value = value; } }
+        private bool ConfigHideUIWindow { get => _configHideUIWindow?.Value ?? (PlayerPrefs.GetInt("CompCheck_HideUIWindow", 0) == 1); }
         private bool ConfigShowModList { get => _configShowModList?.Value ?? (PlayerPrefs.GetInt("CompCheck_ShowModList", 0) == 1); set { if (_configShowModList != null) _configShowModList.Value = value; } }
         private bool ConfigShowDebugWindow { get => _configShowDebugWindow?.Value ?? (PlayerPrefs.GetInt("CompCheck_ShowDebugWindow", 0) == 1); set { if (_configShowDebugWindow != null) _configShowDebugWindow.Value = value; } }
         internal string ConfigPlayerId { get => _configPlayerId?.Value ?? PlayerPrefs.GetString("CompCheck_PlayerId", "PASTE_ID_HERE"); set { if (_configPlayerId != null) _configPlayerId.Value = value; } }
@@ -111,7 +112,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
 
         // Set config entries from parent plugin
         public void SetConfig(ConfigEntry<float> x, ConfigEntry<float> y, ConfigEntry<float> width, ConfigEntry<float> alpha,
-            ConfigEntry<bool> showModList, ConfigEntry<bool> showDebugWindow,
+            ConfigEntry<bool> hideUIWindow, ConfigEntry<bool> showModList, ConfigEntry<bool> showDebugWindow,
             ConfigEntry<float> updateInterval, ConfigEntry<string> playerId,
             ConfigEntry<float> compliancePanelX = null, ConfigEntry<float> compliancePanelY = null,
             ConfigEntry<bool> melonLoaderChatEnabled = null)
@@ -120,6 +121,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             _configY = y;
             _configWidth = width;
             _configAlpha = alpha;
+            _configHideUIWindow = hideUIWindow;
             _configShowModList = showModList;
             _configShowDebugWindow = showDebugWindow;
             _configUpdateInterval = updateInterval;
@@ -229,6 +231,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             if (!PlayerPrefs.HasKey("CompCheck_Width")) PlayerPrefs.SetFloat("CompCheck_Width", 200f);
             if (!PlayerPrefs.HasKey("CompCheck_Alpha")) PlayerPrefs.SetFloat("CompCheck_Alpha", 0.85f);
             if (!PlayerPrefs.HasKey("CompCheck_UpdateInterval")) PlayerPrefs.SetFloat("CompCheck_UpdateInterval", 5f);
+            if (!PlayerPrefs.HasKey("CompCheck_HideUIWindow")) PlayerPrefs.SetInt("CompCheck_HideUIWindow", 0);
             if (!PlayerPrefs.HasKey("CompCheck_ShowModList")) PlayerPrefs.SetInt("CompCheck_ShowModList", 0);
             if (!PlayerPrefs.HasKey("CompCheck_ShowDebugWindow")) PlayerPrefs.SetInt("CompCheck_ShowDebugWindow", 0);
             if (!PlayerPrefs.HasKey("CompCheck_PlayerId")) PlayerPrefs.SetString("CompCheck_PlayerId", "PASTE_ID_HERE");
@@ -283,6 +286,11 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 // Update config if position was clamped
                 if (clampedX != ConfigX) _configX.Value = clampedX;
                 if (clampedY != ConfigY) _configY.Value = clampedY;
+            }
+
+            if (_canvasObj != null)
+            {
+                _canvasObj.SetActive(!ConfigHideUIWindow);
             }
 
             // Update debug window visibility based on config
@@ -818,7 +826,9 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 if (hasMelonLoader)
                 {
                     sb.Append("⚠️USER_HAS_MELONLOADER;");
-                    UnityEngine.Debug.LogError("[SBGL-CompPluginCheck] ⚠️⚠️⚠️ MELONLOADER DETECTED - This player may be using unauthorized mod loader! ⚠️⚠️⚠️");
+                    // Only log the MelonLoader warning once per session, not every broadcast
+                    if (_lastMelonLoaderAnnouncementTime < 0)
+                        UnityEngine.Debug.LogWarning("[SBGL-CompPluginCheck] MelonLoader detected on this client.");
                 }
                 
                 foreach (var plugin in Chainloader.PluginInfos.Values)
@@ -828,7 +838,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 }
                 
                 // Add debug logging
-                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Broadcasting mods (MelonLoader detected: {hasMelonLoader}): {sb.ToString()}");
+                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] BroadcastMyMods (MelonLoader={hasMelonLoader})");
 
                 // Store our own mod list locally so the UI can display it (same format as received reports)
                 // Keep the MelonLoader token so the UI renders the warning line
@@ -847,42 +857,20 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 peersToSend.UnionWith(_remotePlayerMods.Keys);
                 
                 // Also add peers from active P2P connections
-                try
-                {
-                    var networkManager = UnityEngine.Object.FindFirstObjectByType<Mirror.NetworkManager>();
-                    if (networkManager != null && networkManager.isNetworkActive)
-                    {
-                        // Try to get Steam IDs from connections
-                        // This is context-dependent on the game's implementation
-                        UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Found active NetworkManager");
-                    }
-                }
-                catch { }
+                // Suppress the "Found active NetworkManager" log — not useful in steady state
                 
                 // Remove self
                 peersToSend.Remove(SteamClient.SteamId);
                 
-                int peerCount = peersToSend.Count;
-                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Broadcasting to {peerCount} peers (from _knownPeers={_knownPeers.Count}, _remotePlayerMods={_remotePlayerMods.Count})");
+                // Only log broadcast details if there are actually peers to send to
+                if (peersToSend.Count > 0)
+                    UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Broadcasting to {peersToSend.Count} peers");
                 
-                if (peerCount == 0)
-                {
-                    UnityEngine.Debug.LogWarning($"[SBGL-CompPluginCheck] No peers found to broadcast to. This is normal if other players don't have the SBGL mod installed.");
-                }
-                
-                // Send to all discovered peers
+                // Remove the verbose per-send logs; only log send errors
                 foreach (var peer in peersToSend)
                 {
-                    try
-                    {
-                        UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Sending to peer {peer}");
-                        bool success = SteamNetworking.SendP2PPacket(peer, data, -1, SBGL_NET_CHANNEL, P2PSend.Reliable);
-                        UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] SendP2PPacket to {peer} returned: {success}");
-                    }
-                    catch (Exception sendEx)
-                    {
-                        UnityEngine.Debug.LogWarning($"[SBGL-CompPluginCheck] Failed to send to peer {peer}: {sendEx.Message}");
-                    }
+                    try { SteamNetworking.SendP2PPacket(peer, data, -1, SBGL_NET_CHANNEL, P2PSend.Reliable); }
+                    catch (Exception sendEx) { UnityEngine.Debug.LogWarning($"[SBGL-CompPluginCheck] Failed to send to peer {peer}: {sendEx.Message}"); }
                 }
             }
             catch (Exception ex)
@@ -909,7 +897,13 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                     // Add this peer to our known peers so we broadcast back to them
                     _knownPeers.Add(remoteId.Value);
                     
-                    if (msg.StartsWith("SBGL_REPORT:"))
+                    if (msg.StartsWith("SBGL_MATCH_ID:"))
+                    {
+                        string matchId = msg.Replace("SBGL_MATCH_ID:", "").Trim();
+                        SBGLeagueAutomation.MatchResultSubmissionService.HandleIncomingMatchIdBroadcast(matchId);
+                        UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Forwarded P2P Match ID from {remoteId.Value}: {matchId}");
+                    }
+                    else if (msg.StartsWith("SBGL_REPORT:"))
                     {
                         string modList = msg.Replace("SBGL_REPORT:", "");
                         
@@ -948,6 +942,17 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         }
 
         // --- END NEW P2P NETWORKING LOGIC ---
+
+        /// <summary>Returns all known peer Steam IDs (excluding self) for use by other features.</summary>
+        internal static IEnumerable<ulong> GetKnownPeers()
+        {
+            var instance = UnityEngine.Object.FindFirstObjectByType<CompetitivePluginCheck>();
+            if (instance == null) return System.Array.Empty<ulong>();
+            var peers = new HashSet<ulong>(instance._knownPeers);
+            peers.UnionWith(instance._remotePlayerMods.Keys);
+            if (SteamClient.IsValid) peers.Remove(SteamClient.SteamId);
+            return peers;
+        }
 
         private void SendComplianceNotification(ulong steamId, PlayerComplianceStatus status)
         {

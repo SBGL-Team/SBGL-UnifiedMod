@@ -5,7 +5,8 @@ namespace SBGL.UnifiedMod.Core
     public static class Season1RuleSet
     {
         public const int SEASON = 1;
-        public const string SEASON_ID = "season_1";
+        public const string SEASON_ID = "69de6bf4fb103cb0d5eb00c5";
+        public const string PRO_SERIES_SEASON_ID = "69b59af135403a1cb7b113c8";
         public const string MATCH_TYPE_RANKED = "ranked_season_1";
         public const string MATCH_TYPE_PRO_SERIES = "pro_series_season_1";
 
@@ -130,6 +131,7 @@ namespace SBGL.UnifiedMod.Core
             {
                 { MatchSetupRules.Rule.Wind,     1f }, // Low — enabled
                 { MatchSetupRules.Rule.Comeback, 0f }, // Disabled
+                { MatchSetupRules.Rule.WhiteFlag,0f },
             };
         }
 

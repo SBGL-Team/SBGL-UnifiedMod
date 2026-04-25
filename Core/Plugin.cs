@@ -26,7 +26,7 @@ namespace SBGL.UnifiedMod.Core
         public string ProfilePicUrl { get; set; }
         public bool IsResolved { get; set; }
     }
-    [BepInPlugin("com.sbgl.unified", "SBGL Unified Mod", "0.0.4")]
+    [BepInPlugin("com.sbgl.unified", "SBGL Unified Mod", "0.0.5")]
     public class UnifiedPlugin : BaseUnityPlugin
     {
         // ==========================================
@@ -85,6 +85,7 @@ namespace SBGL.UnifiedMod.Core
         public ConfigEntry<float> CompCheck_Y;
         public ConfigEntry<float> CompCheck_Width;
         public ConfigEntry<float> CompCheck_Alpha;
+        public ConfigEntry<bool> CompCheck_HideUIWindow;
         public ConfigEntry<bool> CompCheck_ShowModList;
         public ConfigEntry<bool> CompCheck_ShowDebugWindow;
         public ConfigEntry<float> CompCheck_UpdateInterval;
@@ -98,6 +99,14 @@ namespace SBGL.UnifiedMod.Core
         // ==========================================
         public ConfigEntry<bool> MM_ShowSystemLogs;
         public ConfigEntry<bool> MM_ShowFlowDebug;
+        public ConfigEntry<bool> MM_ShowUploadNotices;
+
+        // ==========================================
+        // PSEUDO DEDICATED SERVER CONFIG
+        // ==========================================
+        public ConfigEntry<bool>   PDS_Enabled;
+        public ConfigEntry<float>  PDS_RequeueDelay;
+        public ConfigEntry<string> PDS_DefaultRuleset;
 
         // ==========================================
         // RULESET DISPLAY CONFIG
@@ -144,6 +153,8 @@ namespace SBGL.UnifiedMod.Core
                 new ConfigDescription("Panel width", new AcceptableValueRange<float>(150f, 800f)));
             CompCheck_Alpha = Config.Bind("CompetitiveCheck.UI Appearance", "Opacity", 0.85f, 
                 new ConfigDescription("Panel transparency", new AcceptableValueRange<float>(0f, 1f)));
+            CompCheck_HideUIWindow = Config.Bind("CompetitiveCheck.UI Appearance", "Hide UI Window Completely", false,
+                "Hide the Competitive Plugin Check overlay window entirely.");
             CompCheck_ShowModList = Config.Bind("CompetitiveCheck.UI Appearance", "Show My Mods", false, "Display local mod list");
             CompCheck_ShowDebugWindow = Config.Bind("CompetitiveCheck.UI Appearance", "Show Debug Window", false, "Display debug information");
             CompCheck_UpdateInterval = Config.Bind("CompetitiveCheck.Logic", "Update Interval", 5f, 
@@ -160,6 +171,17 @@ namespace SBGL.UnifiedMod.Core
             // === MATCHMAKING ASSISTANT CONFIG ===
             MM_ShowSystemLogs = Config.Bind("Matchmaking.UI Settings", "Show System Logs", true, "Display system event logs");
             MM_ShowFlowDebug = Config.Bind("Matchmaking.UI Settings", "Show Flow Debug", false, "Display flow diagnostics");
+            MM_ShowUploadNotices = Config.Bind("Matchmaking.UI Settings", "Show Upload Notices", true, "Show on-screen upload success/failure notices during gameplay");
+
+            // === PSEUDO DEDICATED SERVER CONFIG ===
+            PDS_Enabled = Config.Bind("PseudoDedicatedServer", "Enabled", false,
+                "When true, automatically joins queue, accepts matches, hosts/joins lobbies, and requeues after each match.");
+            PDS_RequeueDelay = Config.Bind("PseudoDedicatedServer", "Requeue Delay Seconds", 10f,
+                new ConfigDescription("How long (seconds) to wait on the Driving Range before returning to main menu to requeue.",
+                    new AcceptableValueRange<float>(3f, 120f)));
+            PDS_DefaultRuleset = Config.Bind("PseudoDedicatedServer", "Default Ruleset", "ranked",
+                new ConfigDescription("Ruleset to apply automatically as host.",
+                    new AcceptableValueList<string>("ranked", "pro_series")));
 
             // === RULESET DISPLAY CONFIG ===
             RS_PosX = Config.Bind("RuleSetDisplay.UI", "X Position", -1f,
@@ -541,7 +563,7 @@ namespace SBGL.UnifiedMod.Core
             UnityEngine.Object.DontDestroyOnLoad(compCheckObj);
             CompetitivePluginCheck compCheck = compCheckObj.AddComponent<CompetitivePluginCheck>();
             compCheck.SetConfig(CompCheck_X, CompCheck_Y, CompCheck_Width, CompCheck_Alpha, 
-                CompCheck_ShowModList, CompCheck_ShowDebugWindow, 
+                CompCheck_HideUIWindow, CompCheck_ShowModList, CompCheck_ShowDebugWindow, 
                 CompCheck_UpdateInterval, CompCheck_PlayerId,
                 CompCheck_CompliancePanelX, CompCheck_CompliancePanelY,
                 CompCheck_MelonLoaderChatEnabled);
@@ -550,7 +572,7 @@ namespace SBGL.UnifiedMod.Core
             GameObject matchmakingObj = new GameObject("SBGL-MatchmakingAssistant");
             UnityEngine.Object.DontDestroyOnLoad(matchmakingObj);
             SBGLPlugin matchmaking = matchmakingObj.AddComponent<SBGLPlugin>();
-            matchmaking.SetConfig(MM_ShowSystemLogs, MM_ShowFlowDebug, Logger);
+            matchmaking.SetConfig(MM_ShowSystemLogs, MM_ShowFlowDebug, MM_ShowUploadNotices, Logger);
             
             // Initialize RuleSet Display Manager as a managed component
             GameObject ruleSetObj = new GameObject("SBGL-RuleSetDisplayManager");
@@ -563,6 +585,12 @@ namespace SBGL.UnifiedMod.Core
             UnityEngine.Object.DontDestroyOnLoad(leaderboardObj);
             LiveLeaderboardPlugin leaderboard = leaderboardObj.AddComponent<LiveLeaderboardPlugin>();
             leaderboard.SetConfig(LL_Width, LL_MaxHeight, LL_PosX, LL_PosY, LL_Opacity, LL_MaxPlayers);
+
+            // Initialize Pseudo Dedicated Server as a managed component
+            GameObject pdsObj = new GameObject("SBGL-PseudoDedicatedServer");
+            UnityEngine.Object.DontDestroyOnLoad(pdsObj);
+            Features.PseudoDedicatedServer pds = pdsObj.AddComponent<Features.PseudoDedicatedServer>();
+            pds.SetConfig(PDS_Enabled, PDS_RequeueDelay, PDS_DefaultRuleset, Logger);
         }
 
         private IEnumerator ResolvePlayerProfile(string playerIdOrName)
@@ -668,6 +696,7 @@ namespace SBGL.UnifiedMod.Core
             PlayerPrefs.SetFloat("CompCheck_Y", CompCheck_Y.Value);
             PlayerPrefs.SetFloat("CompCheck_Width", CompCheck_Width.Value);
             PlayerPrefs.SetFloat("CompCheck_Alpha", CompCheck_Alpha.Value);
+            PlayerPrefs.SetInt("CompCheck_HideUIWindow", CompCheck_HideUIWindow.Value ? 1 : 0);
             PlayerPrefs.SetInt("CompCheck_ShowModList", CompCheck_ShowModList.Value ? 1 : 0);
             PlayerPrefs.SetInt("CompCheck_ShowDebugWindow", CompCheck_ShowDebugWindow.Value ? 1 : 0);
             PlayerPrefs.SetFloat("CompCheck_UpdateInterval", CompCheck_UpdateInterval.Value);
