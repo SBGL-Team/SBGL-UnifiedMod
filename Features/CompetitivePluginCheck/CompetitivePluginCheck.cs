@@ -538,7 +538,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             _inLobby = true;
             float now = Time.time;
             // Capture lobby name from Steam metadata — available to all players (host and non-host)
-            string steamLobbyName = lobby.GetData("name");
+            string steamLobbyName = TryReadLobbyName(lobby);
             if (!string.IsNullOrWhiteSpace(steamLobbyName))
                 _currentLobbyName = steamLobbyName;
             UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] ✓ OnLobbyEntered: {lobby.Id.Value}, member count: {lobby.MemberCount}, lobby name: '{steamLobbyName}'");
@@ -549,6 +549,44 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 _playerDisplayNames[member.Id.Value] = member.Name;
                 AddPlayerToTracking(member.Id.Value, now);
             }
+
+            // If the name wasn't available immediately (common for non-hosts), retry with backoff.
+            // Steam metadata propagates asynchronously — retrying a few times covers this gap.
+            if (string.IsNullOrWhiteSpace(steamLobbyName))
+                StartCoroutine(RetryResolveLobbyName(lobby));
+        }
+
+        private static string TryReadLobbyName(Steamworks.Data.Lobby lobby)
+        {
+            // The game may store the name under any of these keys depending on version.
+            string[] keys = { "name", "Name", "lobby_name", "LobbyName", "server_name" };
+            foreach (var key in keys)
+            {
+                try
+                {
+                    string v = lobby.GetData(key);
+                    if (!string.IsNullOrWhiteSpace(v)) return v;
+                }
+                catch { }
+            }
+            return string.Empty;
+        }
+
+        private System.Collections.IEnumerator RetryResolveLobbyName(Steamworks.Data.Lobby lobby)
+        {
+            float[] delays = { 0.5f, 1.5f, 3.0f, 6.0f };
+            foreach (float delay in delays)
+            {
+                yield return new WaitForSeconds(delay);
+                string name = TryReadLobbyName(lobby);
+                if (!string.IsNullOrWhiteSpace(name))
+                {
+                    _currentLobbyName = name;
+                    UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] ✓ Lobby name resolved (retry +{delay}s): '{name}'");
+                    yield break;
+                }
+            }
+            UnityEngine.Debug.LogWarning("[SBGL-CompPluginCheck] Lobby name still blank after all retries (non-host path).");
         }
 
         private void OnLobbyMemberJoined(Steamworks.Data.Lobby lobby, Steamworks.Friend friend)

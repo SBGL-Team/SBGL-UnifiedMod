@@ -75,6 +75,8 @@ namespace SBGLeagueAutomation
         private Dictionary<string, int> _lastSubmittedScores = new Dictionary<string, int>(); // player_name -> score
         private Dictionary<string, int> _lastSubmittedScoresVsPar = new Dictionary<string, int>(); // player_name -> vs_par
         private int _matchExpectedPlayerCount = 2;
+        private int _lastUploadedPlayerCount = -1;
+        private List<CachedLeaderboardPlayer> _finalLeaderboardSnapshot = new List<CachedLeaderboardPlayer>();
         private bool _matchEntriesCreated = false;
         private bool _matchCreationInProgress = false;
         private bool _isInGameplay = false;
@@ -332,6 +334,7 @@ namespace SBGLeagueAutomation
                     var liveLeaderboard = UnityEngine.Object.FindAnyObjectByType<SBGLLiveLeaderboard.LiveLeaderboardPlugin>(FindObjectsInactive.Include);
                     if (liveLeaderboard != null) {
                         liveLeaderboard.CaptureLeaderboardSnapshot();
+                        CacheLeaderboardSnapshot(liveLeaderboard.GetFinalLeaderboardSnapshot(), "scene transition");
                         Log("<color=green>[Match] ✓ Leaderboard snapshot captured</color>");
                     }
                 } catch (System.Exception ex) {
@@ -339,12 +342,13 @@ namespace SBGLeagueAutomation
                 }
             }
             
-            // Skip match finalization in driving range - scores are already updated after each hole during gameplay
+            // On return to driving range, finalize one last time before clearing per-match state.
             if (sceneName.Contains("drivingrange") || sceneName.Contains("driving range")) {
-                if (IsRankedTriggered && _currentSession != null && _matchEntriesCreated) {
-                    Log("<color=green>[Match Stats] Returned to Driving Range - match already finalized. Skipping redundant update.</color>");
-                    _matchStatsSubmitted = true;
-                    StartCoroutine(UpdateSessionStatus("completed"));
+                if (_matchEntriesCreated && !_matchStatsSubmitted && !string.IsNullOrEmpty(_currentMatchId)) {
+                    Log("<color=cyan>[Match Stats] Returned to Driving Range - running final match finalization before reset...</color>");
+                    StartCoroutine(FinalizeAndResetAfterDrivingRange());
+                } else {
+                    ResetPerMatchState();
                 }
                 
                 // Cancel queue if player enters Driving Range while queued (but not if they already accepted a match)
@@ -352,20 +356,6 @@ namespace SBGLeagueAutomation
                     Log("<color=orange>[Queue] Player entered Driving Range while queued - cancelling queue entry...</color>");
                     StartCoroutine(LeaveQueue());
                 }
-
-                // Reset per-match tracking so that starting a new round creates a fresh upload
-                _currentMatchId = null;
-                _playerMatchEntryIds.Clear();
-                _playerIdsByName.Clear();
-                _lastSubmittedScores.Clear();
-                _lastSubmittedScoresVsPar.Clear();
-                _matchEntriesCreated = false;
-                _matchStatsSubmitted = false;
-                _localManualSessionId = null;
-                _cachedLeaderboardScores.Clear();
-                _cachedLeaderboardScoresVsPar.Clear();
-                MatchResultSubmissionService.ReceivedP2PMatchId = null;
-                Log("<color=cyan>[Match] Per-match state reset - ready for new round</color>");
             }
             
             // Reset state when returning to main menu
@@ -417,6 +407,35 @@ namespace SBGLeagueAutomation
 
             // No existing match found, proceed with submission
             yield return SubmitMatchStats();
+        }
+
+        private IEnumerator FinalizeAndResetAfterDrivingRange() {
+            if (_matchEntriesCreated && !_matchStatsSubmitted && !string.IsNullOrEmpty(_currentMatchId)) {
+                yield return FinalizeMatchStats();
+            }
+
+            if (IsRankedTriggered && _currentSession != null) {
+                yield return UpdateSessionStatus("completed");
+            }
+
+            ResetPerMatchState();
+        }
+
+        private void ResetPerMatchState() {
+            _currentMatchId = null;
+            _playerMatchEntryIds.Clear();
+            _playerIdsByName.Clear();
+            _lastSubmittedScores.Clear();
+            _lastSubmittedScoresVsPar.Clear();
+            _matchEntriesCreated = false;
+            _matchStatsSubmitted = false;
+            _localManualSessionId = null;
+            _cachedLeaderboardScores.Clear();
+            _cachedLeaderboardScoresVsPar.Clear();
+            _finalLeaderboardSnapshot.Clear();
+            MatchResultSubmissionService.ReceivedP2PMatchId = null;
+            _lastUploadedPlayerCount = -1;
+            Log("<color=cyan>[Match] Per-match state reset - ready for new round</color>");
         }
 
         private void ResetPluginState() {
@@ -477,6 +496,8 @@ namespace SBGLeagueAutomation
             _isInGameplay = false;
             _cachedLeaderboardScores.Clear();
             _cachedLeaderboardScoresVsPar.Clear();
+            _finalLeaderboardSnapshot.Clear();
+            _lastUploadedPlayerCount = -1;
             _nextEnsureMatchCreateAttemptAt = 0f;
         }
 
@@ -1256,7 +1277,7 @@ namespace SBGLeagueAutomation
 
             _cachedLeaderboardScores = playerScores;
             _cachedLeaderboardScoresVsPar = playerScoresVsPar;
-            _matchExpectedPlayerCount = Mathf.Max(2, startingLeaderboard?.Count ?? 0);
+            _matchExpectedPlayerCount = startingLeaderboard?.Count ?? 0;
 
             // Step 1: Check if another player already created the Match record for this round via P2P
             // Wait up to 8 seconds for a broadcast Match ID before creating our own
@@ -1318,12 +1339,25 @@ namespace SBGLeagueAutomation
             _lastSubmittedScores.Clear();
             _lastSubmittedScoresVsPar.Clear();
 
+            // If the leaderboard is empty we can't distinguish players from spectators.
+            // Skip round-start entry creation entirely — FinalizeMatchStats will create
+            // late entries for everyone on the final leaderboard snapshot, which naturally
+            // excludes spectators (they never appear on the game leaderboard).
+            if (startingLeaderboard == null || startingLeaderboard.Count == 0) {
+                _matchEntriesCreated = true;
+                Log("<color=yellow>[Match Creation] Leaderboard empty at round start — deferring all MatchEntry creation to finalization</color>");
+                if (_monitorCoroutine == null) {
+                    _monitorCoroutine = StartCoroutine(MonitorAndUpdateScores());
+                }
+                yield break;
+            }
+
             List<string> playerIds = (_currentSession != null && _currentSession.player_ids != null && _currentSession.player_ids.Count > 0)
                 ? _currentSession.player_ids
                 : new List<string> { _userProfile.id };
 
             yield return EnrichPlayerIdsFromLeaderboard(startingLeaderboard, playerIds);
-            _matchExpectedPlayerCount = Mathf.Max(2, playerIds.Count);
+            _matchExpectedPlayerCount = playerIds.Count;
 
             foreach (string playerId in playerIds) {
                 string playerName = null;
@@ -1470,6 +1504,14 @@ namespace SBGLeagueAutomation
 
                 var allLeaderboardPlayers = liveLeaderboard.GetCurrentLeaderboard();
                 if (allLeaderboardPlayers == null || allLeaderboardPlayers.Count == 0) continue;
+
+                CacheLeaderboardSnapshot(allLeaderboardPlayers, "live gameplay");
+
+                int activePlayerCount = allLeaderboardPlayers.Count(p => p != null && !string.IsNullOrWhiteSpace(p.Name));
+                if (activePlayerCount > 0) {
+                    _matchExpectedPlayerCount = activePlayerCount;
+                    yield return UpdateMatchPlayerCountIfNeeded(activePlayerCount, "live leaderboard");
+                }
                 
                 foreach (var player in allLeaderboardPlayers) {
                     if (player == null) continue;
@@ -1493,9 +1535,60 @@ namespace SBGLeagueAutomation
                     }
 
                     if (scoresChanged) {
-                        // Find the player ID and entry ID for this player
-                        if (TryGetPlayerIdForName(player.Name, out string playerId)
-                            && _playerMatchEntryIds.TryGetValue(playerId, out string entryId)) {
+                        string playerId = null;
+                        string entryId = null;
+
+                        if (!TryGetPlayerIdForName(player.Name, out playerId)) {
+                            yield return ResolvePlayerIdByNameFromApi(player.Name, (id) => playerId = id);
+
+                            if (!string.IsNullOrEmpty(playerId)) {
+                                _playerIdsByName[player.Name.Trim()] = playerId;
+                            }
+                        }
+
+                        if (!string.IsNullOrEmpty(playerId)) {
+                            _playerMatchEntryIds.TryGetValue(playerId, out entryId);
+                        }
+
+                        // If we have no entry yet for this leaderboard player, create it mid-round.
+                        if (!string.IsNullOrEmpty(playerId) && string.IsNullOrEmpty(entryId)) {
+                            string preMatchMmr = null;
+                            yield return CallAPI($"/Player/{playerId}", "GET", "", (res) => {
+                                JObject profile = ParseApiSingleObject(res);
+                                object mmrObj = profile?["current_mmr"];
+                                if (mmrObj != null) preMatchMmr = mmrObj.ToString();
+                            });
+
+                            int finishPosition = GetPlayerFinishPosition(player.Name, allLeaderboardPlayers);
+                            int adjustedScore = newGamePoints + (newScoreVsPar * -10);
+                            string mmrField = !string.IsNullOrEmpty(preMatchMmr) ? $",\"pre_match_mmr\":{preMatchMmr}" : "";
+                            string createJson = "{" +
+                                $"\"match_id\":\"{_currentMatchId}\"," +
+                                $"\"player_id\":\"{playerId}\"," +
+                                $"\"player_name\":\"{player.Name}\"," +
+                                $"\"game_points\":{newGamePoints}," +
+                                $"\"over_under\":{newScoreVsPar}," +
+                                $"\"score_vs_par\":{newScoreVsPar}," +
+                                $"\"adjusted_match_score\":{adjustedScore}," +
+                                $"\"finish_position\":{finishPosition}" +
+                                mmrField +
+                                ",\"notes\":\"Live leaderboard backfill during round\"" +
+                            "}";
+
+                            string capturedPlayerId = playerId;
+                            string capturedPlayerName = player.Name;
+                            yield return CallAPI("/MatchEntry", "POST", createJson, (res) => {
+                                JObject response = ParseApiSingleObject(res);
+                                if (response != null) {
+                                    entryId = (string)response["id"];
+                                    _playerMatchEntryIds[capturedPlayerId] = entryId;
+                                    _playerIdsByName[capturedPlayerName.Trim()] = capturedPlayerId;
+                                    Log($"<color=green>[Match Monitor] ✓ Backfilled MatchEntry for {capturedPlayerName}: {entryId}</color>");
+                                }
+                            });
+                        }
+
+                        if (!string.IsNullOrEmpty(entryId) && !string.IsNullOrEmpty(playerId)) {
                             int finishPosition = GetPlayerFinishPosition(player.Name, allLeaderboardPlayers);
                             yield return UpdateMatchEntry(entryId, playerId, player.Name, newGamePoints, newScoreVsPar, finishPosition);
                             _lastSubmittedScores[player.Name] = newGamePoints;
@@ -1552,21 +1645,160 @@ namespace SBGLeagueAutomation
             return 0; // Not found
         }
 
+        private int GetPlayerFinishPosition(string playerName, List<CachedLeaderboardPlayer> finalLeaderboard) {
+            if (string.IsNullOrEmpty(playerName) || finalLeaderboard == null || finalLeaderboard.Count == 0) {
+                return 0;
+            }
+
+            for (int i = 0; i < finalLeaderboard.Count; i++) {
+                if (finalLeaderboard[i] != null && string.Equals(finalLeaderboard[i].Name, playerName, StringComparison.OrdinalIgnoreCase)) {
+                    return i + 1;
+                }
+            }
+
+            return 0;
+        }
+
         private bool TryGetPlayerIdForName(string playerName, out string playerId) {
             playerId = null;
             if (string.IsNullOrWhiteSpace(playerName)) return false;
 
-            if (_playerIdsByName.TryGetValue(playerName, out string mappedId) && !string.IsNullOrWhiteSpace(mappedId)) {
+            string normalizedName = playerName.Trim();
+
+            if (_playerIdsByName.TryGetValue(normalizedName, out string mappedId) && !string.IsNullOrWhiteSpace(mappedId)) {
                 playerId = mappedId;
                 return true;
             }
 
-            if (_userProfile != null && string.Equals(playerName, _userProfile.display_name, StringComparison.OrdinalIgnoreCase)) {
+            if (_userProfile != null && string.Equals(normalizedName, _userProfile.display_name, StringComparison.OrdinalIgnoreCase)) {
                 playerId = _userProfile.id;
                 return !string.IsNullOrWhiteSpace(playerId);
             }
 
             return false;
+        }
+
+        private IEnumerator ResolvePlayerIdByNameFromApi(string playerName, Action<string> onResolved) {
+            if (onResolved == null) yield break;
+
+            if (string.IsNullOrWhiteSpace(playerName)) {
+                onResolved(null);
+                yield break;
+            }
+
+            string normalizedName = playerName.Trim();
+            string resolvedId = null;
+
+            string escapedExactName = normalizedName.Replace("\\", "\\\\").Replace("\"", "\\\"");
+            string exactQuery = "{\"display_name\":\"" + escapedExactName + "\"}";
+            yield return CallAPI($"/Player?q={UnityWebRequest.EscapeURL(exactQuery)}&limit=1", "GET", "", (res) => {
+                JObject first = ParseApiObjectList(res)?.FirstOrDefault();
+                if (first != null) {
+                    resolvedId = (string)first["id"];
+                }
+            });
+
+            if (string.IsNullOrWhiteSpace(resolvedId)) {
+                string escapedRegexName = Regex.Escape(normalizedName).Replace("\\ ", " ");
+                string anchoredRegexQuery = "{\"display_name\":{\"$regex\":\"^" + escapedRegexName + "$\",\"$options\":\"i\"}}";
+                yield return CallAPI($"/Player?q={UnityWebRequest.EscapeURL(anchoredRegexQuery)}&limit=1", "GET", "", (res) => {
+                    JObject first = ParseApiObjectList(res)?.FirstOrDefault();
+                    if (first != null) {
+                        resolvedId = (string)first["id"];
+                    }
+                });
+            }
+
+            if (string.IsNullOrWhiteSpace(resolvedId)) {
+                string fuzzyName = normalizedName.Replace("\\", "\\\\").Replace("\"", "\\\"");
+                string fuzzyQuery = "{\"display_name\":{\"$regex\":\"" + fuzzyName + "\",\"$options\":\"i\"}}";
+                yield return CallAPI($"/Player?q={UnityWebRequest.EscapeURL(fuzzyQuery)}", "GET", "", (res) => {
+                    var rows = ParseApiObjectList(res);
+                    if (rows == null || rows.Count == 0) return;
+
+                    JObject exact = rows.FirstOrDefault(r => string.Equals((string)r?["display_name"], normalizedName, StringComparison.OrdinalIgnoreCase));
+                    JObject pick = exact ?? rows.FirstOrDefault();
+                    if (pick != null) {
+                        resolvedId = (string)pick["id"];
+                    }
+                });
+            }
+
+            onResolved(resolvedId);
+        }
+
+        private IEnumerator UpdateMatchPlayerCountIfNeeded(int actualPlayerCount, string source) {
+            if (actualPlayerCount <= 0 || string.IsNullOrEmpty(_currentMatchId)) {
+                yield break;
+            }
+
+            if (_lastUploadedPlayerCount == actualPlayerCount) {
+                yield break;
+            }
+
+            string json = "{" + $"\"player_count\":{actualPlayerCount}" + "}";
+            yield return CallAPI($"/Match/{_currentMatchId}", "PUT", json, (res) => {
+                JObject response = ParseApiSingleObject(res);
+                if (response != null) {
+                    _lastUploadedPlayerCount = actualPlayerCount;
+                    Log($"<color=green>[Match Count] ✓ Updated match player_count to {actualPlayerCount} ({source})</color>");
+                } else {
+                    Log($"<color=yellow>[Match Count] Could not confirm player_count update to {actualPlayerCount} ({source})</color>");
+                }
+            });
+        }
+
+        private void CacheLeaderboardSnapshot(List<SBGLLiveLeaderboard.LiveLeaderboardPlugin.SBGLPlayer> players, string source) {
+            if (players == null || players.Count == 0) {
+                return;
+            }
+
+            var snapshot = players
+                .Where(player => player != null && !string.IsNullOrWhiteSpace(player.Name))
+                .Select(player => new CachedLeaderboardPlayer {
+                    Name = player.Name.Trim(),
+                    BaseScore = player.BaseScore,
+                    RawStrokes = player.RawStrokes ?? string.Empty
+                })
+                .ToList();
+
+            if (snapshot.Count == 0) {
+                return;
+            }
+
+            bool newSnapshotHasScores = SnapshotHasMeaningfulScores(snapshot);
+            bool existingSnapshotHasScores = SnapshotHasMeaningfulScores(_finalLeaderboardSnapshot);
+
+            if (!newSnapshotHasScores && existingSnapshotHasScores) {
+                Log($"<color=yellow>[Match Snapshot] Ignoring zeroed {source} snapshot and keeping last in-game results</color>");
+                return;
+            }
+
+            _finalLeaderboardSnapshot = snapshot;
+        }
+
+        private bool SnapshotHasMeaningfulScores(List<CachedLeaderboardPlayer> snapshot) {
+            if (snapshot == null || snapshot.Count == 0) {
+                return false;
+            }
+
+            foreach (var player in snapshot) {
+                if (player == null) continue;
+                if (player.BaseScore != 0) return true;
+                if (ParseScoreVsPar(player.RawStrokes) != 0) return true;
+            }
+
+            return false;
+        }
+
+        private int ParseScoreVsPar(string rawStrokes) {
+            if (string.IsNullOrWhiteSpace(rawStrokes)) {
+                return 0;
+            }
+
+            string strokeStr = rawStrokes.Replace("±", "").Trim();
+            int.TryParse(strokeStr, out int scoreVsPar);
+            return scoreVsPar;
         }
 
         private IEnumerator EnrichPlayerIdsFromLeaderboard(List<SBGLLiveLeaderboard.LiveLeaderboardPlugin.SBGLPlayer> startingLeaderboard, List<string> playerIds) {
@@ -1599,17 +1831,9 @@ namespace SBGLeagueAutomation
                 if (lbPlayer == null || string.IsNullOrWhiteSpace(lbPlayer.Name)) continue;
                 if (knownNames.Contains(lbPlayer.Name)) continue;
 
-                string escapedName = Regex.Escape(lbPlayer.Name);
-                string query = "{\"display_name\":{\"$regex\":\"^" + escapedName + "$\",\"$options\":\"i\"}}";
                 string playerIdFromName = null;
 
-                yield return CallAPI($"/Player?q={UnityWebRequest.EscapeURL(query)}", "GET", "", (res) => {
-                    var rows = ParseApiObjectList(res);
-                    JObject first = rows.FirstOrDefault();
-                    if (first != null) {
-                        playerIdFromName = (string)first["id"];
-                    }
-                });
+                yield return ResolvePlayerIdByNameFromApi(lbPlayer.Name, (id) => playerIdFromName = id);
 
                 if (!string.IsNullOrWhiteSpace(playerIdFromName)) {
                     knownNames.Add(lbPlayer.Name);
@@ -1624,9 +1848,6 @@ namespace SBGLeagueAutomation
         }
 
         private IEnumerator FinalizeMatchStats() {
-            // Wait for leaderboard to finalize
-            yield return new WaitForSeconds(1.5f);
-
             // Pro Series match submission is handled manually
             if (PlayerPrefs.GetString("MatchType", "").Contains("pro_series")) {
                 Log("<color=yellow>[Match Finalize] Pro Series match — skipping automated finalization (handled manually)</color>");
@@ -1636,41 +1857,82 @@ namespace SBGLeagueAutomation
 
             Log($"<color=cyan>[Match Finalize] Performing final score update...</color>");
 
-            // Get final leaderboard data (uses snapshot captured when leaving gameplay)
-            var liveLeaderboard = UnityEngine.Object.FindAnyObjectByType<SBGLLiveLeaderboard.LiveLeaderboardPlugin>(FindObjectsInactive.Include);
-            if (liveLeaderboard == null) {
-                Log($"<color=yellow>[Match Finalize] LiveLeaderboard not found</color>");
+            if (_finalLeaderboardSnapshot == null || _finalLeaderboardSnapshot.Count == 0) {
+                Log($"<color=yellow>[Match Finalize] No cached end-of-match leaderboard snapshot available — skipping final upload to avoid driving range zeros</color>");
                 _matchStatsSubmitted = true;
                 yield break;
             }
 
-            var allLeaderboardPlayers = liveLeaderboard.GetFinalLeaderboardSnapshot();
-            if (allLeaderboardPlayers == null || allLeaderboardPlayers.Count == 0) {
-                Log($"<color=yellow>[Match Finalize] No leaderboard data available</color>");
-                _matchStatsSubmitted = true;
-                yield break;
+            int finalPlayerCount = _finalLeaderboardSnapshot.Count(p => p != null && !string.IsNullOrWhiteSpace(p.Name));
+            if (finalPlayerCount > 0) {
+                _matchExpectedPlayerCount = finalPlayerCount;
+                yield return UpdateMatchPlayerCountIfNeeded(finalPlayerCount, "cached final leaderboard");
             }
 
-            Log($"<color=cyan>[Match Finalize] Using final snapshot with {allLeaderboardPlayers.Count} players</color>");
+            Log($"<color=cyan>[Match Finalize] Using cached final snapshot with {_finalLeaderboardSnapshot.Count} players</color>");
 
-            foreach (var player in allLeaderboardPlayers) {
+            foreach (var player in _finalLeaderboardSnapshot) {
                 if (player == null) continue;
 
                 int finalGamePoints = player.BaseScore;
-                int finalScoreVsPar = 0;
-                int finishPosition = GetPlayerFinishPosition(player.Name, allLeaderboardPlayers);
-
-                if (!string.IsNullOrEmpty(player.RawStrokes)) {
-                    string strokeStr = player.RawStrokes.Replace("±", "").Trim();
-                    int.TryParse(strokeStr, out finalScoreVsPar);
-                }
+                int finalScoreVsPar = ParseScoreVsPar(player.RawStrokes);
+                int finishPosition = GetPlayerFinishPosition(player.Name, _finalLeaderboardSnapshot);
 
                 // Find entry ID for this player
-                if (TryGetPlayerIdForName(player.Name, out string playerId)
-                    && _playerMatchEntryIds.TryGetValue(playerId, out string entryId)) {
-                    // Perform final update
-                    Log($"<color=cyan>[Match Finalize] Final update for {player.Name}: {finalGamePoints} pts, {finalScoreVsPar} vs par, Position: {finishPosition}</color>");
+                TryGetPlayerIdForName(player.Name, out string playerId);
+                _playerMatchEntryIds.TryGetValue(playerId ?? "", out string entryId);
+
+                if (!string.IsNullOrEmpty(entryId)) {
+                    // Known entry — perform final update
+                    Log($"<color=cyan>[Match Finalize] Final update for {player.Name}: {finalGamePoints} pts, {finalScoreVsPar} vs par, pos {finishPosition}</color>");
                     yield return UpdateMatchEntry(entryId, playerId, player.Name, finalGamePoints, finalScoreVsPar, finishPosition);
+                } else {
+                    // Player is on the final leaderboard but has no entry (joined late or missed round-start capture)
+                    Log($"<color=yellow>[Match Finalize] {player.Name} has no entry — creating late entry...</color>");
+
+                    // Resolve player ID if we still don't have one
+                    if (string.IsNullOrEmpty(playerId)) {
+                        yield return ResolvePlayerIdByNameFromApi(player.Name, (id) => playerId = id);
+                    }
+
+                    if (string.IsNullOrEmpty(playerId)) {
+                        Log($"<color=yellow>[Match Finalize] Cannot resolve player ID for {player.Name} — skipping late entry</color>");
+                        continue;
+                    }
+
+                    // Fetch pre-match MMR for the late player
+                    string preMatchMmr = null;
+                    yield return CallAPI($"/Player/{playerId}", "GET", "", (res) => {
+                        JObject profile = ParseApiSingleObject(res);
+                        object mmrObj = profile?["current_mmr"];
+                        if (mmrObj != null) preMatchMmr = mmrObj.ToString();
+                    });
+
+                    int adjustedScore = finalGamePoints + (finalScoreVsPar * -10);
+                    string mmrField = !string.IsNullOrEmpty(preMatchMmr) ? $",\"pre_match_mmr\":{preMatchMmr}" : "";
+                    string lateJson = "{" +
+                        $"\"match_id\":\"{_currentMatchId}\"," +
+                        $"\"player_id\":\"{playerId}\"," +
+                        $"\"player_name\":\"{player.Name}\"," +
+                        $"\"game_points\":{finalGamePoints}," +
+                        $"\"over_under\":{finalScoreVsPar}," +
+                        $"\"score_vs_par\":{finalScoreVsPar}," +
+                        $"\"adjusted_match_score\":{adjustedScore}," +
+                        $"\"finish_position\":{finishPosition}" +
+                        mmrField +
+                        $",\"notes\":\"Late entry - joined after match start\"" +
+                    "}";
+
+                    string capturedPlayerId = playerId;
+                    yield return CallAPI("/MatchEntry", "POST", lateJson, (res) => {
+                        JObject response = ParseApiSingleObject(res);
+                        if (response != null) {
+                            string newEntryId = (string)response["id"];
+                            _playerMatchEntryIds[capturedPlayerId] = newEntryId;
+                            _playerIdsByName[player.Name.Trim()] = capturedPlayerId;
+                            Log($"<color=green>[Match Finalize] ✓ Late MatchEntry created for {player.Name}: {newEntryId}</color>");
+                        }
+                    });
                 }
             }
 
@@ -1843,7 +2105,7 @@ namespace SBGLeagueAutomation
                 ["season_id"] = seasonId,
                 ["match_date"] = stats.match_date,
                 ["match_type"] = apiMatchType,
-                ["player_count"] = Mathf.Max(2, _matchExpectedPlayerCount),
+                ["player_count"] = Mathf.Max(0, _matchExpectedPlayerCount),
                 ["status"] = "Pending",
                 ["submitted_by_name"] = stats.player_name,
                 ["mode"] = "",
@@ -1872,6 +2134,7 @@ namespace SBGLeagueAutomation
                 JObject response = ParseApiSingleObject(res);
                 if (response != null) {
                     string entryId = (string)response["id"] ?? "unknown";
+                    _lastUploadedPlayerCount = Mathf.Max(0, _matchExpectedPlayerCount);
                     Log($"<color=green>[Match Stats] ✓ Match entry created (ID: {entryId})</color>");
                     ShowUploadNotification($"Upload success: match ID {entryId}.", "success");
                     onMatchIdReceived?.Invoke(entryId);
@@ -2572,6 +2835,11 @@ namespace SBGLeagueAutomation
             // public int opponent_score;
             // public List<int> hole_scores;
             // public string result; // "win" / "loss" / "tie"
+        }
+        private class CachedLeaderboardPlayer {
+            public string Name;
+            public int BaseScore;
+            public string RawStrokes;
         }
         public struct PlayerData { public string name, mmr; }
     }
