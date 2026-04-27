@@ -30,7 +30,7 @@ namespace SBGL.UnifiedMod.Core
         public string ProfilePicUrl { get; set; }
         public bool IsResolved { get; set; }
     }
-    [BepInPlugin("com.sbgl.unified", "SBGL Unified Mod", "0.0.5")]
+    [BepInPlugin("com.sbgl.unified", "SBGL Unified Mod", "0.0.7")]
     public class UnifiedPlugin : BaseUnityPlugin
     {
         // ==========================================
@@ -104,6 +104,7 @@ namespace SBGL.UnifiedMod.Core
         public ConfigEntry<bool> MM_ShowSystemLogs;
         public ConfigEntry<bool> MM_ShowFlowDebug;
         public ConfigEntry<bool> MM_ShowUploadNotices;
+        public ConfigEntry<bool> MM_IgnoreSbglLobbyRequirement;
 
         // ==========================================
         // PSEUDO DEDICATED SERVER CONFIG
@@ -180,6 +181,7 @@ namespace SBGL.UnifiedMod.Core
             MM_ShowSystemLogs = Config.Bind("Matchmaking.UI Settings", "Show System Logs", true, "Display system event logs");
             MM_ShowFlowDebug = Config.Bind("Matchmaking.UI Settings", "Show Flow Debug", false, "Display flow diagnostics");
             MM_ShowUploadNotices = Config.Bind("Matchmaking.UI Settings", "Show Upload Notices", true, "Show on-screen upload success/failure notices during gameplay");
+            MM_IgnoreSbglLobbyRequirement = Config.Bind("Matchmaking.UI Settings", "Upload All Matches", false, "When enabled, uploads match results for any match and ignores the SBGL-* lobby-name requirement.");
 
             // === PSEUDO DEDICATED SERVER CONFIG ===
             PDS_Enabled = Config.Bind("PseudoDedicatedServer", "Enabled", false,
@@ -642,7 +644,7 @@ namespace SBGL.UnifiedMod.Core
             GameObject matchmakingObj = new GameObject("SBGL-MatchmakingAssistant");
             UnityEngine.Object.DontDestroyOnLoad(matchmakingObj);
             SBGLPlugin matchmaking = matchmakingObj.AddComponent<SBGLPlugin>();
-            matchmaking.SetConfig(MM_ShowSystemLogs, MM_ShowFlowDebug, MM_ShowUploadNotices, Logger);
+            matchmaking.SetConfig(MM_ShowSystemLogs, MM_ShowFlowDebug, MM_ShowUploadNotices, MM_IgnoreSbglLobbyRequirement, Logger);
             
             // Initialize RuleSet Display Manager as a managed component
             GameObject ruleSetObj = new GameObject("SBGL-RuleSetDisplayManager");
@@ -776,6 +778,7 @@ namespace SBGL.UnifiedMod.Core
             // === MATCHMAKING CONFIG SYNC ===
 
             PlayerPrefs.SetInt("MM_ShowSystemLogs", MM_ShowSystemLogs.Value ? 1 : 0);
+            PlayerPrefs.SetInt("MM_IgnoreSbglLobbyRequirement", MM_IgnoreSbglLobbyRequirement.Value ? 1 : 0);
 
             // === LEADERBOARD CONFIG SYNC ===
             PlayerPrefs.SetFloat("LL_Width", LL_Width.Value);

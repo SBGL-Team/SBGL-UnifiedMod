@@ -64,6 +64,9 @@
         <Reference Include="UnityEngine.UnityWebRequestTextureModule">
             <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\UnityEngine.UnityWebRequestTextureModule.dll</HintPath>
         </Reference>
+        <Reference Include="UnityEngine.ImageConversionModule">
+            <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\UnityEngine.ImageConversionModule.dll</HintPath>
+        </Reference>
         <Reference Include="Newtonsoft.Json">
             <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\Newtonsoft.Json.dll</HintPath>
             <Private>False</Private>

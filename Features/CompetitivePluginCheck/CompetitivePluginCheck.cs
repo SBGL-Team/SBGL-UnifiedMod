@@ -1367,6 +1367,15 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             return peers;
         }
 
+        internal static string GetCurrentSteamLobbyId()
+        {
+            var instance = UnityEngine.Object.FindFirstObjectByType<CompetitivePluginCheck>();
+            if (instance == null || !instance._inLobby || !instance._currentLobby.Id.IsValid)
+                return string.Empty;
+
+            return instance._currentLobby.Id.Value.ToString();
+        }
+
         private void SendComplianceNotification(ulong steamId, PlayerComplianceStatus status)
         {
             if (_playersNotifiedAbout.Contains(steamId)) return; // Already notified about this player
