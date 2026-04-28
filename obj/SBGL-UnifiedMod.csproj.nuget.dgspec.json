@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "C:\\Projects\\Super Battle Golf\\Mods\\SBGL-UnifiedMod\\SBGL-UnifiedMod.csproj": {}
+    "c:\\Projects\\Super Battle Golf\\Mods\\SBGL-UnifiedMod\\SBGL-UnifiedMod.csproj": {}
   },
   "projects": {
-    "C:\\Projects\\Super Battle Golf\\Mods\\SBGL-UnifiedMod\\SBGL-UnifiedMod.csproj": {
+    "c:\\Projects\\Super Battle Golf\\Mods\\SBGL-UnifiedMod\\SBGL-UnifiedMod.csproj": {
       "version": "0.0.1",
       "restore": {
-        "projectUniqueName": "C:\\Projects\\Super Battle Golf\\Mods\\SBGL-UnifiedMod\\SBGL-UnifiedMod.csproj",
+        "projectUniqueName": "c:\\Projects\\Super Battle Golf\\Mods\\SBGL-UnifiedMod\\SBGL-UnifiedMod.csproj",
         "projectName": "SBGL.UnifiedMod",
-        "projectPath": "C:\\Projects\\Super Battle Golf\\Mods\\SBGL-UnifiedMod\\SBGL-UnifiedMod.csproj",
+        "projectPath": "c:\\Projects\\Super Battle Golf\\Mods\\SBGL-UnifiedMod\\SBGL-UnifiedMod.csproj",
         "packagesPath": "C:\\Users\\KC or Dan\\.nuget\\packages\\",
-        "outputPath": "C:\\Projects\\Super Battle Golf\\Mods\\SBGL-UnifiedMod\\obj\\",
+        "outputPath": "c:\\Projects\\Super Battle Golf\\Mods\\SBGL-UnifiedMod\\obj\\",
         "projectStyle": "PackageReference",
         "configFilePaths": [
           "C:\\Users\\KC or Dan\\AppData\\Roaming\\NuGet\\NuGet.Config",

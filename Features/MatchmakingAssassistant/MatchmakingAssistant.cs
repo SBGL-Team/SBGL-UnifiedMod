@@ -97,10 +97,10 @@ namespace SBGLeagueAutomation
         private float _nextEnsureMatchCreateAttemptAt = 0f;
         private string _localManualSessionId = null;
 
-        private const int MatchScreenshotMaxWidth = 1024;
-        private const int MatchScreenshotMaxHeight = 576;
-        private const int MatchScreenshotTargetMaxBytes = 160 * 1024;
-        private const int MatchScreenshotHardMaxBytes = 220 * 1024;
+        private const int MatchScreenshotMaxWidth = 1920;
+        private const int MatchScreenshotMaxHeight = 1080;
+        private const int MatchScreenshotTargetMaxBytes = 800 * 1024;
+        private const int MatchScreenshotHardMaxBytes = 1024 * 1024;
         
         // Active season cache - fetched from API at startup
         private string _activeSeasonId = null;
@@ -738,7 +738,7 @@ namespace SBGLeagueAutomation
             }
 
             byte[] bestBytes = null;
-            int[] qualitySteps = { 65, 55, 45, 35, 25 };
+            int[] qualitySteps = { 90, 80, 70, 60, 50 };
             foreach (int quality in qualitySteps) {
                 byte[] encoded = UnityEngine.ImageConversion.EncodeToJPG(texture, quality);
                 if (encoded == null || encoded.Length == 0) {

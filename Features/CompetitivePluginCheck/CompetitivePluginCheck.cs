@@ -2148,8 +2148,19 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
 
         private static void SetupButtonText(GameObject btn, string txt)
         {
-            TextMeshProUGUI tmp = btn.GetComponentInChildren<TextMeshProUGUI>();
-            if (tmp != null) tmp.text = txt;
+            // Destroy any localization/text-setter components that would re-override the label.
+            foreach (var comp in btn.GetComponentsInChildren<MonoBehaviour>())
+            {
+                if (comp == null) continue;
+                string typeName = comp.GetType().Name;
+                if (typeName.IndexOf("Localiz", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    typeName.IndexOf("Translat", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    UnityEngine.Object.DestroyImmediate(comp);
+                }
+            }
+            foreach (var tmp in btn.GetComponentsInChildren<TextMeshProUGUI>())
+                tmp.text = txt;
         }
 
         // Helper Method to generate Text cleanly

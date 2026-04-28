@@ -1,6 +1,6 @@
 is_global = true
 build_property.RootNamespace = SBGL.UnifiedMod
-build_property.ProjectDir = C:\Projects\Super Battle Golf\Mods\SBGL-UnifiedMod\
+build_property.ProjectDir = c:\Projects\Super Battle Golf\Mods\SBGL-UnifiedMod\
 build_property.EnableComHosting = 
 build_property.EnableGeneratedComInterfaceComImportInterop = 
 build_property.CsWinRTUseWindowsUIXamlProjections = false
