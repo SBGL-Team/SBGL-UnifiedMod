@@ -1313,8 +1313,18 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                     if (msg.StartsWith("SBGL_MATCH_ID:"))
                     {
                         string matchId = msg.Replace("SBGL_MATCH_ID:", "").Trim();
-                        SBGLeagueAutomation.MatchResultSubmissionService.HandleIncomingMatchIdBroadcast(matchId);
-                        UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Forwarded P2P Match ID from {remoteId.Value}: {matchId}");
+                        // Forward the incoming Match ID to the MatchResultSubmissionService, but delay slightly
+                        // to avoid non-host clients adopting a host Match ID during mid-round scoreboard flashes.
+                        try
+                        {
+                            StartCoroutine(ForwardP2PMatchIdWithDelay(matchId, 2.0f, remoteId.Value));
+                        }
+                        catch
+                        {
+                            // If coroutine cannot be started for any reason, fall back to immediate forwarding.
+                            SBGLeagueAutomation.MatchResultSubmissionService.HandleIncomingMatchIdBroadcast(matchId);
+                            UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Forwarded P2P Match ID (immediate fallback) from {remoteId.Value}: {matchId}");
+                        }
                     }
                     else if (msg.StartsWith("SBGL_REPORT:"))
                     {
@@ -1351,6 +1361,20 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                         UpdateUIReport();
                     }
                 }
+            }
+        }
+
+        private System.Collections.IEnumerator ForwardP2PMatchIdWithDelay(string matchId, float delaySeconds, ulong senderId)
+        {
+            yield return new WaitForSeconds(delaySeconds);
+            try
+            {
+                SBGLeagueAutomation.MatchResultSubmissionService.HandleIncomingMatchIdBroadcast(matchId);
+                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Forwarded P2P Match ID (delayed {delaySeconds:0.#}s) from {senderId}: {matchId}");
+            }
+            catch (System.Exception ex)
+            {
+                UnityEngine.Debug.LogWarning($"[SBGL-CompPluginCheck] Error forwarding Match ID: {ex.Message}");
             }
         }
 

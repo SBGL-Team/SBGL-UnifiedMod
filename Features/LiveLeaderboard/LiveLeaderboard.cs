@@ -102,14 +102,20 @@ namespace SBGLLiveLeaderboard
             if (Keyboard.current != null && Keyboard.current[ToggleKey].wasPressedThisFrame)
                 _showWindow = !_showWindow;
 
-            // Check if we're in driving range - if so, freeze display on final snapshot
-            string currentScene = SceneManager.GetActiveScene().name;
+            // Check current scene and adjust behavior
+            string currentScene = SceneManager.GetActiveScene().name ?? string.Empty;
             bool inDrivingRange = currentScene.Contains("Driving") || currentScene.Contains("Range");
-            
+            bool inMenuScene = currentScene.ToLowerInvariant().Contains("menu");
+
             if (inDrivingRange) {
                 _showFinalSnapshot = true;  // Freeze on final snapshot
             } else {
                 _showFinalSnapshot = false; // Go back to live updates
+            }
+
+            // Reset all leaderboard state when entering the main menu to avoid stale data
+            if (inMenuScene) {
+                ResetForMainMenu();
             }
 
             if (Time.time >= _nextUpdateTime)
@@ -291,12 +297,24 @@ namespace SBGLLiveLeaderboard
             {
                 if (entry == null) continue;
                 string rawName = CleanTMP(entry.name?.text);
-                if (string.IsNullOrEmpty(rawName) || rawName == "Name" || rawName.ToLower().Contains("spectator")) continue;
-                
-                string strokesStr = CleanTMP(entry.strokes?.text);
-                if (string.IsNullOrEmpty(strokesStr) || strokesStr.ToUpper().Contains("SPEC")) continue;
+                if (string.IsNullOrEmpty(rawName)) continue;
 
-                int.TryParse(CleanTMP(entry.courseScore?.text), out int baseScore);
+                string nameLower = rawName.ToLowerInvariant();
+                // Filter common spectator/observer/ui placeholder labels
+                if (rawName == "Name" || nameLower.Contains("spectator") || nameLower.Contains("observer") || nameLower.Contains("spectating") || nameLower.Contains("spec ")) continue;
+
+                string strokesStr = CleanTMP(entry.strokes?.text);
+                string courseScoreStr = CleanTMP(entry.courseScore?.text);
+
+                if (!string.IsNullOrEmpty(strokesStr) && strokesStr.ToUpper().Contains("SPEC")) continue;
+
+                // Skip entries that look like UI placeholders (dashes) with no numeric data
+                bool strokesHasDigits = Regex.IsMatch(strokesStr ?? string.Empty, @"\d");
+                bool courseHasDigits = Regex.IsMatch(courseScoreStr ?? string.Empty, @"\d");
+                    bool strokesOnlyDashes = !string.IsNullOrEmpty(strokesStr) && Regex.IsMatch(strokesStr, @"^[\-\u2013\u2014\s]+$");
+                if (!strokesHasDigits && !courseHasDigits && strokesOnlyDashes) continue;
+
+                int.TryParse(courseScoreStr, out int baseScore);
                 int.TryParse(strokesStr.Replace("±", "").Replace("+", "").Trim(), out int strokeOffset);
                 
                 string playerMMR = "...";
@@ -451,6 +469,26 @@ namespace SBGLLiveLeaderboard
         public List<SBGLPlayer> GetCurrentLeaderboard()
         {
             return new List<SBGLPlayer>(_persistentLeaderboard);
+        }
+
+        /// <summary>
+        /// Reset internal leaderboard state when returning to the main menu.
+        /// Clears persistent and final snapshots, caches, and pending requests.
+        /// </summary>
+        private void ResetForMainMenu()
+        {
+            if (_persistentLeaderboard.Count == 0 && _finalLeaderboardSnapshot.Count == 0 && _mmrCache.Count == 0) return;
+
+            _persistentLeaderboard.Clear();
+            _finalLeaderboardSnapshot.Clear();
+            _showFinalSnapshot = false;
+            _lastKnownRoundPlayers.Clear();
+            _roundCacheActive = false;
+            _mmrCache.Clear();
+            _pendingRequests.Clear();
+            _cachedScoreboard = null;
+            _nextUpdateTime = Time.time + _updateInterval;
+            Debug.Log("[LiveLeaderboard] Reset leaderboard state on main menu");
         }
 
         /// <summary>

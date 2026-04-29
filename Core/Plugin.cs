@@ -30,7 +30,7 @@ namespace SBGL.UnifiedMod.Core
         public string ProfilePicUrl { get; set; }
         public bool IsResolved { get; set; }
     }
-    [BepInPlugin("com.sbgl.unified", "SBGL Unified Mod", "0.0.8")]
+    [BepInPlugin("com.sbgl.unified", "SBGL Unified Mod", "0.0.10")]
     public class UnifiedPlugin : BaseUnityPlugin
     {
         // ==========================================
@@ -105,6 +105,7 @@ namespace SBGL.UnifiedMod.Core
         public ConfigEntry<bool> MM_ShowFlowDebug;
         public ConfigEntry<bool> MM_ShowUploadNotices;
         public ConfigEntry<bool> MM_IgnoreSbglLobbyRequirement;
+        // Test-user options removed: Test Player Overrides and Randomize All Players
 
         // ==========================================
         // PSEUDO DEDICATED SERVER CONFIG
@@ -182,6 +183,7 @@ namespace SBGL.UnifiedMod.Core
             MM_ShowFlowDebug = Config.Bind("Matchmaking.UI Settings", "Show Flow Debug", false, "Display flow diagnostics");
             MM_ShowUploadNotices = Config.Bind("Matchmaking.UI Settings", "Show Upload Notices", true, "Show on-screen upload success/failure notices during gameplay");
             MM_IgnoreSbglLobbyRequirement = Config.Bind("Matchmaking.UI Settings", "Upload All Matches", false, "When enabled, uploads match results for any match and ignores the SBGL-* lobby-name requirement.");
+            // Test-user options removed: no test player overrides or randomization available.
 
             // === PSEUDO DEDICATED SERVER CONFIG ===
             PDS_Enabled = Config.Bind("PseudoDedicatedServer", "Enabled", false,
@@ -644,7 +646,7 @@ namespace SBGL.UnifiedMod.Core
             GameObject matchmakingObj = new GameObject("SBGL-MatchmakingAssistant");
             UnityEngine.Object.DontDestroyOnLoad(matchmakingObj);
             SBGLPlugin matchmaking = matchmakingObj.AddComponent<SBGLPlugin>();
-            matchmaking.SetConfig(MM_ShowSystemLogs, MM_ShowFlowDebug, MM_ShowUploadNotices, MM_IgnoreSbglLobbyRequirement, Logger);
+            matchmaking.SetConfig(MM_ShowSystemLogs, MM_ShowFlowDebug, MM_ShowUploadNotices, MM_IgnoreSbglLobbyRequirement, null, null, Logger);
             
             // Initialize RuleSet Display Manager as a managed component
             GameObject ruleSetObj = new GameObject("SBGL-RuleSetDisplayManager");

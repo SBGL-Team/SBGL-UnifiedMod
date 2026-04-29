@@ -25,6 +25,12 @@ namespace SBGLeagueAutomation
     public class SBGLPlugin : MonoBehaviour
     {
         // API Configuration - dynamically sourced from UnifiedPlugin
+        // Only one field for randomize-all-players config
+        // Per-match random mapping: in-game name -> SBGL name
+        private Dictionary<string, string> _randomizedPlayerMap = null;
+        private static readonly List<string> _sbglTestNames = new List<string> {
+            "TrashxCat","KingCire03","FucklTheIRS","Jackie","TikTok Z4C_FN","adthykrshnn","mrguy7608","Noah_Boatt","YoMaMMeJr","TheMrEStudio","Odius9064","Jake paul","f19chy","Kodakblackarack","ArrowTheFighter","limbo","Marcus_Pipes","That Traynor","Blinkerfluid","TaxiCAB","Achunl2","Cinereous","Liafeon","Peter","Inkie","LLENN","Nanainasuit","Midnight","PattyTits","Bekuh","Lunwik","yackback","AlpineMilk","HandsomeSkippy","TheOneKP","RealJosher","Ooshida","Moto","Jozza","Patrick Swayze","ryan.scibetta","Zaikr","Thalosii","paradiorevey","Ricee","Slacker87","MRGoldberg","trusted","designedsilence","The Oreo Orgy","Zoboomafoo","Yoda Cage","Black Dolphin","Pengini","antyde","Glider","lyth","Jabobus.o7","dkgaming219","Cody","Sidimmu","снусмумрик","Skydown26","Jeb","Vac","Slem Dogg","Batto","Broj0e"
+        };
         private string GetBaseApiUrl() => UnifiedPlugin.GetCurrentPlayerApi().Replace("/Player", "");
         private string GetAppId() => UnifiedPlugin.GetCurrentAppId();
         private string GetAuthToken() => UnifiedPlugin.GetCurrentAuthToken();
@@ -34,19 +40,93 @@ namespace SBGLeagueAutomation
         private ConfigEntry<bool> _showFlowDebugConfig;
         private ConfigEntry<bool> _showUploadNoticesConfig;
         private ConfigEntry<bool> _ignoreSbglLobbyRequirementConfig;
+        private ConfigEntry<string> _testPlayerOverridesConfig;
+        private ConfigEntry<bool> _testRandomizeAllPlayersConfig;
         private ManualLogSource _bepinexLogger;
         private bool _isInitializing = true;
         private int _onlineCount = 0;
         private int _queuedCount = 0;
         private int _matchedCount = 0;
 
-        public void SetConfig(ConfigEntry<bool> showLogs, ConfigEntry<bool> showFlowDebug, ConfigEntry<bool> showUploadNotices, ConfigEntry<bool> ignoreSbglLobbyRequirement, ManualLogSource bepinexLogger)
+        public void SetConfig(
+            ConfigEntry<bool> showLogs,
+            ConfigEntry<bool> showFlowDebug,
+            ConfigEntry<bool> showUploadNotices,
+            ConfigEntry<bool> ignoreSbglLobbyRequirement,
+            ConfigEntry<string> testPlayerOverrides,
+            ConfigEntry<bool> testRandomizeAllPlayers,
+            ManualLogSource bepinexLogger)
         {
             _showLogsConfig = showLogs;
             _showFlowDebugConfig = showFlowDebug;
             _showUploadNoticesConfig = showUploadNotices;
             _ignoreSbglLobbyRequirementConfig = ignoreSbglLobbyRequirement;
+            _testPlayerOverridesConfig = testPlayerOverrides;
+            _testRandomizeAllPlayersConfig = testRandomizeAllPlayers;
             _bepinexLogger = bepinexLogger;
+        }
+
+        /// <summary>
+        /// Parses the TestPlayerOverrides config value into a dictionary mapping
+        /// in-game Steam names to real SBGL player names for offline testing.
+        /// Format: "SteamName1=SBGLName1,SteamName2=SBGLName2"
+        /// </summary>
+        private Dictionary<string, string> GetTestPlayerOverrides(List<string> currentPlayerNames = null) {
+            // If randomize-all-players is enabled, build a random mapping for this match
+            if (_testRandomizeAllPlayersConfig != null && _testRandomizeAllPlayersConfig.Value && currentPlayerNames != null)
+            {
+                // Only (re)generate the mapping if not already present or player list changed
+                if (_randomizedPlayerMap == null || _randomizedPlayerMap.Count != currentPlayerNames.Count || !_randomizedPlayerMap.Keys.SequenceEqual(currentPlayerNames))
+                {
+                    var availableNames = new List<string>(_sbglTestNames);
+                    var rand = new System.Random();
+                    var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    var shuffled = availableNames.OrderBy(x => rand.Next()).ToList();
+                    int idx = 0;
+                    foreach (var name in currentPlayerNames)
+                    {
+                        if (string.IsNullOrWhiteSpace(name)) continue;
+                        // Don't override the local player
+                        if (_userProfile != null && string.Equals(name, _userProfile.display_name, StringComparison.OrdinalIgnoreCase))
+                        {
+                            map[name] = name;
+                            continue;
+                        }
+                        if (idx >= shuffled.Count) idx = 0;
+                        map[name] = shuffled[idx++];
+                    }
+                    _randomizedPlayerMap = map;
+                }
+                return _randomizedPlayerMap;
+            }
+
+            // Default: parse manual overrides
+            var manualMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            string raw = _testPlayerOverridesConfig?.Value;
+            if (string.IsNullOrWhiteSpace(raw)) return manualMap;
+
+            foreach (string pair in raw.Split(',')) {
+                int eq = pair.IndexOf('=');
+                if (eq <= 0 || eq >= pair.Length - 1) continue;
+                string steamName = pair.Substring(0, eq).Trim();
+                string sbglName  = pair.Substring(eq + 1).Trim();
+                if (!string.IsNullOrWhiteSpace(steamName) && !string.IsNullOrWhiteSpace(sbglName))
+                    manualMap[steamName] = sbglName;
+            }
+
+            return manualMap;
+        }
+
+        /// <summary>
+        /// Returns the SBGL player name to look up for a given in-game display name,
+        /// substituting a test override when one is configured.
+        /// </summary>
+        private string ApplyTestPlayerOverride(string displayName, Dictionary<string, string> overrides) {
+            if (overrides != null && overrides.TryGetValue(displayName, out string sbglName)) {
+                Log($"<color=magenta>[Test Override] '{displayName}' → '{sbglName}'</color>");
+                return sbglName;
+            }
+            return displayName;
         }
 
         private bool IgnoreSbglLobbyRequirementEnabled => _ignoreSbglLobbyRequirementConfig?.Value ?? false;
@@ -90,10 +170,12 @@ namespace SBGLeagueAutomation
         private bool _matchEntriesCreated = false;
         private bool _matchCreationInProgress = false;
         private bool _isInGameplay = false;
+        private bool _matchEndedReceived = false;
         private Coroutine _monitorCoroutine = null;
         private Coroutine _lobbyMonitorCoroutine = null;
         private Coroutine _endOfMatchSignalCoroutine = null;
         private Coroutine _matchScreenshotSignalCoroutine = null;
+        private Coroutine _courseEndRpcCoroutine = null;
         private float _nextEnsureMatchCreateAttemptAt = 0f;
         private string _localManualSessionId = null;
 
@@ -367,34 +449,62 @@ namespace SBGLeagueAutomation
         }
 
         private void OnCourseManagerMatchStateChanged(MatchState previousState, MatchState currentState) {
-            if (!_isInGameplay || currentState != MatchState.Ended) {
-                return;
-            }
-
-            Log("<color=cyan>[Match Signal] CourseManager reported MatchState.Ended</color>");
-            TryBeginAssemblyDrivenFinalization("CourseManager.MatchStateChanged");
+            // MatchState.Ended fires after each hole; ignore as a reliable course-end signal.
+            if (!_isInGameplay) return;
+            Log($"<color=cyan>[Match Signal] CourseManager.MatchStateChanged: {previousState} -> {currentState} (ignored for course-end)</color>");
         }
 
         private void OnCourseManagerForceDisplayScoreboardChanged() {
             if (!_isInGameplay || !CourseManager.ForceDisplayScoreboard) {
                 return;
             }
+            // ForceDisplayScoreboard fires after each hole — capture a per-hole screenshot
+            // and keep it as the pending screenshot (do not upload here). The authoritative
+            // course-end upload will be driven by CourseManager.RpcInformEndingCourse (patched).
+            Log("<color=cyan>[Match Signal] CourseManager forced the scoreboard (capture-only)</color>");
 
-            Log("<color=cyan>[Match Signal] CourseManager forced the final scoreboard display</color>");
-
-            if (_matchScreenshotSignalCoroutine == null
-                && !_matchScreenshotUploadCompleted
-                && !string.IsNullOrWhiteSpace(_currentMatchId)) {
-                _matchScreenshotSignalCoroutine = StartCoroutine(CaptureAndUploadScreenshotFromForcedScoreboard("CourseManager.ForceDisplayScoreboardChanged"));
+            if (_matchScreenshotSignalCoroutine == null && !_matchScreenshotUploadCompleted) {
+                _matchScreenshotSignalCoroutine = StartCoroutine(CaptureAndStorePerHoleScreenshot("CourseManager.ForceDisplayScoreboardChanged"));
             }
+        }
 
-            TryBeginAssemblyDrivenFinalization("CourseManager.ForceDisplayScoreboardChanged");
+        private IEnumerator CaptureAndStorePerHoleScreenshot(string source) {
+            try {
+                // Capture immediately when the scoreboard appears to reduce chance of values clearing.
+                yield return CaptureMatchScreenshotForReview(source + " (per-hole immediate)");
+            } finally {
+                _matchScreenshotSignalCoroutine = null;
+            }
         }
 
         private IEnumerator CaptureAndUploadScreenshotFromForcedScoreboard(string source) {
             try {
                 // Wait for the scoreboard to fully animate in before capturing.
                 yield return new WaitForSeconds(2f);
+
+                // Wait briefly for a final leaderboard snapshot to become available.
+                // This prevents capturing mid-round scoreboard flashes (per-hole).
+                float waited = 0f;
+                float snapshotTimeout = 6f; // total wait time for final snapshot
+                bool gotFinalSnapshot = false;
+                while (waited < snapshotTimeout) {
+                    // If match end signal already received, proceed immediately
+                    if (_matchEndedReceived) { gotFinalSnapshot = true; break; }
+
+                    // Try to capture a final leaderboard snapshot; if available, proceed
+                    try {
+                        if (TryCaptureFinalLeaderboardSnapshot(source + " (screenshot-wait)")) { gotFinalSnapshot = true; break; }
+                    } catch { }
+
+                    yield return new WaitForSeconds(0.25f);
+                    waited += 0.25f;
+                }
+
+                if (!gotFinalSnapshot) {
+                    Log($"<color=yellow>[Match Screenshot] Final leaderboard snapshot not available within {snapshotTimeout}s - skipping forced-scoreboard capture ({source})</color>");
+                    yield break;
+                }
+
                 yield return CaptureMatchScreenshotForReview(source);
                 yield return UploadCapturedMatchScreenshotIfNeeded(source);
             }
@@ -480,10 +590,15 @@ namespace SBGLeagueAutomation
         }
 
         private IEnumerator CaptureMatchScreenshotForReview(string source) {
-            if (_matchScreenshotUploadCompleted
-                || !string.IsNullOrWhiteSpace(_pendingUploadedScreenshotUrl)
-                || (_pendingMatchScreenshotBytes != null && _pendingMatchScreenshotBytes.Length > 0)) {
+            // If upload already finished or currently uploading, don't capture.
+            if (_matchScreenshotUploadCompleted || _matchScreenshotUploadInProgress) {
                 yield break;
+            }
+
+            // If we already have a pending screenshot, we'll replace it with the newest
+            // capture so the final upload uses the latest per-hole scoreboard.
+            if (_pendingMatchScreenshotBytes != null && _pendingMatchScreenshotBytes.Length > 0) {
+                Log($"<color=cyan>[Match Screenshot] Replacing previous pending screenshot with a newer capture ({source})</color>");
             }
 
             float waitedSeconds = 0f;
@@ -497,7 +612,7 @@ namespace SBGLeagueAutomation
                 yield break;
             }
 
-            yield return new WaitForEndOfFrame();
+            // Capture as soon as possible: one end-of-frame should be sufficient.
             yield return new WaitForEndOfFrame();
 
             int screenWidth = Screen.width;
@@ -522,6 +637,7 @@ namespace SBGLeagueAutomation
                     yield break;
                 }
 
+                // Replace pending screenshot bytes with this newest capture.
                 _pendingMatchScreenshotBytes = imageBytes;
                 _pendingMatchScreenshotFileName = BuildMatchScreenshotFileName();
                 _pendingUploadedScreenshotUrl = null;
@@ -675,6 +791,68 @@ namespace SBGLeagueAutomation
             _pendingMatchScreenshotBytes = null;
             _pendingMatchScreenshotFileName = null;
             _pendingUploadedScreenshotUrl = null;
+        }
+
+        /// <summary>
+        /// Called by Harmony postfix (CourseManager client RPC) to trigger final upload
+        /// when the server has informed clients that the course is ending.
+        /// </summary>
+        public void OnCourseRpcInformEndingCourse() {
+            try {
+                if (_courseEndRpcCoroutine == null) {
+                    _courseEndRpcCoroutine = StartCoroutine(HandleCourseEndRpcCoroutine());
+                }
+            } catch (System.Exception ex) {
+                Log($"<color=yellow>[Match Signal] Error starting CourseEnd RPC handler: {ex.Message}</color>");
+            }
+        }
+
+        private IEnumerator HandleCourseEndRpcCoroutine() {
+            try {
+                Log("<color=cyan>[Match Signal] CourseManager client RPC InformEndingCourse received — preparing final upload</color>");
+
+                // Attempt to capture or refresh the final leaderboard snapshot quickly
+                for (int i = 0; i < 8; i++) {
+                    try {
+                        if (TryCaptureFinalLeaderboardSnapshot("CourseManager.RpcInformEndingCourse")) break;
+                    } catch { }
+                    yield return new WaitForSeconds(0.125f);
+                }
+
+                // Ensure we have a screenshot (overwrite any previous pending with the newest)
+                yield return CaptureMatchScreenshotForReview("CourseManager.RpcInformEndingCourse (forced)");
+
+                // Give a short window for match id to appear if it hasn't yet
+                float waited = 0f;
+                while (string.IsNullOrWhiteSpace(_currentMatchId) && waited < 6f) {
+                    yield return new WaitForSeconds(0.25f);
+                    waited += 0.25f;
+                }
+
+                // Try attaching/uploading the latest screenshot now
+                yield return UploadCapturedMatchScreenshotIfNeeded("CourseManager.RpcInformEndingCourse");
+            }
+            finally {
+                _courseEndRpcCoroutine = null;
+            }
+        }
+
+        [HarmonyLib.HarmonyPatch]
+        private static class CourseManager_RpcInformEndingCourse_Patch {
+            private static System.Reflection.MethodBase TargetMethod() {
+                var t = HarmonyLib.AccessTools.TypeByName("CourseManager");
+                if (t == null) return null;
+                return HarmonyLib.AccessTools.Method(t, "UserCode_RpcInformEndingCourse");
+            }
+
+            private static void Postfix() {
+                try {
+                    var plugin = UnityEngine.Object.FindAnyObjectByType<SBGLeagueAutomation.SBGLPlugin>(FindObjectsInactive.Include);
+                    if (plugin != null) plugin.OnCourseRpcInformEndingCourse();
+                } catch (System.Exception ex) {
+                    UnityEngine.Debug.Log($"[SBGL.Matchmaking] CourseManager.RpcInformEndingCourse postfix error: {ex}");
+                }
+            }
         }
 
         private float GetCurrentPlayerScreenshotUploadDelaySeconds() {
@@ -952,7 +1130,18 @@ namespace SBGLeagueAutomation
             }
         }
 
-        private IEnumerator EnsureMatchEntryForPlayer(string sourceTag, string playerId, string playerName, string preMatchMmr, int gamePoints, int scoreVsPar, int finishPosition, string notes, Action<string> onResolved) {
+        private IEnumerator EnsureMatchEntryForPlayer(
+            string sourceTag,
+            string playerId,
+            string playerName,
+            string preMatchMmr,
+            string postMatchMmr, // <-- new param
+            int gamePoints,
+            int scoreVsPar,
+            int finishPosition,
+            string notes,
+            Action<string> onResolved)
+        {
             if (string.IsNullOrWhiteSpace(_currentMatchId) || string.IsNullOrWhiteSpace(playerId)) {
                 onResolved?.Invoke(null);
                 yield break;
@@ -998,10 +1187,15 @@ namespace SBGLeagueAutomation
                     ["adjusted_match_score"] = adjustedScore,
                     ["notes"] = notes ?? string.Empty
                 };
-
+                float preMmr = 0, postMmr = 0;
                 if (!string.IsNullOrWhiteSpace(preMatchMmr)
-                    && float.TryParse(preMatchMmr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float mmrValue)) {
-                    payload["pre_match_mmr"] = mmrValue;
+                    && float.TryParse(preMatchMmr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out preMmr)) {
+                    payload["pre_match_mmr"] = preMmr;
+                }
+                if (!string.IsNullOrWhiteSpace(postMatchMmr)
+                    && float.TryParse(postMatchMmr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out postMmr)) {
+                    payload["post_match_mmr"] = postMmr;
+                    payload["mmr_change"] = postMmr - preMmr;
                 }
 
                 if (finishPosition > 0) {
@@ -1069,6 +1263,7 @@ namespace SBGLeagueAutomation
             _lastSubmittedScoresVsPar.Clear();
             _matchEntriesCreated = false;
             _matchStatsSubmitted = false;
+            _matchEndedReceived = false;
             ClearPendingMatchScreenshot();
             _matchScreenshotUploadInProgress = false;
             _matchScreenshotUploadCompleted = false;
@@ -1148,6 +1343,7 @@ namespace SBGLeagueAutomation
             _matchCreationInProgress = false;
             _matchEntriesCreated = false;
             _isInGameplay = false;
+            _matchEndedReceived = false;
             ClearPendingMatchScreenshot();
             _matchScreenshotUploadInProgress = false;
             _matchScreenshotUploadCompleted = false;
@@ -1535,7 +1731,7 @@ namespace SBGLeagueAutomation
                     JObject activeSession = sessions.FirstOrDefault(session => !string.IsNullOrEmpty((string)session["lobby_name"]));
 
                     if (activeSession != null) {
-                        ParseSession(activeSession);
+                        // Session parsing logic is now handled elsewhere
                         _webStatus = "MATCH FOUND: PENDING";
                         Log("Match Found! Accept needed.");
                     }
@@ -1546,6 +1742,7 @@ namespace SBGLeagueAutomation
         }
 
         private IEnumerator PollSessionStatus() {
+                // (removed misplaced closing brace)
             string fullUrl = $"{GetBaseApiUrl()}/MatchmakingSession/{_currentSession.id}";
             Log($"<color=cyan>[Sync] GET /MatchmakingSession/{_currentSession.id} (polling status)</color>");
             Log($"<color=cyan>[Sync] Full URL: {fullUrl}</color>");
@@ -1604,80 +1801,9 @@ namespace SBGLeagueAutomation
                         Log($"Match ended with status: {_currentSession.status}.");
                         ResetPluginState();
                     }
+
                 } else {
                     Log($"<color=red>[Sync] PollSessionStatus failed: {req.result} - {req.error}</color>");
-                }
-            }
-        }
-
-        private void ParseSession(JObject sessionData) {
-            Log("[ParseSession] Entering ParseSession method");
-            if (sessionData == null) {
-                Log("[ParseSession] sessionData is null, returning");
-                return;
-            }
-
-            try
-            {
-                Log("[ParseSession] Attempting to parse session data");
-                _currentSession = new MatchmakingSession {
-                    id = (string)sessionData["id"],
-                    lobby_name = (string)sessionData["lobby_name"],
-                    lobby_password = (string)sessionData["lobby_password"],
-                    host_player_id = (string)sessionData["host_player_id"],
-                    status = (string)sessionData["status"],
-                    match_id = (string)sessionData["match_id"],
-                    steam_lobby_link = (string)sessionData["steam_lobby_link"],
-                    player_ids = sessionData["player_ids"]?.ToObject<List<string>>() ?? new List<string>(),
-                    accepted_player_ids = sessionData["accepted_player_ids"]?.ToObject<List<string>>() ?? new List<string>(),
-                    match_type = (string)sessionData["match_type"] ?? "",
-                    selected_course = (string)sessionData["selected_course"] ?? "",
-                    season = sessionData["season"]?.ToObject<int>() ?? 1
-                };
-                Log("[ParseSession] Session data parsed successfully");
-            }
-            catch (System.Exception ex)
-            {
-                Log($"<color=red>[Session] Error parsing session data: {ex.Message}</color>");
-                Log($"<color=red>[Session] StackTrace: {ex.StackTrace}</color>");
-                _currentSession = null;
-                return;
-            }
-
-            if (!string.IsNullOrEmpty(_currentSession.steam_lobby_link)) {
-                Log("Session includes steam_lobby_link from API.");
-            }
-
-            Log($"<color=cyan>[Session] Parsed {_currentSession.player_ids.Count} total players, {_currentSession.accepted_player_ids.Count} accepted</color>");
-
-            // Play alert tone when a new pending match is found
-            if (_currentSession.status == "pending_accept")
-                PlayMatchFoundAlert();
-
-            // Parse match configuration if present
-            if (!string.IsNullOrEmpty(_currentSession.match_type))
-            {
-                Log($"<color=cyan>[Session] Match Type: {_currentSession.match_type}, Course: {_currentSession.selected_course}, Season: {_currentSession.season}</color>");
-            }
-
-            // Logic Check: If status is 'ready', it means everyone accepted.
-            // If it's 'pending_accept', the website waits.
-            _isHost = (_currentSession.host_player_id == _userProfile.id);
-            
-            if (_currentSession.status == "ready" || _currentSession.status == "in_progress") {
-                Log(_currentSession.status == "ready"
-                    ? "All players accepted. Match is READY."
-                    : "Session is IN_PROGRESS - syncing match configuration for mid-match join.");
-
-                // Always attempt to store config; storage method applies safe ranked defaults when fields are missing.
-                try
-                {
-                    StoreMatchConfigurationInPlayerPrefs(_currentSession);
-                }
-                catch (System.Exception ex)
-                {
-                    Log($"<color=yellow>[Session] Failed to store match configuration: {ex.Message}</color>");
-                    // Continue anyway - don't let this block the match flow
                 }
             }
         }
@@ -1992,56 +2118,110 @@ namespace SBGLeagueAutomation
             _cachedLeaderboardScoresVsPar = playerScoresVsPar;
             _matchExpectedPlayerCount = startingLeaderboard?.Count ?? 0;
 
-            if (_currentSession != null) {
-                string existingMatchId = null;
-                yield return ResolveExistingMatchIdForCurrentSession((id) => existingMatchId = id);
-                if (!string.IsNullOrEmpty(existingMatchId)) {
-                    _currentMatchId = existingMatchId;
-                    ShowUploadNotification("Match record already exists; reusing existing upload.", "info");
-                    goto createEntries;
-                }
-            }
+            // -----------------------------------------------------------------------
+            // MATCH ID COORDINATION
+            // Host (game server or ranked host) creates the Match record first.
+            // All other mod users wait up to 12 s for the host to upload, then enter
+            // a slot-based fallback so at most one non-host posts if the host never did.
+            // -----------------------------------------------------------------------
+            bool isEffectiveHost = _isHost || NetworkServer.active;
 
-            // Step 1: Check if another player already created the Match record for this round via P2P
-            // Wait up to 8 seconds for a broadcast Match ID before creating our own
-            MatchResultSubmissionService.ReceivedP2PMatchId = null; // clear stale value
-            Log("<color=cyan>[Match Creation] Waiting up to 8s for P2P Match ID from host...</color>");
-            float waitElapsed = 0f;
-            while (waitElapsed < 8f) {
-                string p2pId = MatchResultSubmissionService.ReceivedP2PMatchId;
-                if (!string.IsNullOrEmpty(p2pId)) {
-                    Log($"<color=green>[Match Creation] ✓ Received P2P Match ID: {p2pId} — skipping duplicate POST</color>");
-                    _currentMatchId = p2pId;
-                    ShowUploadNotification("Match record adopted from host via P2P.", "info");
-                    goto createEntries;
-                }
-                yield return new WaitForSeconds(0.5f);
-                waitElapsed += 0.5f;
-            }
+            if (isEffectiveHost) {
+                // HOST PATH — one dedup check then post immediately.
+                Log("<color=cyan>[Match Creation] We are the host — creating Match record with priority</color>");
 
-            if (_currentSession != null) {
-                string existingMatchId = null;
-                yield return ResolveExistingMatchIdForCurrentSession((id) => existingMatchId = id, false);
-                if (!string.IsNullOrEmpty(existingMatchId)) {
-                    Log($"<color=green>[Match Creation] ✓ Existing Match appeared during P2P wait: {existingMatchId} — skipping duplicate POST</color>");
-                    _currentMatchId = existingMatchId;
-                    ShowUploadNotification("Match record adopted from an existing upload.", "info");
-                    goto createEntries;
-                }
-
-                float fallbackDelaySeconds = GetCurrentPlayerMatchUploadDelaySeconds();
-                if (fallbackDelaySeconds > 0f) {
-                    yield return WaitForExistingMatchBeforeFallback(fallbackDelaySeconds, (id) => existingMatchId = id);
+                if (_currentSession != null) {
+                    string existingMatchId = null;
+                    yield return ResolveExistingMatchIdForCurrentSession((id) => existingMatchId = id);
                     if (!string.IsNullOrEmpty(existingMatchId)) {
-                        Log($"<color=green>[Match Creation] ✓ Existing Match appeared before our fallback slot: {existingMatchId}</color>");
                         _currentMatchId = existingMatchId;
+                        ShowUploadNotification("Match record already exists; reusing existing upload.", "info");
+                        goto createEntries;
+                    }
+                }
+                // No existing match — fall through to the POST block below.
+            }
+            else {
+                // NON-HOST PATH — wait for the host to upload and adopt their Match ID.
+                MatchResultSubmissionService.ReceivedP2PMatchId = null; // clear any stale value
+                Log("<color=cyan>[Match Creation] We are a client — waiting up to 12s for host to upload the match...</color>");
+
+                float waitElapsed = 0f;
+                float nextApiCheckAt = 2f; // first API poll after 2 s
+                while (waitElapsed < 12f) {
+                    // P2P check is cheap (just reads a static field)
+                    string p2pId = MatchResultSubmissionService.ReceivedP2PMatchId;
+                    if (!string.IsNullOrEmpty(p2pId)) {
+                        Log($"<color=green>[Match Creation] ✓ Received P2P Match ID from host: {p2pId}</color>");
+                        _currentMatchId = p2pId;
+                        if (_currentSession != null) _currentSession.match_id = p2pId;
+                        ShowUploadNotification("Match record adopted from host via P2P.", "info");
+                        goto createEntries;
+                    }
+
+                    // API poll every 2 s (if we have a session to query by)
+                    if (_currentSession != null && waitElapsed >= nextApiCheckAt) {
+                        nextApiCheckAt += 2f;
+                        string apiMatchId = null;
+                        yield return ResolveExistingMatchIdForCurrentSession((id) => apiMatchId = id, false);
+                        if (!string.IsNullOrEmpty(apiMatchId)) {
+                            Log($"<color=green>[Match Creation] ✓ Found host match via API at {waitElapsed:0.#}s: {apiMatchId}</color>");
+                            _currentMatchId = apiMatchId;
+                            ShowUploadNotification("Match record adopted from host.", "info");
+                            goto createEntries;
+                        }
+                    }
+
+                    yield return new WaitForSeconds(0.5f);
+                    waitElapsed += 0.5f;
+                }
+
+                // Host did not upload within 12 s.
+                // Enter non-host fallback: sorted player-id slot order so exactly one
+                // non-host client posts, the rest keep polling and adopt it.
+                Log("<color=yellow>[Match Creation] Host did not upload within 12s — non-host fallback slot ordering...</color>");
+
+                if (_currentSession != null) {
+                    float fallbackDelay = GetCurrentPlayerMatchUploadDelaySeconds();
+                    string fallbackFoundId = null;
+                    if (fallbackDelay > 0f) {
+                        yield return WaitForExistingMatchBeforeFallback(fallbackDelay, (id) => fallbackFoundId = id);
+                    } else {
+                        // Slot-0 non-host does a single quick check before posting.
+                        yield return ResolveExistingMatchIdForCurrentSession((id) => fallbackFoundId = id, false);
+                    }
+                    if (!string.IsNullOrEmpty(fallbackFoundId)) {
+                        Log($"<color=green>[Match Creation] ✓ Match adopted in non-host fallback: {fallbackFoundId}</color>");
+                        _currentMatchId = fallbackFoundId;
                         ShowUploadNotification("Match record adopted from another player.", "info");
                         goto createEntries;
                     }
                 }
+
+                Log("<color=cyan>[Match Creation] No match found in non-host fallback — posting as fallback creator</color>");
             }
 
-            Log("<color=cyan>[Match Creation] No P2P Match ID or existing Match found — creating Match record in fallback slot</color>");
+            Log("<color=cyan>[Match Creation] No existing Match found — proceeding with POST</color>");
+
+            // Final dedup check right before POST — catches same-time submissions when both clients
+            // exit the P2P/stagger window simultaneously (e.g. empty player_ids, P2P not yet established).
+            {
+                string prePostSessionId = _currentSession != null ? _currentSession.id : _localManualSessionId;
+                if (!string.IsNullOrWhiteSpace(prePostSessionId)) {
+                    string finalCheckId = null;
+                    string finalCheckQuery = UnityWebRequest.EscapeURL("{\"matchmaking_session_id\":\"" + prePostSessionId + "\"}");
+                    yield return CallAPI($"/Match?q={finalCheckQuery}&limit=1", "GET", "", (res) => {
+                        finalCheckId = (string)ParseApiObjectList(res)?.FirstOrDefault()?["id"];
+                    });
+                    if (!string.IsNullOrWhiteSpace(finalCheckId)) {
+                        Log($"<color=green>[Match Creation] ✓ Final pre-POST check found existing match: {finalCheckId} — skipping duplicate POST</color>");
+                        _currentMatchId = finalCheckId;
+                        if (_currentSession != null) _currentSession.match_id = finalCheckId;
+                        ShowUploadNotification("Match record already exists; reusing existing upload.", "info");
+                        goto createEntries;
+                    }
+                }
+            }
 
             // Step 1b: Create Match record (we are the first / only mod user)
             {
@@ -2158,11 +2338,13 @@ namespace SBGLeagueAutomation
                 int startingPosition = GetPlayerFinishPosition(playerName, startingLeaderboard);
 
                 string entryId = null;
+                // For now, pass postMatchMmr as preMatchMmr (no delta) -- you should update this to the actual post-match value when available
                 yield return EnsureMatchEntryForPlayer(
                     "Match Creation",
                     playerId,
                     playerName,
                     preMatchMmr,
+                    preMatchMmr, // TODO: Replace with actual post-match MMR when available
                     gamePoints,
                     scoreVsPar,
                     startingPosition,
@@ -2245,6 +2427,10 @@ namespace SBGLeagueAutomation
                     yield return UpdateMatchPlayerCountIfNeeded(activePlayerCount, "live leaderboard");
                 }
                 
+                // Build test override map for this leaderboard
+                List<string> leaderboardNames = allLeaderboardPlayers?.Where(p => p != null && !string.IsNullOrWhiteSpace(p.Name)).Select(p => p.Name).ToList() ?? new List<string>();
+                var testOverrides = GetTestPlayerOverrides(leaderboardNames);
+
                 foreach (var player in allLeaderboardPlayers) {
                     if (player == null) continue;
 
@@ -2271,7 +2457,8 @@ namespace SBGLeagueAutomation
                         string entryId = null;
 
                         if (!TryGetPlayerIdForName(player.Name, out playerId)) {
-                            yield return ResolvePlayerIdByNameFromApi(player.Name, (id) => playerId = id);
+                            string monitorLookupName = ApplyTestPlayerOverride(player.Name, testOverrides);
+                            yield return ResolvePlayerIdByNameFromApi(monitorLookupName, (id) => playerId = id);
 
                             if (!string.IsNullOrEmpty(playerId)) {
                                 _playerIdsByName[player.Name.Trim()] = playerId;
@@ -2297,6 +2484,7 @@ namespace SBGLeagueAutomation
                                 playerId,
                                 player.Name,
                                 preMatchMmr,
+                                null, // postMatchMmr
                                 newGamePoints,
                                 newScoreVsPar,
                                 finishPosition,
@@ -2522,6 +2710,12 @@ namespace SBGLeagueAutomation
         private IEnumerator EnrichPlayerIdsFromLeaderboard(List<SBGLLiveLeaderboard.LiveLeaderboardPlugin.SBGLPlayer> startingLeaderboard, List<string> playerIds) {
             if (startingLeaderboard == null || startingLeaderboard.Count == 0 || playerIds == null) yield break;
 
+            List<string> leaderboardNames = startingLeaderboard?.Where(p => p != null && !string.IsNullOrWhiteSpace(p.Name)).Select(p => p.Name).ToList() ?? new List<string>();
+            var testOverrides = GetTestPlayerOverrides(leaderboardNames);
+            if (testOverrides.Count > 0) {
+                Log($"<color=magenta>[Test Override] {testOverrides.Count} player override(s) active for this match</color>");
+            }
+
             var knownIds = new HashSet<string>(playerIds.Where(id => !string.IsNullOrWhiteSpace(id)), StringComparer.OrdinalIgnoreCase);
             var knownNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -2549,9 +2743,13 @@ namespace SBGLeagueAutomation
                 if (lbPlayer == null || string.IsNullOrWhiteSpace(lbPlayer.Name)) continue;
                 if (knownNames.Contains(lbPlayer.Name)) continue;
 
-                string playerIdFromName = null;
+                // Substitute the test override name (if any) when querying the API.
+                // The in-game display name is kept as the leaderboard key; the SBGL name
+                // is only used for the player-ID lookup so the right record gets linked.
+                string lookupName = ApplyTestPlayerOverride(lbPlayer.Name, testOverrides);
 
-                yield return ResolvePlayerIdByNameFromApi(lbPlayer.Name, (id) => playerIdFromName = id);
+                string playerIdFromName = null;
+                yield return ResolvePlayerIdByNameFromApi(lookupName, (id) => playerIdFromName = id);
 
                 if (!string.IsNullOrWhiteSpace(playerIdFromName)) {
                     knownNames.Add(lbPlayer.Name);
@@ -2589,6 +2787,10 @@ namespace SBGLeagueAutomation
 
             Log($"<color=cyan>[Match Finalize] Using cached final snapshot with {_finalLeaderboardSnapshot.Count} players</color>");
 
+            // Build test override map for this leaderboard
+            List<string> leaderboardNames = _finalLeaderboardSnapshot?.Where(p => p != null && !string.IsNullOrWhiteSpace(p.Name)).Select(p => p.Name).ToList() ?? new List<string>();
+            var testOverrides = GetTestPlayerOverrides(leaderboardNames);
+
             foreach (var player in _finalLeaderboardSnapshot) {
                 if (player == null) continue;
 
@@ -2610,7 +2812,8 @@ namespace SBGLeagueAutomation
 
                     // Resolve player ID if we still don't have one
                     if (string.IsNullOrEmpty(playerId)) {
-                        yield return ResolvePlayerIdByNameFromApi(player.Name, (id) => playerId = id);
+                        string finalizeLookupName = ApplyTestPlayerOverride(player.Name, testOverrides);
+                        yield return ResolvePlayerIdByNameFromApi(finalizeLookupName, (id) => playerId = id);
                     }
 
                     if (string.IsNullOrEmpty(playerId)) {
@@ -2631,6 +2834,7 @@ namespace SBGLeagueAutomation
                         playerId,
                         player.Name,
                         preMatchMmr,
+                        null, // postMatchMmr
                         finalGamePoints,
                         finalScoreVsPar,
                         finishPosition,
@@ -2712,6 +2916,7 @@ namespace SBGLeagueAutomation
                 playerId,
                 playerName,
                 preMatchMmr,
+                null, // postMatchMmr
                 gamePoints,
                 scoreVsPar,
                 0,
@@ -2941,51 +3146,78 @@ namespace SBGLeagueAutomation
             int scoreVsPar = 0;
             string playerDisplayName = null;
             
-            // First: determine the player's display name
-            if (playerId == _userProfile.id) {
+            // First: try to determine the player's display name from the live leaderboard mapping
+            // Prefer the exact name shown on the live leaderboard when available
+            string leaderboardName = null;
+            foreach (var kvp in _playerIdsByName) {
+                if (!string.IsNullOrWhiteSpace(kvp.Value) && string.Equals(kvp.Value, playerId, StringComparison.OrdinalIgnoreCase)) {
+                    leaderboardName = kvp.Key?.Trim();
+                    break;
+                }
+            }
+
+            if (!string.IsNullOrEmpty(leaderboardName)) {
+                playerDisplayName = leaderboardName;
+                Log($"<color=cyan>[Match Stats] Using leaderboard name mapping for {playerId}: {playerDisplayName}</color>");
+            }
+
+            // If we still don't have a display name and this is the current user, use profile
+            if (string.IsNullOrEmpty(playerDisplayName) && playerId == _userProfile.id) {
                 playerDisplayName = _userProfile.display_name;
                 Log($"<color=cyan>[Match Stats] Current user: {playerDisplayName}</color>");
-            } else {
-                // For other players, fetch their profile to get their display_name
-                Log($"<color=cyan>[Match Stats] Fetching profile for opponent {playerId}</color>");
+            }
+
+            // If we still don't have a display name, fetch from the API as a fallback
+            if (string.IsNullOrEmpty(playerDisplayName)) {
+                Log($"<color=cyan>[Match Stats] Fetching profile for opponent {playerId} (fallback)</color>");
                 yield return CallAPI($"/Player/{playerId}", "GET", "", (res) => {
                     try {
                         JObject profile = ParseApiSingleObject(res);
                         if (profile != null) {
                             playerDisplayName = (string)profile["display_name"];
-                            Log($"<color=cyan>[Match Stats] Opponent display name: {playerDisplayName}</color>");
+                            Log($"<color=cyan>[Match Stats] Opponent display name (API): {playerDisplayName}</color>");
                         }
                     } catch (System.Exception ex) {
                         Log($"<color=yellow>[Match Stats] Error parsing opponent profile: {ex.Message}</color>");
                     }
                 });
             }
-            
-            // Second: look up scores in cache by display name (with retry)
-            if (!string.IsNullOrEmpty(playerDisplayName)) {
-                int retries = 0;
-                while (retries < 5 && (gamePoints == 0 && scoreVsPar == 0)) {
+
+            // Second: look up scores in cache by display name (with retry). Use a 'found' flag
+            // because legitimate scores can be zero and should not be treated as missing.
+            bool foundScores = false;
+            int tries = 0;
+            while (!foundScores && tries < 5) {
+                if (!string.IsNullOrEmpty(playerDisplayName)) {
+                    // Exact lookup
                     if (_cachedLeaderboardScores.TryGetValue(playerDisplayName, out int cachedScore)) {
                         gamePoints = cachedScore;
-                        if (_cachedLeaderboardScoresVsPar.TryGetValue(playerDisplayName, out int cachedVsPar)) {
-                            scoreVsPar = cachedVsPar;
-                        }
+                        _cachedLeaderboardScoresVsPar.TryGetValue(playerDisplayName, out scoreVsPar);
+                        foundScores = true;
                         Log($"<color=green>[Match Stats] ✓ Found cached scores for {playerDisplayName}: {gamePoints} pts, {scoreVsPar} vs par</color>");
                         break;
-                    } else {
-                        retries++;
-                        if (retries < 5) {
-                            Log($"<color=yellow>[Match Stats] Scores not cached yet for {playerDisplayName}, retry {retries}/5...</color>");
-                            yield return new WaitForSeconds(0.5f);
-                        }
+                    }
+
+                    // Case-insensitive / trimmed fallback lookup
+                    var matchKey = _cachedLeaderboardScores.Keys.FirstOrDefault(k => string.Equals(k?.Trim(), playerDisplayName?.Trim(), StringComparison.OrdinalIgnoreCase));
+                    if (!string.IsNullOrEmpty(matchKey)) {
+                        gamePoints = _cachedLeaderboardScores[matchKey];
+                        _cachedLeaderboardScoresVsPar.TryGetValue(matchKey, out scoreVsPar);
+                        foundScores = true;
+                        Log($"<color=green>[Match Stats] ✓ Found cached scores via fallback key '{matchKey}' for {playerDisplayName}: {gamePoints} pts, {scoreVsPar} vs par</color>");
+                        break;
                     }
                 }
-                
-                if (gamePoints == 0 && scoreVsPar == 0) {
-                    Log($"<color=yellow>[Match Stats] ⚠ No leaderboard data found for {playerDisplayName} after retries</color>");
+
+                tries++;
+                if (!foundScores && tries < 5) {
+                    Log($"<color=yellow>[Match Stats] Scores not cached yet for {playerDisplayName ?? playerId}, retry {tries}/5...</color>");
+                    yield return new WaitForSeconds(0.5f);
                 }
-            } else {
-                Log($"<color=yellow>[Match Stats] ⚠ Could not determine player display name for {playerId}</color>");
+            }
+
+            if (!foundScores) {
+                Log($"<color=yellow>[Match Stats] ⚠ No leaderboard data found for {playerDisplayName ?? playerId} after retries</color>");
             }
             
             // Build JSON with player_name field included

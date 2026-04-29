@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "JO+nBasbVIE=",
+  "dgSpecHash": "RKJGZNESLDc=",
   "success": true,
-  "projectFilePath": "c:\\Projects\\Super Battle Golf\\Mods\\SBGL-UnifiedMod\\SBGL-UnifiedMod.csproj",
+  "projectFilePath": "C:\\Projects\\Super Battle Golf\\Mods\\SBGL-UnifiedMod\\SBGL-UnifiedMod.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\KC or Dan\\.nuget\\packages\\bepinex.analyzers\\1.0.8\\bepinex.analyzers.1.0.8.nupkg.sha512",
     "C:\\Users\\KC or Dan\\.nuget\\packages\\bepinex.assemblypublicizer.msbuild\\0.4.3\\bepinex.assemblypublicizer.msbuild.0.4.3.nupkg.sha512",
