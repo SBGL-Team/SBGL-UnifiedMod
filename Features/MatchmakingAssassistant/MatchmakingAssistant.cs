@@ -384,6 +384,13 @@ namespace SBGLeagueAutomation
                 // Always mark as in gameplay so mid-round lobby rename detection can work
                 _isInGameplay = true;
 
+                // If our previous MatchmakingSession was marked completed, clear it so
+                // we can create a fresh Match record for this new round.
+                if (_currentSession != null && string.Equals(_currentSession.status, "completed", StringComparison.OrdinalIgnoreCase)) {
+                    Log("<color=cyan>[Match] Previous MatchmakingSession status was 'completed' — clearing session so new match can be created</color>");
+                    _currentSession = null;
+                }
+
                 if (shouldTrackForUpload && (_currentSession != null && (_currentSession.status == "ready" || _currentSession.status == "in_progress") || _currentSession == null) && !_matchEntriesCreated) {
                     Log("<color=yellow>[Match] Entering gameplay - validating match eligibility...</color>");
                     // Validate match upload eligibility before creating entries
@@ -2118,6 +2125,11 @@ namespace SBGLeagueAutomation
             _cachedLeaderboardScoresVsPar = playerScoresVsPar;
             _matchExpectedPlayerCount = startingLeaderboard?.Count ?? 0;
 
+            // Build a position map for the starting leaderboard so we assign unique, deterministic positions.
+            var startingPositionMap = startingLeaderboard != null
+                ? BuildFinishPositionMap(startingLeaderboard)
+                : new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
             // -----------------------------------------------------------------------
             // MATCH ID COORDINATION
             // Host (game server or ranked host) creates the Match record first.
@@ -2335,7 +2347,8 @@ namespace SBGLeagueAutomation
                 }
 
                 // Get starting position from leaderboard
-                int startingPosition = GetPlayerFinishPosition(playerName, startingLeaderboard);
+                int startingPosition = 0;
+                if (!string.IsNullOrWhiteSpace(playerName)) startingPositionMap.TryGetValue(playerName, out startingPosition);
 
                 string entryId = null;
                 // For now, pass postMatchMmr as preMatchMmr (no delta) -- you should update this to the actual post-match value when available
@@ -2421,6 +2434,9 @@ namespace SBGLeagueAutomation
 
                 CacheLeaderboardSnapshot(allLeaderboardPlayers, "live gameplay");
 
+                // Build a one-shot mapping of player name -> unique finish position for this live snapshot
+                var livePositionMap = BuildFinishPositionMap(allLeaderboardPlayers);
+
                 int activePlayerCount = allLeaderboardPlayers.Count(p => p != null && !string.IsNullOrWhiteSpace(p.Name));
                 if (activePlayerCount > 0) {
                     _matchExpectedPlayerCount = activePlayerCount;
@@ -2478,7 +2494,8 @@ namespace SBGLeagueAutomation
                                 if (mmrObj != null) preMatchMmr = mmrObj.ToString();
                             });
 
-                            int finishPosition = GetPlayerFinishPosition(player.Name, allLeaderboardPlayers);
+                            int finishPosition = 0;
+                            if (!string.IsNullOrWhiteSpace(player.Name)) livePositionMap.TryGetValue(player.Name, out finishPosition);
                             yield return EnsureMatchEntryForPlayer(
                                 "Match Monitor",
                                 playerId,
@@ -2494,7 +2511,8 @@ namespace SBGLeagueAutomation
 
                         if (!string.IsNullOrEmpty(entryId) && !string.IsNullOrEmpty(playerId)) {
                             _matchEntriesCreated = true;
-                            int finishPosition = GetPlayerFinishPosition(player.Name, allLeaderboardPlayers);
+                            int finishPosition = 0;
+                            if (!string.IsNullOrWhiteSpace(player.Name)) livePositionMap.TryGetValue(player.Name, out finishPosition);
                             yield return UpdateMatchEntry(entryId, playerId, player.Name, newGamePoints, newScoreVsPar, finishPosition);
                             _lastSubmittedScores[player.Name] = newGamePoints;
                             _lastSubmittedScoresVsPar[player.Name] = newScoreVsPar;
@@ -2541,13 +2559,9 @@ namespace SBGLeagueAutomation
                 return 0;
             }
 
-            for (int i = 0; i < finalLeaderboard.Count; i++) {
-                if (finalLeaderboard[i] != null && finalLeaderboard[i].Name == playerName) {
-                    return i + 1; // Return 1-based position
-                }
-            }
-
-            return 0; // Not found
+            var map = BuildFinishPositionMap(finalLeaderboard);
+            if (map.TryGetValue(playerName, out int pos)) return pos;
+            return 0;
         }
 
         private int GetPlayerFinishPosition(string playerName, List<CachedLeaderboardPlayer> finalLeaderboard) {
@@ -2707,6 +2721,57 @@ namespace SBGLeagueAutomation
             return scoreVsPar;
         }
 
+        /// <summary>
+        /// Build a deterministic mapping of player name -> unique finish position (1-based)
+        /// based on the provided leaderboard snapshot. Tie-breakers: AdjustedPoints (desc),
+        /// BaseScore (desc), stroke vs par (asc), then name (ordinal, case-insensitive).
+        /// </summary>
+        private Dictionary<string, int> BuildFinishPositionMap(List<SBGLLiveLeaderboard.LiveLeaderboardPlugin.SBGLPlayer> leaderboard) {
+            var map = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            if (leaderboard == null || leaderboard.Count == 0) return map;
+
+            var ordered = leaderboard
+                .Where(p => p != null && !string.IsNullOrWhiteSpace(p.Name))
+                .Select(p => new { Player = p, Stroke = ParseScoreVsPar(p.RawStrokes) })
+                .OrderByDescending(x => x.Player.AdjustedPoints)
+                .ThenByDescending(x => x.Player.BaseScore)
+                .ThenBy(x => x.Stroke)
+                .ThenBy(x => x.Player.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            int pos = 1;
+            foreach (var item in ordered) {
+                if (!map.ContainsKey(item.Player.Name)) {
+                    map[item.Player.Name] = pos++;
+                }
+            }
+
+            return map;
+        }
+
+        private Dictionary<string, int> BuildFinishPositionMap(List<CachedLeaderboardPlayer> leaderboard) {
+            var map = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            if (leaderboard == null || leaderboard.Count == 0) return map;
+
+            var ordered = leaderboard
+                .Where(p => p != null && !string.IsNullOrWhiteSpace(p.Name))
+                .Select(p => new { Player = p, Stroke = ParseScoreVsPar(p.RawStrokes), Adjusted = p.BaseScore + (ParseScoreVsPar(p.RawStrokes) * -10) })
+                .OrderByDescending(x => x.Adjusted)
+                .ThenByDescending(x => x.Player.BaseScore)
+                .ThenBy(x => x.Stroke)
+                .ThenBy(x => x.Player.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            int pos = 1;
+            foreach (var item in ordered) {
+                if (!map.ContainsKey(item.Player.Name)) {
+                    map[item.Player.Name] = pos++;
+                }
+            }
+
+            return map;
+        }
+
         private IEnumerator EnrichPlayerIdsFromLeaderboard(List<SBGLLiveLeaderboard.LiveLeaderboardPlugin.SBGLPlayer> startingLeaderboard, List<string> playerIds) {
             if (startingLeaderboard == null || startingLeaderboard.Count == 0 || playerIds == null) yield break;
 
@@ -2791,12 +2856,16 @@ namespace SBGLeagueAutomation
             List<string> leaderboardNames = _finalLeaderboardSnapshot?.Where(p => p != null && !string.IsNullOrWhiteSpace(p.Name)).Select(p => p.Name).ToList() ?? new List<string>();
             var testOverrides = GetTestPlayerOverrides(leaderboardNames);
 
+            // Build a deterministic mapping of player name -> unique finish position for final leaderboard
+            var finalPositionMap = BuildFinishPositionMap(_finalLeaderboardSnapshot);
+
             foreach (var player in _finalLeaderboardSnapshot) {
                 if (player == null) continue;
 
                 int finalGamePoints = player.BaseScore;
                 int finalScoreVsPar = ParseScoreVsPar(player.RawStrokes);
-                int finishPosition = GetPlayerFinishPosition(player.Name, _finalLeaderboardSnapshot);
+                int finishPosition = 0;
+                if (!string.IsNullOrWhiteSpace(player.Name)) finalPositionMap.TryGetValue(player.Name, out finishPosition);
 
                 // Find entry ID for this player
                 TryGetPlayerIdForName(player.Name, out string playerId);

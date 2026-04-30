@@ -453,15 +453,40 @@ namespace SBGLeagueAutomation
                 return 0;
             }
 
-            for (int i = 0; i < leaderboard.Count; i++)
+            var map = BuildFinishPositionMap(leaderboard);
+            if (map.TryGetValue(playerName, out int pos)) return pos;
+            return 0;
+        }
+
+        private int ParseScoreVsPar(string rawStrokes)
+        {
+            if (string.IsNullOrWhiteSpace(rawStrokes)) return 0;
+            string strokeStr = rawStrokes.Replace("±", "").Trim();
+            int.TryParse(strokeStr, out int scoreVsPar);
+            return scoreVsPar;
+        }
+
+        private Dictionary<string, int> BuildFinishPositionMap(List<LiveLeaderboardPlugin.SBGLPlayer> leaderboard)
+        {
+            var map = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            if (leaderboard == null || leaderboard.Count == 0) return map;
+
+            var ordered = leaderboard
+                .Where(p => p != null && !string.IsNullOrWhiteSpace(p.Name))
+                .Select(p => new { Player = p, Stroke = ParseScoreVsPar(p.RawStrokes) })
+                .OrderByDescending(x => x.Player.AdjustedPoints)
+                .ThenByDescending(x => x.Player.BaseScore)
+                .ThenBy(x => x.Stroke)
+                .ThenBy(x => x.Player.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            int pos = 1;
+            foreach (var item in ordered)
             {
-                if (leaderboard[i] != null && leaderboard[i].Name == playerName)
-                {
-                    return i + 1;
-                }
+                if (!map.ContainsKey(item.Player.Name)) map[item.Player.Name] = pos++;
             }
 
-            return 0;
+            return map;
         }
     }
 }
