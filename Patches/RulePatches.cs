@@ -9,10 +9,16 @@ namespace SBGL.UnifiedMod.Patches
     public static class RulePatches
     {
         private static ManualLogSource _logger = null;
+        private static BepInEx.Configuration.ConfigEntry<bool> _applyRulesets = null;
 
         public static void SetLogger(ManualLogSource logger)
         {
             _logger = logger;
+        }
+
+        public static void SetApplyRulesetsConfig(BepInEx.Configuration.ConfigEntry<bool> applyRulesets)
+        {
+            _applyRulesets = applyRulesets;
         }
 
         private static void Log(string message)
@@ -38,6 +44,12 @@ namespace SBGL.UnifiedMod.Patches
             try
             {
                 if (!__instance.isServer) return;
+
+                if (!(_applyRulesets?.Value ?? true))
+                {
+                    Log("ApplyRulesets is disabled in config — skipping rule enforcement");
+                    return;
+                }
 
                 string matchType = PlayerPrefs.GetString("MatchType", "");
                 if (string.IsNullOrEmpty(matchType) || !matchType.Contains("season"))
@@ -78,18 +90,45 @@ namespace SBGL.UnifiedMod.Patches
             string hostRuleset = PlayerPrefs.GetString("HostRuleset", "ranked");
             bool isProSeries = hostRuleset == "pro_series";
 
-            // For Pro Series: reset to Classic preset first so items and rules start from game defaults,
-            // then apply only the Pro Series-specific overrides on top.
+            // Always reset to Classic first so our values override any previous state cleanly.
+            matchSetup.SetPreset(MatchSetupRules.Preset.Classic);
+            Log("✓ Reset to Classic preset");
+
             if (isProSeries)
             {
-                matchSetup.SetPreset(MatchSetupRules.Preset.Classic);
-                Log("✓ Reset to Classic preset (game defaults)");
+                // Pro Series: apply rule overrides only. Item weights stay at game defaults
+                // (already restored by SetPreset(Classic) above) — OrbitalLaser, RocketDriver
+                // etc. are NOT banned in Pro Series. Course/map selection is manual.
+                var proRules = Season1RuleSet.GetProSeriesRulesSettings();
+                int proAppliedCount = 0;
+                foreach (var kvp in proRules)
+                {
+                    try
+                    {
+                        matchSetup.SetValue(kvp.Key, kvp.Value);
+
+                        if (matchSetup.onOffDropdownLookup.TryGetValue(kvp.Key, out var dropdown))
+                            dropdown.SetValue((!matchSetup.GetValueAsBoolInternal(kvp.Key)) ? 1 : 0);
+                        else if (matchSetup.sliderLookup.TryGetValue(kvp.Key, out var slider))
+                            slider.SetValue(matchSetup.GetValueInternal(kvp.Key));
+
+                        matchSetup.UpdateRule(kvp.Key);
+                        Log($"  ✓ Set {kvp.Key} = {kvp.Value}");
+                        proAppliedCount++;
+                    }
+                    catch (System.Exception ex)
+                    {
+                        LogError($"  ✗ Failed to set {kvp.Key}: {ex.Message}");
+                    }
+                }
+                Log($"✓ Applied {proAppliedCount}/{proRules.Count} Pro Series rules (item weights at game defaults)");
+                matchSetup.SetPreset(MatchSetupRules.Preset.Custom);
+                Log($"✓ Set Preset to Custom");
+                return;
             }
 
-            var rulesDict = isProSeries
-                ? Season1RuleSet.GetProSeriesRulesSettings()
-                : Season1RuleSet.GetRulesSettings();
-
+            // Ranked: apply full Season 1 rule set
+            var rulesDict = Season1RuleSet.GetRulesSettings();
             int appliedCount = 0;
 
             foreach (var kvp in rulesDict)
@@ -125,24 +164,18 @@ namespace SBGL.UnifiedMod.Patches
 
             Log($"✓ Applied {appliedCount}/{rulesDict.Count} rules");
 
-            if (!isProSeries)
-            {
-                // Apply explicit Season 1 item spawn weights for all 6 pools
-                var itemWeights = Season1RuleSet.GetItemSpawnWeights();
-                foreach (var kvp in itemWeights)
-                    matchSetup.SetSpawnChance(kvp.Key.itemPoolIndex, kvp.Key.itemType, kvp.Value);
+            // Apply explicit Season 1 item spawn weights for all 6 pools
+            var rankedItemWeights = Season1RuleSet.GetItemSpawnWeights();
+            foreach (var kvp in rankedItemWeights)
+                matchSetup.SetSpawnChance(kvp.Key.itemPoolIndex, kvp.Key.itemType, kvp.Value);
 
-                // ServerUpdateSpawnChanceValue syncs each pool's ItemPool.SpawnChances array.
-                // Call it once per distinct pool index — it updates all items in that pool.
-                var seenPools = new System.Collections.Generic.HashSet<int>();
-                foreach (var key in itemWeights.Keys)
-                {
-                    if (seenPools.Add(key.itemPoolIndex))
-                        matchSetup.ServerUpdateSpawnChanceValue(key);
-                }
-                Log($"✓ Applied Season 1 item weights for {seenPools.Count} pools ({itemWeights.Count} entries)");
+            var rankedSeenPools = new System.Collections.Generic.HashSet<int>();
+            foreach (var key in rankedItemWeights.Keys)
+            {
+                if (rankedSeenPools.Add(key.itemPoolIndex))
+                    matchSetup.ServerUpdateSpawnChanceValue(key);
             }
-            // Pro Series: item weights left at game defaults from SetPreset(Default) above
+            Log($"✓ Applied Season 1 item weights for {rankedSeenPools.Count} pools ({rankedItemWeights.Count} entries)");
 
             matchSetup.SetPreset(MatchSetupRules.Preset.Custom);
             Log($"✓ Set Preset to Custom");

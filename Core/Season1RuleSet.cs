@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Text;
 
 namespace SBGL.UnifiedMod.Core
 {
@@ -9,6 +10,82 @@ namespace SBGL.UnifiedMod.Core
         public const string PRO_SERIES_SEASON_ID = "69b59af135403a1cb7b113c8";
         public const string MATCH_TYPE_RANKED = "ranked_season_1";
         public const string MATCH_TYPE_PRO_SERIES = "pro_series_season_1";
+
+        /// <summary>
+        /// Builds a human-readable multiline summary of a rules dictionary for use in UI tooltips.
+        /// Each entry is formatted as "Rule Name: value" on its own line.
+        /// </summary>
+        public static string BuildRulesDescription(Dictionary<MatchSetupRules.Rule, float> rules)
+        {
+            var lines = new List<string>();
+            foreach (var kvp in rules)
+            {
+                string color = ValueColor(kvp.Value);
+                lines.Add($"<b>{FormatRuleName(kvp.Key)}:</b> <color={color}>{FormatRuleValue(kvp.Key, kvp.Value)}</color>");
+            }
+            return string.Join("\n", lines);
+        }
+
+        /// <summary>
+        /// Returns a comma-separated list of banned items from GetDisabledItems().
+        /// </summary>
+        public static string BuildBannedItemsDescription()
+        {
+            var items = GetDisabledItems();
+            if (items.Count == 0) return "None";
+            var names = new List<string>();
+            foreach (var item in items)
+                names.Add(FormatItemName(item));
+            return string.Join(", ", names);
+        }
+
+        /// <summary>Returns green for non-zero (on/true) values, red for zero (off/false).</summary>
+        private static string ValueColor(float value) => value != 0f ? "#AAFFAA" : "#FFAAAA";
+
+        private static string FormatRuleName(MatchSetupRules.Rule rule)
+        {
+            string name = rule.ToString();
+            var sb = new StringBuilder();
+            for (int i = 0; i < name.Length; i++)
+            {
+                if (i > 0 && char.IsUpper(name[i])) sb.Append(' ');
+                sb.Append(name[i]);
+            }
+            return sb.ToString();
+        }
+
+        private static string FormatRuleValue(MatchSetupRules.Rule rule, float value)
+        {
+            switch (rule)
+            {
+                case MatchSetupRules.Rule.Wind:
+                    if (value == 0f) return "Off";
+                    if (value == 1f) return "Low";
+                    if (value == 2f) return "Medium";
+                    if (value == 3f) return "High";
+                    return value.ToString("G");
+                case MatchSetupRules.Rule.Countdown:
+                    return value == 0f ? "Off" : $"{value:G}s";
+                case MatchSetupRules.Rule.OutOfBounds:
+                    return value == 0f ? "Off" : $"x{value:G}";
+                default:
+                    if (value == 0f) return "Off";
+                    if (value == 1f) return "On";
+                    return value.ToString("G");
+            }
+        }
+
+        private static string FormatItemName(ItemType item)
+        {
+            string name = item.ToString();
+            var sb = new StringBuilder();
+            for (int i = 0; i < name.Length; i++)
+            {
+                if (i > 0 && char.IsUpper(name[i])) sb.Append(' ');
+                sb.Append(name[i]);
+            }
+            return sb.ToString();
+        }
 
         /// <summary>
         /// Items banned in Season 1 — kept for reference; weights are set to 0f in GetItemSpawnWeights().
@@ -121,9 +198,8 @@ namespace SBGL.UnifiedMod.Core
         }
 
         /// <summary>
-        /// Pro Series rule overrides applied on top of the game's default preset.
-        /// Only contains rules that differ from game defaults.
-        /// Item weights are NOT included — the game default preset handles those.
+        /// Pro Series rule overrides. Only contains rules that differ from game defaults.
+        /// Applied alongside Season 1 item weights; course/map selection is NOT touched.
         /// </summary>
         public static Dictionary<MatchSetupRules.Rule, float> GetProSeriesRulesSettings()
         {

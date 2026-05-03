@@ -30,7 +30,7 @@ namespace SBGL.UnifiedMod.Core
         public string ProfilePicUrl { get; set; }
         public bool IsResolved { get; set; }
     }
-    [BepInPlugin("com.sbgl.unified", "SBGL Unified Mod", "0.0.10")]
+    [BepInPlugin("com.sbgl.unified", "SBGL Unified Mod", "0.0.14")]
     public class UnifiedPlugin : BaseUnityPlugin
     {
         // ==========================================
@@ -120,6 +120,7 @@ namespace SBGL.UnifiedMod.Core
         public ConfigEntry<float> RS_PosX;
         public ConfigEntry<float> RS_PosY;
         public ConfigEntry<bool> RS_ShowDetails;
+        public ConfigEntry<bool> RS_ApplyRulesets;
 
         // ==========================================
         // LIVE LEADERBOARD CONFIG
@@ -202,6 +203,8 @@ namespace SBGL.UnifiedMod.Core
                 new ConfigDescription("Vertical position", new AcceptableValueRange<float>(0f, 4000f)));
             RS_ShowDetails = Config.Bind("RuleSetDisplay.UI", "Show Details Panel", false,
                 "Show match type, course, season and ruleset labels below the buttons");
+            RS_ApplyRulesets = Config.Bind("RuleSetDisplay.UI", "Apply Rulesets", false,
+                "When disabled, the mod will NOT enforce Season 1 rules or item weights on match start. Use this as a fallback if rules are being applied incorrectly.");
 
             // === LIVE LEADERBOARD CONFIG ===
             LL_Width = Config.Bind("LiveLeaderboard.UI", "Width", 350f, 
@@ -622,6 +625,7 @@ namespace SBGL.UnifiedMod.Core
                 var harmony = new Harmony("com.sbgl.unified.patches");
                 harmony.PatchAll(typeof(RulePatches));
                 RulePatches.SetLogger(Logger);
+                RulePatches.SetApplyRulesetsConfig(RS_ApplyRulesets);
                 Logger.LogInfo("[Init] ✓ Harmony patches initialized successfully");
             }
             catch (System.Exception ex)
@@ -652,7 +656,7 @@ namespace SBGL.UnifiedMod.Core
             GameObject ruleSetObj = new GameObject("SBGL-RuleSetDisplayManager");
             UnityEngine.Object.DontDestroyOnLoad(ruleSetObj);
             Features.RuleSetDisplayManager ruleSetDisplay = ruleSetObj.AddComponent<Features.RuleSetDisplayManager>();
-            ruleSetDisplay.SetConfig(RS_PosX, RS_PosY, RS_ShowDetails);
+            ruleSetDisplay.SetConfig(RS_PosX, RS_PosY, RS_ShowDetails, RS_ApplyRulesets);
             
             // Initialize Live Leaderboard as a managed component
             GameObject leaderboardObj = new GameObject("SBGL-LiveLeaderboard");

@@ -147,6 +147,7 @@ namespace SBGLeagueAutomation
         private bool _hostCancelSent = false;
 #pragma warning disable CS0414
         private bool _matchStatsSubmitted = false;
+        private bool _proSeriesSkipLogged = false;
 #pragma warning restore CS0414
         private DateTime? _matchStartTime = null;
         private Dictionary<string, int> _cachedLeaderboardScores = new Dictionary<string, int>();
@@ -1270,6 +1271,7 @@ namespace SBGLeagueAutomation
             _lastSubmittedScoresVsPar.Clear();
             _matchEntriesCreated = false;
             _matchStatsSubmitted = false;
+            _proSeriesSkipLogged = false;
             _matchEndedReceived = false;
             ClearPendingMatchScreenshot();
             _matchScreenshotUploadInProgress = false;
@@ -1313,6 +1315,7 @@ namespace SBGLeagueAutomation
             _hostServerWasActive = false;
             _hostCancelSent = false;
             _matchStatsSubmitted = false;
+            _proSeriesSkipLogged = false;
             _matchStartTime = null;
 
             _syncTickCount = 0;
@@ -2084,8 +2087,10 @@ namespace SBGLeagueAutomation
             // Pro Series match submission is handled manually — skip automated entry creation
             string currentMatchType = PlayerPrefs.GetString("MatchType", "");
             if (currentMatchType.IndexOf("pro_series", StringComparison.OrdinalIgnoreCase) >= 0) {
-                Log("<color=yellow>[Match Creation] Pro Series match — skipping automated submission (handled manually)</color>");
-                // Mark as handled for this round so the gameplay monitor does not keep retrying auto-creation.
+                if (!_proSeriesSkipLogged) {
+                    Log("<color=yellow>[Match] Pro Series match — automated upload skipped</color>");
+                    _proSeriesSkipLogged = true;
+                }
                 _matchEntriesCreated = true;
                 yield break;
             }
@@ -2831,7 +2836,6 @@ namespace SBGLeagueAutomation
         private IEnumerator FinalizeMatchStats() {
             // Pro Series match submission is handled manually
             if (PlayerPrefs.GetString("MatchType", "").Contains("pro_series")) {
-                Log("<color=yellow>[Match Finalize] Pro Series match — skipping automated finalization (handled manually)</color>");
                 _matchStatsSubmitted = true;
                 yield break;
             }
@@ -3010,7 +3014,6 @@ namespace SBGLeagueAutomation
 
             // Pro Series match submission is handled manually
             if (PlayerPrefs.GetString("MatchType", "").Contains("pro_series")) {
-                Log("<color=yellow>[Match Stats] Pro Series match — skipping automated submission (handled manually)</color>");
                 _matchStatsSubmitted = true;
                 yield break;
             }
@@ -3753,6 +3756,18 @@ namespace SBGLeagueAutomation
         /// </summary>
         private IEnumerator ValidateMatchUpload(Action<bool> callback)
         {
+            // Pro Series matches are never auto-uploaded — skip validation entirely
+            if (PlayerPrefs.GetString("MatchType", "").Contains("pro_series"))
+            {
+                if (!_proSeriesSkipLogged)
+                {
+                    Log("<color=yellow>[Match] Pro Series match — automated upload skipped</color>");
+                    _proSeriesSkipLogged = true;
+                }
+                callback?.Invoke(false);
+                yield break;
+            }
+
             if (_userProfile == null)
             {
                 yield return EnsureUserProfileResolved("Match Upload Validation", 6f);
