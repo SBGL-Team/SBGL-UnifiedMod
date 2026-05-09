@@ -52,9 +52,11 @@ namespace SBGL.UnifiedMod.Patches
                 }
 
                 string matchType = PlayerPrefs.GetString("MatchType", "");
-                if (string.IsNullOrEmpty(matchType) || !matchType.Contains("season"))
+                bool isSeasonMatch = !string.IsNullOrEmpty(matchType) && matchType.Contains("season");
+                bool isCasualMatch = string.Equals(matchType, Season1RuleSet.MATCH_TYPE_CASUAL, System.StringComparison.OrdinalIgnoreCase);
+                if (!isSeasonMatch && !isCasualMatch)
                 {
-                    Log($"Not a ranked/season match (MatchType='{matchType}'), skipping");
+                    Log($"Not a managed ruleset match (MatchType='{matchType}'), skipping");
                     return;
                 }
 
@@ -89,10 +91,17 @@ namespace SBGL.UnifiedMod.Patches
         {
             string hostRuleset = PlayerPrefs.GetString("HostRuleset", "ranked");
             bool isProSeries = hostRuleset == "pro_series";
+            bool isCasual = hostRuleset == "casual";
 
             // Always reset to Classic first so our values override any previous state cleanly.
             matchSetup.SetPreset(MatchSetupRules.Preset.Classic);
             Log("✓ Reset to Classic preset");
+
+            if (isCasual)
+            {
+                Log("✓ Casual selected - leaving Classic preset defaults intact");
+                return;
+            }
 
             if (isProSeries)
             {
@@ -185,11 +194,18 @@ namespace SBGL.UnifiedMod.Patches
         {
             string hostRuleset = PlayerPrefs.GetString("HostRuleset", "ranked");
             bool isProSeries = hostRuleset == "pro_series";
+            bool isCasual = hostRuleset == "casual";
 
-            // Pro Series: maps are set manually — skip all course selection logic
+            // Pro Series and Casual: maps are set manually — skip all course selection logic
             if (isProSeries)
             {
                 Log("  Pro Series: skipping course selection (maps set manually)");
+                return;
+            }
+
+            if (isCasual)
+            {
+                Log("  Casual: skipping course selection (maps set manually)");
                 return;
             }
 

@@ -133,6 +133,8 @@ namespace SBGLeagueAutomation
 
         // State Tracking
         public static bool IsRankedTriggered = false;
+        /// <summary>Current in-progress match ID. Read by LiveLeaderboard for display.</summary>
+        public static string CurrentMatchId = null;
         private bool _isQueueing = false;
         private string _webStatus = "IDLE";
         private string _currentQueueId = "";
@@ -140,7 +142,8 @@ namespace SBGLeagueAutomation
         private MatchmakingSession _currentSession = null;
         private bool _isHost = false;
         private bool _hasAccepted = false;
-        private string _hostRulesetSelection = "ranked"; // "ranked" or "pro_series"
+        private string _hostRulesetSelection = "ranked"; // "ranked", "casual", or "pro_series"
+        private string _queueTypeSelection = "ranked"; // "ranked" or "casual", set from queue panel
         private DateTime? _queueStartTime = null;
         private bool _hostLobbyStarted = false;
         private bool _hostServerWasActive = false;
@@ -154,7 +157,16 @@ namespace SBGLeagueAutomation
         private Dictionary<string, int> _cachedLeaderboardScoresVsPar = new Dictionary<string, int>();
         
         // Progressive match tracking - for updating scores after each hole
-        private string _currentMatchId = null;
+        private string __currentMatchId = null; // backing field
+        private string _currentMatchId {
+            get => __currentMatchId;
+            set {
+                __currentMatchId = value;
+                CurrentMatchId = value;
+            }
+        }
+        // Survives ResetPerMatchState but is cleared on full menu reset.
+        private HashSet<string> _finalizedMatchIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private Dictionary<string, string> _playerMatchEntryIds = new Dictionary<string, string>(); // player_id -> entry_id
         private HashSet<string> _matchEntryCreationInProgress = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private Dictionary<string, string> _playerIdsByName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); // player_name -> player_id
@@ -284,6 +296,138 @@ namespace SBGLeagueAutomation
         private string _lastAutoJoinSteamLink = "-";
         private string _lastUploadError = "-";
         private string _lastAutoJoinError = "-";
+
+        private static bool IsProSeriesMatchType(string matchType)
+        {
+            return !string.IsNullOrWhiteSpace(matchType)
+                && matchType.IndexOf("pro_series", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsCasualMatchType(string matchType)
+        {
+            return !string.IsNullOrWhiteSpace(matchType)
+                && matchType.IndexOf(Season1RuleSet.MATCH_TYPE_CASUAL, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private bool IsCurrentMatchCasual()
+        {
+            if (IsCasualMatchType(_currentSession?.match_type))
+            {
+                return true;
+            }
+
+            return IsCasualMatchType(PlayerPrefs.GetString("MatchType", ""));
+        }
+
+        private string GetQueueMatchTypePayload()
+        {
+            string storedMatchType = PlayerPrefs.GetString("MatchType", Season1RuleSet.MATCH_TYPE_RANKED);
+            return IsCasualMatchType(storedMatchType) ? "casual" : "ranked";
+        }
+
+        private IEnumerator IncrementCasualMatchesPlayedForActivePlayers(List<SBGLLiveLeaderboard.LiveLeaderboardPlugin.SBGLPlayer> leaderboardPlayers)
+        {
+            List<string> leaderboardNames = leaderboardPlayers?
+                .Where(player => player != null && !string.IsNullOrWhiteSpace(player.Name))
+                .Select(player => player.Name.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList() ?? new List<string>();
+
+            if (leaderboardNames.Count == 0)
+            {
+                Log("<color=yellow>[Casual] No active leaderboard names found - skipping casual stat increment</color>");
+                yield break;
+            }
+
+            var testOverrides = GetTestPlayerOverrides(leaderboardNames);
+            int updatedPlayers = 0;
+
+            foreach (string leaderboardName in leaderboardNames)
+            {
+                string lookupName = ApplyTestPlayerOverride(leaderboardName, testOverrides);
+                string playerId = null;
+
+                if (!string.IsNullOrWhiteSpace(_userProfile?.id)
+                    && string.Equals(leaderboardName, _userProfile.display_name, StringComparison.OrdinalIgnoreCase))
+                {
+                    playerId = _userProfile.id;
+                }
+
+                if (string.IsNullOrWhiteSpace(playerId))
+                {
+                    TryGetPlayerIdForName(leaderboardName, out playerId);
+                }
+
+                if (string.IsNullOrWhiteSpace(playerId)
+                    && !string.Equals(lookupName, leaderboardName, StringComparison.OrdinalIgnoreCase))
+                {
+                    TryGetPlayerIdForName(lookupName, out playerId);
+                }
+
+                if (string.IsNullOrWhiteSpace(playerId))
+                {
+                    yield return ResolvePlayerIdByNameFromApi(lookupName, (id) => playerId = id);
+                }
+
+                if (string.IsNullOrWhiteSpace(playerId))
+                {
+                    Log($"<color=yellow>[Casual] Could not resolve player ID for '{leaderboardName}' - skipping casual stat update</color>");
+                    continue;
+                }
+
+                int casualMatchesPlayed = 0;
+                string resolvedDisplayName = leaderboardName;
+
+                yield return CallAPI($"/Player/{playerId}", "GET", "", (res) => {
+                    JObject profile = ParseApiSingleObject(res);
+                    if (profile != null)
+                    {
+                        resolvedDisplayName = (string)profile["display_name"] ?? resolvedDisplayName;
+                        int.TryParse(profile["casual_matches_played"]?.ToString() ?? "0", out casualMatchesPlayed);
+                    }
+                });
+
+                int updatedCount = casualMatchesPlayed + 1;
+                string json = "{" + $"\"casual_matches_played\":{updatedCount}" + "}";
+                bool updated = false;
+
+                yield return CallAPI($"/Player/{playerId}", "PUT", json, (res) => {
+                    if (ParseApiSingleObject(res) != null)
+                    {
+                        updated = true;
+                    }
+                });
+
+                if (!updated)
+                {
+                    Log($"<color=yellow>[Casual] Failed to update casual_matches_played for {leaderboardName}</color>");
+                    continue;
+                }
+
+                updatedPlayers++;
+                _playerIdsByName[leaderboardName] = playerId;
+                if (!string.IsNullOrWhiteSpace(resolvedDisplayName))
+                {
+                    _playerIdsByName[resolvedDisplayName.Trim()] = playerId;
+                }
+
+                Log($"<color=green>[Casual] ✓ Updated {resolvedDisplayName} ({playerId}) casual_matches_played: {casualMatchesPlayed} -> {updatedCount}</color>");
+            }
+
+            _matchEntriesCreated = true;
+            _matchStatsSubmitted = true;
+
+            if (updatedPlayers > 0)
+            {
+                ShowUploadNotification($"Casual stats updated for {updatedPlayers} player(s).", "success");
+            }
+            else
+            {
+                ShowUploadNotification("Casual match detected, but no player stats were updated.", "warning");
+            }
+
+            Log($"<color=cyan>[Casual] Casual match handling complete - updated {updatedPlayers}/{leaderboardNames.Count} players</color>");
+        }
 
         private void Awake() {
             _solidBgTex = new Texture2D(1, 1);
@@ -435,6 +579,9 @@ namespace SBGLeagueAutomation
                     Log("<color=cyan>[Match Stats] Returned to Driving Range - running final match finalization before reset...</color>");
                     StartCoroutine(FinalizeAndResetAfterDrivingRange());
                 } else {
+                    if (_matchStatsSubmitted && !string.IsNullOrWhiteSpace(_currentMatchId)) {
+                        _finalizedMatchIds.Add(_currentMatchId);
+                    }
                     ResetPerMatchState();
                 }
                 
@@ -999,26 +1146,33 @@ namespace SBGLeagueAutomation
 
             if (!string.IsNullOrWhiteSpace(_currentSession?.match_id)) {
                 resolvedId = _currentSession.match_id;
-                Log($"<color=cyan>[Match Creation] Session already linked to Match ID {resolvedId}</color>");
-                onResolved?.Invoke(resolvedId);
-                yield break;
+                // Reject if this is a match we already finalized in a previous round
+                if (_finalizedMatchIds.Contains(resolvedId)) {
+                    Log($"<color=yellow>[Match Creation] Session match_id {resolvedId} was already finalized — clearing link and forcing new match</color>");
+                    _currentSession.match_id = null;
+                    resolvedId = null;
+                } else {
+                    Log($"<color=cyan>[Match Creation] Session already linked to Match ID {resolvedId}</color>");
+                    onResolved?.Invoke(resolvedId);
+                    yield break;
+                }
             }
 
             string query = $"{{\"matchmaking_session_id\":\"{activeSessionId}\"}}";
-            string fullUrl = $"{GetBaseApiUrl()}/Match?q={UnityWebRequest.EscapeURL(query)}&limit=1&sort_by=created_date";
+            string fullUrl = $"{GetBaseApiUrl()}/Match?q={UnityWebRequest.EscapeURL(query)}&sort_by=created_date";
 
             using (UnityWebRequest req = UnityWebRequest.Get(fullUrl)) {
                 ApplyApiHeaders(req);
                 yield return req.SendWebRequest();
 
                 if (req.result == UnityWebRequest.Result.Success) {
-                    JObject existingMatch = ParseApiObjectList(req.downloadHandler.text).FirstOrDefault();
+                    JObject existingMatch = SelectNewestReusableMatch(ParseApiObjectList(req.downloadHandler.text));
                     resolvedId = (string)existingMatch?["id"];
                     if (!string.IsNullOrWhiteSpace(resolvedId)) {
                         if (_currentSession != null) {
                             _currentSession.match_id = resolvedId;
                         }
-                        Log($"<color=green>[Match Creation] ✓ Reusing existing Match ID from API for session {activeSessionId}: {resolvedId}</color>");
+                        Log($"<color=green>[Match Creation] ✓ Reusing newest active Match ID from API for session {activeSessionId}: {resolvedId}</color>");
                     } else if (logMisses) {
                         Log($"<color=cyan>[Match Creation] No existing Match found yet for session {activeSessionId}</color>");
                     }
@@ -1028,6 +1182,27 @@ namespace SBGLeagueAutomation
             }
 
             onResolved?.Invoke(resolvedId);
+        }
+
+        private JObject SelectNewestReusableMatch(IEnumerable<JObject> matches) {
+            if (matches == null) return null;
+
+            return matches
+                .Where(match => match != null)
+                .Where(match => {
+                    string id = (string)match["id"];
+                    return !string.IsNullOrWhiteSpace(id) && !_finalizedMatchIds.Contains(id);
+                })
+                .OrderByDescending(match => ParseApiTimestamp((string)match["created_date"]))
+                .FirstOrDefault();
+        }
+
+        private static DateTime ParseApiTimestamp(string value) {
+            if (DateTime.TryParse(value, null, System.Globalization.DateTimeStyles.RoundtripKind, out DateTime parsed)) {
+                return parsed;
+            }
+
+            return DateTime.MinValue;
         }
 
         private float GetCurrentPlayerMatchUploadDelaySeconds() {
@@ -1185,6 +1360,15 @@ namespace SBGLeagueAutomation
                 }
 
                 int adjustedScore = gamePoints + (scoreVsPar * -10);
+
+                // Don't create a row for a player who hasn't scored anything yet.
+                // The monitor will create the entry once their score becomes non-zero.
+                if (gamePoints == 0) {
+                    Log($"<color=yellow>[{sourceTag}] Skipping MatchEntry POST for {resolvedPlayerName} — score is 0</color>");
+                    onResolved?.Invoke(null);
+                    yield break;
+                }
+
                 var payload = new JObject {
                     ["match_id"] = _currentMatchId,
                     ["player_id"] = playerId,
@@ -1249,6 +1433,10 @@ namespace SBGLeagueAutomation
                 yield return UpdateSessionStatus("completed");
             }
 
+            if (!string.IsNullOrWhiteSpace(_currentMatchId)) {
+                _finalizedMatchIds.Add(_currentMatchId);
+            }
+
             ResetPerMatchState();
         }
 
@@ -1264,6 +1452,9 @@ namespace SBGLeagueAutomation
             }
 
             _currentMatchId = null;
+            // Clear the session's linked match_id so the next round creates a fresh Match record
+            // instead of ResolveExistingMatchIdForCurrentSession short-circuiting on the old link.
+            if (_currentSession != null) _currentSession.match_id = null;
             _playerMatchEntryIds.Clear();
             _matchEntryCreationInProgress.Clear();
             _playerIdsByName.Clear();
@@ -1345,6 +1536,7 @@ namespace SBGLeagueAutomation
 
             // Reset progressive match tracking
             _currentMatchId = null;
+            _finalizedMatchIds.Clear(); // full reset — cleared on menu return, not between rounds
             _playerMatchEntryIds.Clear();
             _matchEntryCreationInProgress.Clear();
             _playerIdsByName.Clear();
@@ -1627,7 +1819,8 @@ namespace SBGLeagueAutomation
                         // Patch has_mod:true onto the web entry
                         string patchJson = "{" +
                             $"\"has_mod\":true," +
-                            $"\"created_by\":\"SBGL_UnifiedMod\"" +
+                            $"\"created_by\":\"SBGL_UnifiedMod\"," +
+                            $"\"match_type\":\"{GetQueueMatchTypePayload()}\"" +
                         "}";
                         yield return CallAPI($"/MatchmakingQueue/{_currentQueueId}", "PUT", patchJson, (res) => {
                             if (ParseApiSingleObject(res) != null)
@@ -1672,6 +1865,7 @@ namespace SBGLeagueAutomation
                 string patchJson = "{" +
                     $"\"has_mod\":true," +
                     $"\"created_by\":\"SBGL_UnifiedMod\"," +
+                    $"\"match_type\":\"{GetQueueMatchTypePayload()}\"," +
                     $"\"queued_at\":\"{DateTime.UtcNow:yyyy-MM-ddTHH:mm:ss.fffZ}\"" +
                 "}";
                 yield return CallAPI($"/MatchmakingQueue/{existingId}", "PUT", patchJson, (res) => {
@@ -1693,6 +1887,7 @@ namespace SBGLeagueAutomation
                     $"\"mmr_snapshot\":{_userProfile.current_mmr}," +
                     $"\"region\":\"{_userProfile.region}\"," +
                     $"\"state_province\":\"{_userProfile.state_province ?? ""}\"," +
+                    $"\"match_type\":\"{GetQueueMatchTypePayload()}\"," +
                     $"\"has_mod\":true," +
                     $"\"created_by\":\"SBGL_UnifiedMod\"," +
                     $"\"status\":\"queued\"," +
@@ -1905,9 +2100,32 @@ namespace SBGLeagueAutomation
                 }
 
                 string rawMatchType = session.match_type ?? string.Empty;
-                bool isProSeries = rawMatchType.IndexOf("pro_series", StringComparison.OrdinalIgnoreCase) >= 0;
-                string matchTypeToStore = isProSeries ? Season1RuleSet.MATCH_TYPE_PRO_SERIES : Season1RuleSet.MATCH_TYPE_RANKED;
-                int seasonToStore = session.season > 0 ? session.season : Season1RuleSet.SEASON;
+                bool isCasual = IsCasualMatchType(rawMatchType);
+                bool isProSeries = IsProSeriesMatchType(rawMatchType);
+                string matchTypeToStore = isCasual
+                    ? Season1RuleSet.MATCH_TYPE_CASUAL
+                    : isProSeries ? Season1RuleSet.MATCH_TYPE_PRO_SERIES : Season1RuleSet.MATCH_TYPE_RANKED;
+                int seasonToStore = isCasual ? 0 : session.season > 0 ? session.season : Season1RuleSet.SEASON;
+                string hostRulesetToStore = isCasual ? "casual" : isProSeries ? "pro_series" : "ranked";
+
+                if (isCasual)
+                {
+                    string courseToStore = !string.IsNullOrWhiteSpace(session.selected_course)
+                        ? session.selected_course
+                        : PlayerPrefs.GetString("SelectedCourse", "");
+
+                    PlayerPrefs.SetString("MatchType", matchTypeToStore);
+                    if (!string.IsNullOrWhiteSpace(courseToStore))
+                    {
+                        PlayerPrefs.SetString("SelectedCourse", courseToStore);
+                    }
+                    PlayerPrefs.SetInt("Season", seasonToStore);
+                    PlayerPrefs.SetString("HostRuleset", hostRulesetToStore);
+                    PlayerPrefs.Save();
+
+                    Log($"<color=cyan>[Config] Stored casual match configuration: Type={matchTypeToStore}, Course={(string.IsNullOrWhiteSpace(courseToStore) ? "manual" : courseToStore)}, Season={seasonToStore}</color>");
+                    return;
+                }
 
                 // Validate course is approved before storing
                 try
@@ -1922,7 +2140,7 @@ namespace SBGLeagueAutomation
                     PlayerPrefs.SetString("MatchType", matchTypeToStore);
                     PlayerPrefs.SetString("SelectedCourse", courseToStore);
                     PlayerPrefs.SetInt("Season", seasonToStore);
-                    PlayerPrefs.SetString("HostRuleset", isProSeries ? "pro_series" : "ranked");
+                    PlayerPrefs.SetString("HostRuleset", hostRulesetToStore);
                     PlayerPrefs.Save();
 
                     Log($"<color=cyan>[Config] Stored match configuration: Type={matchTypeToStore}, Course={courseToStore}, Season={seasonToStore}</color>");
@@ -1938,7 +2156,7 @@ namespace SBGLeagueAutomation
                     PlayerPrefs.SetString("MatchType", matchTypeToStore);
                     PlayerPrefs.SetString("SelectedCourse", string.IsNullOrEmpty(session.selected_course) ? MapPoolConfig.GetRandomApprovedCourse().Name : session.selected_course);
                     PlayerPrefs.SetInt("Season", seasonToStore);
-                    PlayerPrefs.SetString("HostRuleset", isProSeries ? "pro_series" : "ranked");
+                    PlayerPrefs.SetString("HostRuleset", hostRulesetToStore);
                     PlayerPrefs.Save();
                 }
             }
@@ -1973,9 +2191,18 @@ namespace SBGLeagueAutomation
 
             // Ensure ruleset has been selected (read from PlayerPrefs set by driving range panel)
             string rulesetFromPrefs = PlayerPrefs.GetString("HostRuleset", "");
-            _hostRulesetSelection = string.Equals(rulesetFromPrefs, "pro_series", StringComparison.OrdinalIgnoreCase)
-                ? "pro_series"
-                : "ranked";
+            if (string.Equals(rulesetFromPrefs, "pro_series", StringComparison.OrdinalIgnoreCase))
+            {
+                _hostRulesetSelection = "pro_series";
+            }
+            else if (string.Equals(rulesetFromPrefs, "casual", StringComparison.OrdinalIgnoreCase))
+            {
+                _hostRulesetSelection = "casual";
+            }
+            else
+            {
+                _hostRulesetSelection = "ranked";
+            }
             
             var mainMenu = UnityEngine.Object.FindAnyObjectByType<MainMenu>();
             if (mainMenu != null) {
@@ -2084,9 +2311,11 @@ namespace SBGLeagueAutomation
                 Log($"<color=cyan>[Match Creation] Manual local lobby detected. Session surrogate: {_localManualSessionId}</color>");
             }
 
+            string currentMatchType = _currentSession?.match_type ?? PlayerPrefs.GetString("MatchType", "");
+            bool isCasualMatch = IsCurrentMatchCasual();
+
             // Pro Series match submission is handled manually — skip automated entry creation
-            string currentMatchType = PlayerPrefs.GetString("MatchType", "");
-            if (currentMatchType.IndexOf("pro_series", StringComparison.OrdinalIgnoreCase) >= 0) {
+            if (IsProSeriesMatchType(currentMatchType) || IsProSeriesMatchType(PlayerPrefs.GetString("MatchType", ""))) {
                 if (!_proSeriesSkipLogged) {
                     Log("<color=yellow>[Match] Pro Series match — automated upload skipped</color>");
                     _proSeriesSkipLogged = true;
@@ -2134,6 +2363,24 @@ namespace SBGLeagueAutomation
             var startingPositionMap = startingLeaderboard != null
                 ? BuildFinishPositionMap(startingLeaderboard)
                 : new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+            if (isCasualMatch) {
+                if (startingLeaderboard == null || startingLeaderboard.Count == 0) {
+                    Log("<color=yellow>[Casual] Leaderboard is empty - deferring casual stat update until players appear</color>");
+                    if (_monitorCoroutine == null) {
+                        _monitorCoroutine = StartCoroutine(MonitorAndUpdateScores());
+                    }
+                    yield break;
+                }
+
+                Log("<color=cyan>[Casual] Casual match detected - skipping Match/MatchEntry upload and incrementing player stats instead</color>");
+                yield return IncrementCasualMatchesPlayedForActivePlayers(startingLeaderboard);
+                if (_monitorCoroutine != null) {
+                    StopCoroutine(_monitorCoroutine);
+                    _monitorCoroutine = null;
+                }
+                yield break;
+            }
 
             // -----------------------------------------------------------------------
             // MATCH ID COORDINATION
@@ -2227,11 +2474,11 @@ namespace SBGLeagueAutomation
                 if (!string.IsNullOrWhiteSpace(prePostSessionId)) {
                     string finalCheckId = null;
                     string finalCheckQuery = UnityWebRequest.EscapeURL("{\"matchmaking_session_id\":\"" + prePostSessionId + "\"}");
-                    yield return CallAPI($"/Match?q={finalCheckQuery}&limit=1", "GET", "", (res) => {
-                        finalCheckId = (string)ParseApiObjectList(res)?.FirstOrDefault()?["id"];
+                    yield return CallAPI($"/Match?q={finalCheckQuery}&sort_by=created_date", "GET", "", (res) => {
+                        finalCheckId = (string)SelectNewestReusableMatch(ParseApiObjectList(res))?["id"];
                     });
                     if (!string.IsNullOrWhiteSpace(finalCheckId)) {
-                        Log($"<color=green>[Match Creation] ✓ Final pre-POST check found existing match: {finalCheckId} — skipping duplicate POST</color>");
+                        Log($"<color=green>[Match Creation] ✓ Final pre-POST check found existing active match: {finalCheckId} — skipping duplicate POST</color>");
                         _currentMatchId = finalCheckId;
                         if (_currentSession != null) _currentSession.match_id = finalCheckId;
                         ShowUploadNotification("Match record already exists; reusing existing upload.", "info");
@@ -2356,13 +2603,14 @@ namespace SBGLeagueAutomation
                 if (!string.IsNullOrWhiteSpace(playerName)) startingPositionMap.TryGetValue(playerName, out startingPosition);
 
                 string entryId = null;
-                // For now, pass postMatchMmr as preMatchMmr (no delta) -- you should update this to the actual post-match value when available
+                // postMatchMmr is not known at round start; it will be set during FinalizeMatchStats
+                // using the live leaderboard's Elo projection from the final snapshot.
                 yield return EnsureMatchEntryForPlayer(
                     "Match Creation",
                     playerId,
                     playerName,
                     preMatchMmr,
-                    preMatchMmr, // TODO: Replace with actual post-match MMR when available
+                    null, // postMatchMmr will be written at finalization
                     gamePoints,
                     scoreVsPar,
                     startingPosition,
@@ -2442,7 +2690,7 @@ namespace SBGLeagueAutomation
                 // Build a one-shot mapping of player name -> unique finish position for this live snapshot
                 var livePositionMap = BuildFinishPositionMap(allLeaderboardPlayers);
 
-                int activePlayerCount = allLeaderboardPlayers.Count(p => p != null && !string.IsNullOrWhiteSpace(p.Name));
+                int activePlayerCount = allLeaderboardPlayers.Count(p => p != null && !string.IsNullOrWhiteSpace(p.Name) && p.BaseScore != 0);
                 if (activePlayerCount > 0) {
                     _matchExpectedPlayerCount = activePlayerCount;
                     yield return UpdateMatchPlayerCountIfNeeded(activePlayerCount, "live leaderboard");
@@ -2462,6 +2710,9 @@ namespace SBGLeagueAutomation
                         string strokeStr = player.RawStrokes.Replace("±", "").Trim();
                         int.TryParse(strokeStr, out newScoreVsPar);
                     }
+
+                    // Skip spectators / players who haven't scored yet
+                    if (newGamePoints == 0) continue;
 
                     // Check if scores changed
                     bool scoresChanged = false;
@@ -2518,7 +2769,18 @@ namespace SBGLeagueAutomation
                             _matchEntriesCreated = true;
                             int finishPosition = 0;
                             if (!string.IsNullOrWhiteSpace(player.Name)) livePositionMap.TryGetValue(player.Name, out finishPosition);
-                            yield return UpdateMatchEntry(entryId, playerId, player.Name, newGamePoints, newScoreVsPar, finishPosition);
+
+                            // Pass live leaderboard MMR projection into per-hole update
+                            string perHolePreMmr = (!string.IsNullOrWhiteSpace(player.MMR) && player.MMR != "..." && player.MMR != "--") ? player.MMR : null;
+                            string perHolePostMmr = null;
+                            if (perHolePreMmr != null && float.TryParse(perHolePreMmr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float perHolePreF)) {
+                                int projDelta = ParseProjectedMmrDelta(player.ProjectedDisplay);
+                                perHolePostMmr = (perHolePreF + projDelta).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                            }
+
+                            // Pass finishPosition=0 so the field is intentionally omitted
+                            // from the payload — only finalization writes the definitive position.
+                            yield return UpdateMatchEntry(entryId, playerId, player.Name, newGamePoints, newScoreVsPar, 0, perHolePostMmr, perHolePreMmr);
                             _lastSubmittedScores[player.Name] = newGamePoints;
                             _lastSubmittedScoresVsPar[player.Name] = newScoreVsPar;
                         }
@@ -2530,19 +2792,34 @@ namespace SBGLeagueAutomation
             _monitorCoroutine = null;
         }
 
-        private IEnumerator UpdateMatchEntry(string entryId, string playerId, string playerName, int gamePoints, int scoreVsPar, int finishPosition = 0) {
+        private IEnumerator UpdateMatchEntry(string entryId, string playerId, string playerName, int gamePoints, int scoreVsPar, int finishPosition = 0, string postMatchMmr = null, string preMatchMmr = null) {
             Log($"<color=cyan>[Score Update] Hole completed for {playerName}: {gamePoints} pts, {scoreVsPar} vs par</color>");
 
             int adjustedScore = gamePoints + (scoreVsPar * -10); // Same calculation as LiveLeaderboard
-            string json = "{" +
-                $"\"game_points\":{gamePoints}," +
-                $"\"over_under\":{scoreVsPar}," +
-                $"\"score_vs_par\":{scoreVsPar}," +
-                $"\"adjusted_match_score\":{adjustedScore}," +
-                $"\"finish_position\":{finishPosition}," +
-                $"\"notes\":\"Updated after hole completion\"" +
-            "}";
+            var payload = new JObject {
+                ["game_points"] = gamePoints,
+                ["over_under"] = scoreVsPar,
+                ["score_vs_par"] = scoreVsPar,
+                ["adjusted_match_score"] = adjustedScore,
+                ["notes"] = "Updated after hole completion"
+            };
+            // Only stamp finish_position when a real value is supplied (finalization path).
+            // Per-hole updates omit it intentionally — positions shift throughout the match
+            // and writing intermediate positions causes stale values when a player's score
+            // doesn't change on the hole where someone else passes them.
+            if (finishPosition > 0) payload["finish_position"] = finishPosition;
 
+            // Write MMR fields when provided (set at finalization using live leaderboard Elo projection)
+            if (!string.IsNullOrWhiteSpace(postMatchMmr)
+                && float.TryParse(postMatchMmr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float postMmrF)) {
+                payload["post_match_mmr"] = postMmrF;
+                if (!string.IsNullOrWhiteSpace(preMatchMmr)
+                    && float.TryParse(preMatchMmr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float preMmrF)) {
+                    payload["mmr_change"] = postMmrF - preMmrF;
+                }
+            }
+
+            string json = payload.ToString(Newtonsoft.Json.Formatting.None);
             yield return CallAPI($"/MatchEntry/{entryId}", "PUT", json, (res) => {
                 try {
                     JObject response = ParseApiSingleObject(res);
@@ -2683,7 +2960,9 @@ namespace SBGLeagueAutomation
                 .Select(player => new CachedLeaderboardPlayer {
                     Name = player.Name.Trim(),
                     BaseScore = player.BaseScore,
-                    RawStrokes = player.RawStrokes ?? string.Empty
+                    RawStrokes = player.RawStrokes ?? string.Empty,
+                    MMR = player.MMR,
+                    ProjectedDelta = ParseProjectedMmrDelta(player.ProjectedDisplay)
                 })
                 .ToList();
 
@@ -2724,6 +3003,17 @@ namespace SBGLeagueAutomation
             string strokeStr = rawStrokes.Replace("±", "").Trim();
             int.TryParse(strokeStr, out int scoreVsPar);
             return scoreVsPar;
+        }
+
+        /// <summary>
+        /// Parses the rounded MMR delta from the LiveLeaderboard's ProjectedDisplay string.
+        /// Format examples: "1200 (+15)", "950 (-8)", "1100 (0)"
+        /// </summary>
+        private int ParseProjectedMmrDelta(string projectedDisplay) {
+            if (string.IsNullOrWhiteSpace(projectedDisplay)) return 0;
+            var m = Regex.Match(projectedDisplay, @"\(([+-]?\d+)\)");
+            if (m.Success && int.TryParse(m.Groups[1].Value, out int delta)) return delta;
+            return 0;
         }
 
         /// <summary>
@@ -2834,8 +3124,8 @@ namespace SBGLeagueAutomation
         }
 
         private IEnumerator FinalizeMatchStats() {
-            // Pro Series match submission is handled manually
-            if (PlayerPrefs.GetString("MatchType", "").Contains("pro_series")) {
+            // Pro Series matches are manual; casual matches only increment per-player stats.
+            if (IsProSeriesMatchType(PlayerPrefs.GetString("MatchType", "")) || IsCurrentMatchCasual()) {
                 _matchStatsSubmitted = true;
                 yield break;
             }
@@ -2848,7 +3138,7 @@ namespace SBGLeagueAutomation
                 yield break;
             }
 
-            int finalPlayerCount = _finalLeaderboardSnapshot.Count(p => p != null && !string.IsNullOrWhiteSpace(p.Name));
+            int finalPlayerCount = _finalLeaderboardSnapshot.Count(p => p != null && !string.IsNullOrWhiteSpace(p.Name) && p.BaseScore != 0);
             if (finalPlayerCount > 0) {
                 _matchExpectedPlayerCount = finalPlayerCount;
                 yield return UpdateMatchPlayerCountIfNeeded(finalPlayerCount, "cached final leaderboard");
@@ -2863,11 +3153,54 @@ namespace SBGLeagueAutomation
             // Build a deterministic mapping of player name -> unique finish position for final leaderboard
             var finalPositionMap = BuildFinishPositionMap(_finalLeaderboardSnapshot);
 
+            // -----------------------------------------------------------------------
+            // Pre-resolve MMR for all non-zero players so the Elo delta is always
+            // calculated from a real number, not "..." from an incomplete async fetch.
+            // -----------------------------------------------------------------------
+            var finalPreMmrByName = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+            foreach (var p in _finalLeaderboardSnapshot) {
+                if (p == null || string.IsNullOrWhiteSpace(p.Name) || p.BaseScore == 0) continue;
+
+                // Try snapshot value first (already a float if the MMR cache had loaded)
+                if (!string.IsNullOrWhiteSpace(p.MMR)
+                    && float.TryParse(p.MMR, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float snapMmr)) {
+                    finalPreMmrByName[p.Name] = snapMmr;
+                    continue;
+                }
+
+                // Fallback: local player -> use profile value
+                if (_userProfile != null && string.Equals(p.Name, _userProfile.display_name, StringComparison.OrdinalIgnoreCase)) {
+                    finalPreMmrByName[p.Name] = _userProfile.current_mmr;
+                    Log($"<color=cyan>[Match Finalize] MMR for local player {p.Name} resolved from profile: {_userProfile.current_mmr}</color>");
+                    continue;
+                }
+
+                // Fallback: fetch from API by player ID
+                TryGetPlayerIdForName(p.Name, out string resolveId);
+                if (!string.IsNullOrWhiteSpace(resolveId)) {
+                    yield return CallAPI($"/Player/{resolveId}", "GET", "", (res) => {
+                        JObject profile = ParseApiSingleObject(res);
+                        object mmrObj = profile?["current_mmr"];
+                        if (mmrObj != null && float.TryParse(mmrObj.ToString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float fetchedMmr)) {
+                            finalPreMmrByName[p.Name] = fetchedMmr;
+                            Log($"<color=cyan>[Match Finalize] MMR for {p.Name} resolved from API: {fetchedMmr}</color>");
+                        }
+                    });
+                }
+            }
+
             foreach (var player in _finalLeaderboardSnapshot) {
                 if (player == null) continue;
 
                 int finalGamePoints = player.BaseScore;
                 int finalScoreVsPar = ParseScoreVsPar(player.RawStrokes);
+
+                // Skip spectators and players who never scored
+                if (finalGamePoints == 0) {
+                    Log($"<color=yellow>[Match Finalize] Skipping {player.Name} — game points is 0 (spectator/no score)</color>");
+                    continue;
+                }
+
                 int finishPosition = 0;
                 if (!string.IsNullOrWhiteSpace(player.Name)) finalPositionMap.TryGetValue(player.Name, out finishPosition);
 
@@ -2875,10 +3208,18 @@ namespace SBGLeagueAutomation
                 TryGetPlayerIdForName(player.Name, out string playerId);
                 _playerMatchEntryIds.TryGetValue(playerId ?? "", out string entryId);
 
+                // Derive post-match MMR from the live leaderboard's projected delta.
+                string cachedPreMmr = null;
+                string cachedPostMmr = null;
+                if (finalPreMmrByName.TryGetValue(player.Name, out float resolvedPreMmr)) {
+                    cachedPreMmr = resolvedPreMmr.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    cachedPostMmr = (resolvedPreMmr + player.ProjectedDelta).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                }
+
                 if (!string.IsNullOrEmpty(entryId)) {
-                    // Known entry — perform final update
-                    Log($"<color=cyan>[Match Finalize] Final update for {player.Name}: {finalGamePoints} pts, {finalScoreVsPar} vs par, pos {finishPosition}</color>");
-                    yield return UpdateMatchEntry(entryId, playerId, player.Name, finalGamePoints, finalScoreVsPar, finishPosition);
+                    // Known entry — perform final update using the cached live leaderboard projection
+                    Log($"<color=cyan>[Match Finalize] Final update for {player.Name}: {finalGamePoints} pts, {finalScoreVsPar} vs par, pos {finishPosition}, postMMR {cachedPostMmr ?? "n/a"}</color>");
+                    yield return UpdateMatchEntry(entryId, playerId, player.Name, finalGamePoints, finalScoreVsPar, finishPosition, cachedPostMmr, cachedPreMmr);
                 } else {
                     // Player is on the final leaderboard but has no entry (joined late or missed round-start capture)
                     Log($"<color=yellow>[Match Finalize] {player.Name} has no entry — creating late entry...</color>");
@@ -2894,20 +3235,22 @@ namespace SBGLeagueAutomation
                         continue;
                     }
 
-                    // Fetch pre-match MMR for the late player
-                    string preMatchMmr = null;
-                    yield return CallAPI($"/Player/{playerId}", "GET", "", (res) => {
-                        JObject profile = ParseApiSingleObject(res);
-                        object mmrObj = profile?["current_mmr"];
-                        if (mmrObj != null) preMatchMmr = mmrObj.ToString();
-                    });
+                    // Use resolved pre-match MMR (already fetched in pre-resolve pass above)
+                    string preMatchMmr = cachedPreMmr;
+                    if (string.IsNullOrWhiteSpace(preMatchMmr)) {
+                        yield return CallAPI($"/Player/{playerId}", "GET", "", (res) => {
+                            JObject profile = ParseApiSingleObject(res);
+                            object mmrObj = profile?["current_mmr"];
+                            if (mmrObj != null) preMatchMmr = mmrObj.ToString();
+                        });
+                    }
 
                     yield return EnsureMatchEntryForPlayer(
                         "Match Finalize",
                         playerId,
                         player.Name,
                         preMatchMmr,
-                        null, // postMatchMmr
+                        cachedPostMmr, // postMatchMmr from cached live leaderboard projection
                         finalGamePoints,
                         finalScoreVsPar,
                         finishPosition,
@@ -2915,7 +3258,7 @@ namespace SBGLeagueAutomation
                         (id) => entryId = id);
 
                     if (!string.IsNullOrEmpty(entryId)) {
-                        yield return UpdateMatchEntry(entryId, playerId, player.Name, finalGamePoints, finalScoreVsPar, finishPosition);
+                        yield return UpdateMatchEntry(entryId, playerId, player.Name, finalGamePoints, finalScoreVsPar, finishPosition, cachedPostMmr, preMatchMmr);
                     }
                 }
             }
@@ -2983,6 +3326,12 @@ namespace SBGLeagueAutomation
                 scoreVsPar = cachedVsPar;
             }
 
+            // Don't create placeholder entries for session players who never scored (spectators)
+            if (gamePoints == 0) {
+                Log($"<color=yellow>[Match Finalize] Skipping placeholder for session player {playerName} — game points is 0</color>");
+                yield break;
+            }
+
             string entryId = null;
             yield return EnsureMatchEntryForPlayer(
                 "Match Finalize",
@@ -3012,8 +3361,8 @@ namespace SBGLeagueAutomation
                 yield break;
             }
 
-            // Pro Series match submission is handled manually
-            if (PlayerPrefs.GetString("MatchType", "").Contains("pro_series")) {
+            // Pro Series matches are manual; casual matches only increment per-player stats.
+            if (IsProSeriesMatchType(PlayerPrefs.GetString("MatchType", "")) || IsCurrentMatchCasual()) {
                 _matchStatsSubmitted = true;
                 yield break;
             }
@@ -3163,8 +3512,8 @@ namespace SBGLeagueAutomation
 
             // Map to Match schema - these are the fields the API expects
             string seasonId = _activeSeasonId ?? Season1RuleSet.SEASON_ID;
-            string rawMatchType = PlayerPrefs.GetString("MatchType", "mmr");
-            string apiMatchType = rawMatchType.Contains("pro_series") ? "pro_series" : "mmr";
+            string rawMatchType = PlayerPrefs.GetString("MatchType", Season1RuleSet.MATCH_TYPE_RANKED);
+            string apiMatchType = IsProSeriesMatchType(rawMatchType) ? "pro_series" : "mmr";
             bool isProSeries = apiMatchType == "pro_series";
 
             var payload = new JObject {
@@ -3394,19 +3743,49 @@ namespace SBGLeagueAutomation
             } else {
                 // Prevent interaction until the profile and queue state are synced
                 bool canInteract = !_isInitializing && _userProfile != null;
-                GUI.enabled = canInteract;
 
-                GUI.backgroundColor = _isQueueing ? new Color(0.8f, 0.1f, 0.1f, 1.0f) : new Color(0.1f, 0.6f, 0.1f, 1.0f);
-                
-                string btnText;
-                if (_isInitializing) btnText = "SYNCING WITH SERVER...";
-                else if (_userProfile == null) btnText = "RESOLVING PROFILE...";
-                else btnText = _isQueueing ? "LEAVE QUEUE" : "JOIN QUEUE";
+                if (_isQueueing) {
+                    // Already queuing: just show LEAVE QUEUE
+                    GUI.enabled = canInteract;
+                    GUI.backgroundColor = new Color(0.8f, 0.1f, 0.1f, 1.0f);
+                    if (GUI.Button(new Rect(rightX + 10, 50, uiWidth - 20, 50), "LEAVE QUEUE")) {
+                        StartCoroutine(LeaveQueue());
+                    }
+                    GUI.enabled = true;
+                } else {
+                    // --- QUEUE TYPE TOGGLE (RANKED | CASUAL) ---
+                    float halfW = (uiWidth - 22f) / 2f;
+                    bool isRankedSelected = _queueTypeSelection != "casual";
+                    GUI.enabled = canInteract;
+                    GUI.backgroundColor = isRankedSelected ? new Color(0.1f, 0.4f, 0.9f, 1f) : Color.gray;
+                    if (GUI.Button(new Rect(rightX + 10, 50, halfW, 23), "RANKED")) {
+                        _queueTypeSelection = "ranked";
+                    }
+                    GUI.backgroundColor = !isRankedSelected ? new Color(0.6f, 0.3f, 0.8f, 1f) : Color.gray;
+                    if (GUI.Button(new Rect(rightX + 12 + halfW, 50, halfW, 23), "CASUAL")) {
+                        _queueTypeSelection = "casual";
+                    }
 
-                if (GUI.Button(new Rect(rightX + 10, 50, uiWidth - 20, 50), btnText)) {
-                    if (!_isQueueing) StartCoroutine(MatchmakingLoop()); else StartCoroutine(LeaveQueue());
+                    // --- JOIN QUEUE BUTTON ---
+                    string btnText;
+                    if (_isInitializing) btnText = "SYNCING WITH SERVER...";
+                    else if (_userProfile == null) btnText = "RESOLVING PROFILE...";
+                    else btnText = "JOIN QUEUE";
+
+                    GUI.backgroundColor = new Color(0.1f, 0.6f, 0.1f, 1.0f);
+                    if (GUI.Button(new Rect(rightX + 10, 76, uiWidth - 20, 32), btnText)) {
+                        // Stamp chosen queue type into PlayerPrefs right before entering the loop
+                        if (_queueTypeSelection == "casual") {
+                            PlayerPrefs.SetString("MatchType", Season1RuleSet.MATCH_TYPE_CASUAL);
+                            PlayerPrefs.SetString("HostRuleset", "casual");
+                        } else {
+                            PlayerPrefs.SetString("MatchType", Season1RuleSet.MATCH_TYPE_RANKED);
+                            PlayerPrefs.SetString("HostRuleset", "ranked");
+                        }
+                        StartCoroutine(MatchmakingLoop());
+                    }
+                    GUI.enabled = true;
                 }
-                GUI.enabled = true;
             }
 
             float offset = 0f;
@@ -3959,6 +4338,8 @@ namespace SBGLeagueAutomation
             public string Name;
             public int BaseScore;
             public string RawStrokes;
+            public string MMR;           // Player's pre-match MMR (from live leaderboard cache)
+            public int ProjectedDelta;   // Rounded MMR change calculated by live leaderboard Elo engine
         }
         public struct PlayerData { public string name, mmr; }
     }

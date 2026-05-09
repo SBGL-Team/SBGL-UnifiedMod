@@ -1172,7 +1172,40 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 
                 _knownPeers.Add(steamId);
                 UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Added player {steamId} to tracking (knownPeers={_knownPeers.Count})");
+                TrySendCurrentMatchIdToPeer(steamId, "peer discovered");
                 UpdateUIReport();
+            }
+        }
+
+        private static bool ShouldShareCurrentMatchId()
+        {
+            string matchId = SBGLeagueAutomation.SBGLPlugin.CurrentMatchId;
+            if (string.IsNullOrWhiteSpace(matchId)) return false;
+
+            string sceneName = SceneManager.GetActiveScene().name?.ToLowerInvariant() ?? string.Empty;
+            if (sceneName.Contains("menu") || sceneName.Contains("driving") || sceneName.Contains("range") || sceneName.Contains("lobby"))
+                return false;
+
+            return true;
+        }
+
+        private void TrySendCurrentMatchIdToPeer(ulong peerId, string reason)
+        {
+            if (!SteamClient.IsValid || peerId == 0 || peerId == SteamClient.SteamId) return;
+            if (!ShouldShareCurrentMatchId()) return;
+
+            string matchId = SBGLeagueAutomation.SBGLPlugin.CurrentMatchId;
+            if (string.IsNullOrWhiteSpace(matchId)) return;
+
+            try
+            {
+                byte[] data = Encoding.UTF8.GetBytes($"SBGL_MATCH_ID:{matchId}");
+                SteamNetworking.SendP2PPacket(peerId, data, -1, SBGL_NET_CHANNEL, P2PSend.Reliable);
+                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Sent active match ID {matchId} to peer {peerId} ({reason})");
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogWarning($"[SBGL-CompPluginCheck] Failed to send active match ID to peer {peerId} ({reason}): {ex.Message}");
             }
         }
 
@@ -1329,6 +1362,11 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                     else if (msg.StartsWith("SBGL_REPORT:"))
                     {
                         string modList = msg.Replace("SBGL_REPORT:", "");
+
+                        // A mod report from a peer guarantees the P2P path is live, so reply with the
+                        // current active match ID when we're already in a round. This lets late joiners or
+                        // reconnecting players adopt the existing match instead of creating a new one.
+                        TrySendCurrentMatchIdToPeer(remoteId.Value, "mod report received");
                         
                         // Create/update compliance status for this player
                         if (!_playerComplianceStatus.ContainsKey(remoteId.Value))

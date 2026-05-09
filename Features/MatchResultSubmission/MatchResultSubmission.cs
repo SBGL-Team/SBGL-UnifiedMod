@@ -5,6 +5,7 @@ using System.Linq;
 using System.Text;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
+using UnityEngine.Networking;
 using SBGL.UnifiedMod.Core;
 using SBGLLiveLeaderboard;
 using Steamworks;
@@ -94,6 +95,133 @@ namespace SBGLeagueAutomation
 
         private void Log(string message) => _logger?.Invoke(message);
 
+        private static bool IsProSeriesMatchType(string matchType)
+        {
+            return !string.IsNullOrWhiteSpace(matchType)
+                && matchType.IndexOf("pro_series", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsCasualMatchType(string matchType)
+        {
+            return !string.IsNullOrWhiteSpace(matchType)
+                && matchType.IndexOf(Season1RuleSet.MATCH_TYPE_CASUAL, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private IEnumerator ResolvePlayerIdByName(string playerName, Action<string> onResolved)
+        {
+            if (onResolved == null) yield break;
+
+            if (string.IsNullOrWhiteSpace(playerName))
+            {
+                onResolved(null);
+                yield break;
+            }
+
+            string normalizedName = playerName.Trim();
+            string escapedName = normalizedName.Replace("\\", "\\\\").Replace("\"", "\\\"");
+            string query = "{\"$or\":[{\"display_name\":\"" + escapedName + "\"},{\"ign\":\"" + escapedName + "\"}]}";
+            string resolvedId = null;
+
+            yield return _callApi($"/Player?q={UnityWebRequest.EscapeURL(query)}&limit=1", "GET", "", (res) =>
+            {
+                if (string.IsNullOrWhiteSpace(res))
+                {
+                    return;
+                }
+
+                try
+                {
+                    JToken token = JToken.Parse(res);
+                    JObject row = token is JArray arr
+                        ? arr.OfType<JObject>().FirstOrDefault()
+                        : token as JObject;
+                    if (row != null)
+                    {
+                        resolvedId = (string)row["id"];
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log($"<color=yellow>[Casual] Could not resolve player '{normalizedName}': {ex.Message}</color>");
+                }
+            });
+
+            onResolved(resolvedId);
+        }
+
+        private IEnumerator IncrementCasualMatchesPlayedForLeaderboard(List<LiveLeaderboardPlugin.SBGLPlayer> leaderboardPlayers)
+        {
+            List<string> leaderboardNames = leaderboardPlayers?
+                .Where(player => player != null && !string.IsNullOrWhiteSpace(player.Name))
+                .Select(player => player.Name.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList() ?? new List<string>();
+
+            if (leaderboardNames.Count == 0)
+            {
+                Log("<color=yellow>[Casual] No active leaderboard names found - skipping casual stat increment</color>");
+                yield break;
+            }
+
+            int updatedPlayers = 0;
+            foreach (string leaderboardName in leaderboardNames)
+            {
+                string playerId = null;
+                if (!string.IsNullOrWhiteSpace(_userProfile?.id)
+                    && string.Equals(leaderboardName, _userProfile.display_name, StringComparison.OrdinalIgnoreCase))
+                {
+                    playerId = _userProfile.id;
+                }
+
+                if (string.IsNullOrWhiteSpace(playerId))
+                {
+                    yield return ResolvePlayerIdByName(leaderboardName, (id) => playerId = id);
+                }
+
+                if (string.IsNullOrWhiteSpace(playerId))
+                {
+                    Log($"<color=yellow>[Casual] Could not resolve player ID for '{leaderboardName}' - skipping casual stat update</color>");
+                    continue;
+                }
+
+                int casualMatchesPlayed = 0;
+                string resolvedDisplayName = leaderboardName;
+                yield return _callApi($"/Player/{playerId}", "GET", "", (res) =>
+                {
+                    JObject profile = _parseApiSingleObject(res);
+                    if (profile != null)
+                    {
+                        resolvedDisplayName = (string)profile["display_name"] ?? resolvedDisplayName;
+                        int.TryParse(profile["casual_matches_played"]?.ToString() ?? "0", out casualMatchesPlayed);
+                    }
+                });
+
+                int updatedCount = casualMatchesPlayed + 1;
+                string json = "{" + $"\"casual_matches_played\":{updatedCount}" + "}";
+                bool updated = false;
+                yield return _callApi($"/Player/{playerId}", "PUT", json, (res) =>
+                {
+                    if (_parseApiSingleObject(res) != null)
+                    {
+                        updated = true;
+                    }
+                });
+
+                if (!updated)
+                {
+                    Log($"<color=yellow>[Casual] Failed to update casual_matches_played for {leaderboardName}</color>");
+                    continue;
+                }
+
+                updatedPlayers++;
+                Log($"<color=green>[Casual] ✓ Updated {resolvedDisplayName} ({playerId}) casual_matches_played: {casualMatchesPlayed} -> {updatedCount}</color>");
+            }
+
+            _matchEntriesCreated = true;
+            _matchStatsSubmitted = true;
+            Log($"<color=cyan>[Casual] Casual match handling complete - updated {updatedPlayers}/{leaderboardNames.Count} players</color>");
+        }
+
         // ==========================================
         // PUBLIC API
         // ==========================================
@@ -119,6 +247,21 @@ namespace SBGLeagueAutomation
         {
             Log($"<color=cyan>[Match Creation] Starting new match for session {_currentSession.id}</color>");
             _matchStartTime = DateTime.UtcNow;
+
+            string currentMatchType = _currentSession?.match_type ?? PlayerPrefs.GetString("MatchType", "");
+            if (IsProSeriesMatchType(currentMatchType))
+            {
+                Log("<color=yellow>[Match] Pro Series match — automated upload skipped</color>");
+                _matchEntriesCreated = true;
+                yield break;
+            }
+
+            if (IsCasualMatchType(currentMatchType))
+            {
+                Log("<color=cyan>[Casual] Casual match detected - skipping Match/MatchEntry upload and incrementing player stats instead</color>");
+                yield return IncrementCasualMatchesPlayedForLeaderboard(startingLeaderboard);
+                yield break;
+            }
 
             // Step 1: Create Match record
             // Retrieve course and match type from PlayerPrefs (set by API during matchmaking)
@@ -291,6 +434,13 @@ namespace SBGLeagueAutomation
 
         public IEnumerator FinalizeMatchStats(List<LiveLeaderboardPlugin.SBGLPlayer> finalLeaderboard)
         {
+            string currentMatchType = _currentSession?.match_type ?? PlayerPrefs.GetString("MatchType", "");
+            if (IsProSeriesMatchType(currentMatchType) || IsCasualMatchType(currentMatchType))
+            {
+                _matchStatsSubmitted = true;
+                yield break;
+            }
+
             // Wait for leaderboard to finalize
             yield return new WaitForSeconds(1.5f);
 
@@ -395,7 +545,7 @@ namespace SBGLeagueAutomation
             if (stats == null || _currentSession == null) yield break;
 
             string seasonId = Season1RuleSet.SEASON_ID;
-            bool isProSeries = stats.match_type != null && stats.match_type.Contains("pro_series");
+            bool isProSeries = IsProSeriesMatchType(stats.match_type);
             string apiMatchType = isProSeries ? "pro_series" : "mmr";
             string mode = isProSeries ? "Pro Series" : "Ranked";
 

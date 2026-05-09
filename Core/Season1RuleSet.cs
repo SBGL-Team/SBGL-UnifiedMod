@@ -8,6 +8,7 @@ namespace SBGL.UnifiedMod.Core
         public const int SEASON = 1;
         public const string SEASON_ID = "69de6bf4fb103cb0d5eb00c5";
         public const string PRO_SERIES_SEASON_ID = "69b59af135403a1cb7b113c8";
+        public const string MATCH_TYPE_CASUAL = "casual";
         public const string MATCH_TYPE_RANKED = "ranked_season_1";
         public const string MATCH_TYPE_PRO_SERIES = "pro_series_season_1";
 

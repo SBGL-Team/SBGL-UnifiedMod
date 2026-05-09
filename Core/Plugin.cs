@@ -30,7 +30,7 @@ namespace SBGL.UnifiedMod.Core
         public string ProfilePicUrl { get; set; }
         public bool IsResolved { get; set; }
     }
-    [BepInPlugin("com.sbgl.unified", "SBGL Unified Mod", "0.0.14")]
+    [BepInPlugin("com.sbgl.unified", "SBGL Unified Mod", "0.1.0")]
     public class UnifiedPlugin : BaseUnityPlugin
     {
         // ==========================================

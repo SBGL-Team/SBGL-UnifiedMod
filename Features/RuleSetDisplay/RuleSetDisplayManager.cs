@@ -6,7 +6,7 @@ using System;
 
 namespace SBGL.UnifiedMod.Features {
     /// <summary>
-    /// Manages the RANKED / PRO SERIES apply-ruleset buttons on the Driving Range.
+    /// Manages the RANKED / PRO SERIES / CASUAL apply-ruleset buttons on the Driving Range.
     /// Only visible when the local player is the server host.
     /// Config options control position and whether the detail panel is shown.
     /// </summary>
@@ -25,6 +25,7 @@ namespace SBGL.UnifiedMod.Features {
         private Texture2D _tooltipBgTexture;
         private string _tooltipRanked = null;
         private string _tooltipPro    = null;
+        private string _tooltipCasual = null;
         private string _noRulesetTooltip = "<b>Applies Classic preset only.</b>\n<color=#AAFFAA>No Season 1 rules or item bans enforced.</color>";
         private string _lastSceneName = string.Empty;
         private bool _defaultAppliedForScene = false;
@@ -156,7 +157,7 @@ namespace SBGL.UnifiedMod.Features {
             bool rulesEnabled = _applyRulesets?.Value ?? true;
             string activeRuleset = rulesEnabled ? PlayerPrefs.GetString("HostRuleset", "ranked") : "none";
 
-            float panelWidth = 340f;
+            float panelWidth = 450f;
             float buttonHeight = 40f;
             float detailsHeight = showDetails ? 110f : 0f;
             float panelHeight = 30f + buttonHeight + detailsHeight + 10f;
@@ -169,11 +170,12 @@ namespace SBGL.UnifiedMod.Features {
             GUI.Box(new Rect(panelX, panelY, panelWidth, panelHeight), "<b>APPLY RULESET</b>");
 
             float btnY = panelY + 28f;
-            float btnW = (panelWidth - 40f) / 3f; // 10 left + 10 gap + 10 gap + 10 right
+            float btnW = (panelWidth - 50f) / 4f; // 10 left + 3x10 gap + 10 right
 
             float btn1X = panelX + 10f;
             float btn2X = btn1X + btnW + 10f;
             float btn3X = btn2X + btnW + 10f;
+            float btn4X = btn3X + btnW + 10f;
 
             // Build tooltips lazily from the live rule data so they stay accurate if rules change
             if (_tooltipRanked == null)
@@ -189,14 +191,23 @@ namespace SBGL.UnifiedMod.Features {
                     + "\n<b>Items:</b> <color=#AAFFAA>Game defaults (all enabled)</color>"
                     + "\n<b>Courses:</b> <color=#AAFFAA>Manual selection</color>";
             }
+            if (_tooltipCasual == null)
+            {
+                _tooltipCasual = "<b>Applies Classic preset only.</b>"
+                    + "\n<b>Items:</b> <color=#AAFFAA>Game defaults (all enabled)</color>"
+                    + "\n<b>Courses:</b> <color=#AAFFAA>Manual selection</color>"
+                    + "\n<color=#FFFFAA>No MMR impact. Only casual matches played is tracked.</color>";
+            }
 
             var rankedContent    = new GUIContent("<b>RANKED</b>");
             var proContent       = new GUIContent("<b>PRO SERIES</b>");
+            var casualContent    = new GUIContent("<b>CASUAL</b>");
             var noRulesetContent = new GUIContent("<b>NO RULESET</b>");
 
             var rect1 = new Rect(btn1X, btnY, btnW, buttonHeight);
             var rect2 = new Rect(btn2X, btnY, btnW, buttonHeight);
             var rect3 = new Rect(btn3X, btnY, btnW, buttonHeight);
+            var rect4 = new Rect(btn4X, btnY, btnW, buttonHeight);
 
             GUI.backgroundColor = activeRuleset == "ranked" ? Color.green : Color.grey;
             if (GUI.Button(rect1, rankedContent)) {
@@ -210,8 +221,14 @@ namespace SBGL.UnifiedMod.Features {
                 ApplyRuleset("pro_series");
             }
 
+            GUI.backgroundColor = activeRuleset == "casual" ? new Color(0.2f, 0.75f, 1f) : Color.grey;
+            if (GUI.Button(rect3, casualContent)) {
+                if (_applyRulesets != null) _applyRulesets.Value = true;
+                ApplyRuleset("casual");
+            }
+
             GUI.backgroundColor = activeRuleset == "none" ? Color.yellow : Color.grey;
-            if (GUI.Button(rect3, noRulesetContent, _smallBtnStyle)) {
+            if (GUI.Button(rect4, noRulesetContent, _smallBtnStyle)) {
                 if (_applyRulesets != null) _applyRulesets.Value = false;
                 ResetToClassicPreset();
                 Debug.Log("[RuleSetDisplayManager] Ruleset enforcement disabled via No Ruleset button");
@@ -226,7 +243,8 @@ namespace SBGL.UnifiedMod.Features {
                 string tip = null;
                 if (rect1.Contains(mouse))      tip = _tooltipRanked;
                 else if (rect2.Contains(mouse)) tip = _tooltipPro;
-                else if (rect3.Contains(mouse)) tip = _noRulesetTooltip;
+                else if (rect3.Contains(mouse)) tip = _tooltipCasual;
+                else if (rect4.Contains(mouse)) tip = _noRulesetTooltip;
 
                 if (!string.IsNullOrEmpty(tip)) {
                     float ttW = 280f;
@@ -264,29 +282,32 @@ namespace SBGL.UnifiedMod.Features {
             // Store the ruleset choice
             PlayerPrefs.SetString("HostRuleset", rulesetName);
             
-            // Update match type to indicate ranked
+            int season = Core.Season1RuleSet.SEASON;
+
+            // Update match type to indicate the selected ruleset
             if (rulesetName == "ranked") {
-                PlayerPrefs.SetString("MatchType", "ranked_season_1");
+                PlayerPrefs.SetString("MatchType", Core.Season1RuleSet.MATCH_TYPE_RANKED);
             } else if (rulesetName == "pro_series") {
-                PlayerPrefs.SetString("MatchType", "pro_series_season_1");
+                PlayerPrefs.SetString("MatchType", Core.Season1RuleSet.MATCH_TYPE_PRO_SERIES);
+            } else if (rulesetName == "casual") {
+                PlayerPrefs.SetString("MatchType", Core.Season1RuleSet.MATCH_TYPE_CASUAL);
+                season = 0;
             }
             
-            // Set Season to 1 so rules apply correctly
-            PlayerPrefs.SetInt("Season", 1);
+            PlayerPrefs.SetInt("Season", season);
             
-            // For Ranked: pick a random approved course.
-            // For Pro Series: maps are managed manually — do NOT overwrite the custom map list.
-            if (rulesetName != "pro_series")
+            // Ranked owns course selection. Casual and Pro Series preserve the host's manual choice.
+            if (rulesetName == "ranked")
             {
                 var randomCourse = Core.MapPoolConfig.GetRandomApprovedCourse();
                 PlayerPrefs.SetString("SelectedCourse", randomCourse.Name);
                 PlayerPrefs.Save();
-                Debug.Log($"[RuleSetDisplayManager] ✓ Ruleset {rulesetName} applied. Season=1, Course={randomCourse.Name}. Stored in PlayerPrefs");
+                Debug.Log($"[RuleSetDisplayManager] ✓ Ruleset {rulesetName} applied. Season={season}, Course={randomCourse.Name}. Stored in PlayerPrefs");
             }
             else
             {
                 PlayerPrefs.Save();
-                Debug.Log($"[RuleSetDisplayManager] ✓ Ruleset {rulesetName} applied. Season=1. Course preserved (Pro Series maps are managed manually). Stored in PlayerPrefs");
+                Debug.Log($"[RuleSetDisplayManager] ✓ Ruleset {rulesetName} applied. Season={season}. Course preserved (manual selection mode). Stored in PlayerPrefs");
             }
             
             // IMPORTANT: Immediately apply rules to any existing MatchSetupRules instance on this scene

@@ -183,6 +183,9 @@ namespace SBGLLiveLeaderboard
             float baseW = usableWidth * wBase;
 
             float totalHeight = (edgePadding * 2) + (headerHeight * 2) + (displayLeaderboard.Count * baseRowHeight);
+            // Add a small row for the match ID debug line when one is present
+            if (!string.IsNullOrWhiteSpace(SBGLeagueAutomation.SBGLPlugin.CurrentMatchId))
+                totalHeight += headerHeight * 0.7f;
             float dynamicHeight = Mathf.Min(totalHeight, ConfigMaxHeight * scale);
             
             // Clamp window position to screen bounds
@@ -211,6 +214,16 @@ namespace SBGLLiveLeaderboard
             string title = _showFinalSnapshot ? "FINAL SCORE" : "LIVE";
             GUI.Label(new Rect(edgePadding, currentY, finalWidth - (edgePadding * 2), headerHeight), title, titleStyle);
             currentY += headerHeight;
+
+            // Show current match ID for debugging
+            string matchId = SBGLeagueAutomation.SBGLPlugin.CurrentMatchId;
+            if (!string.IsNullOrWhiteSpace(matchId)) {
+                GUIStyle matchIdStyle = new GUIStyle(titleStyle) { fontStyle = FontStyle.Normal, fontSize = Mathf.RoundToInt(8 * scale) };
+                matchIdStyle.normal.textColor = new Color(0.6f, 0.6f, 0.6f);
+                string shortId = matchId.Length > 12 ? matchId.Substring(matchId.Length - 12) : matchId;
+                GUI.Label(new Rect(edgePadding, currentY, finalWidth - (edgePadding * 2), headerHeight * 0.7f), $"ID: {shortId}", matchIdStyle);
+                currentY += headerHeight * 0.7f;
+            }
 
             // Draw Headers
             float hX = edgePadding;
