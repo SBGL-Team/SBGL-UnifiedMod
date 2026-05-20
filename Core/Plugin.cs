@@ -12,6 +12,7 @@ using System;
 using System.IO;
 using System.Security.Cryptography;
 using SBGL.UnifiedMod.Features.CompetitivePluginCheck;
+using SBGL.UnifiedMod.Features.HitTracker;
 using SBGL.UnifiedMod.Utils;
 using SBGL.UnifiedMod.Patches;
 using SBGLeagueAutomation;
@@ -30,9 +31,10 @@ namespace SBGL.UnifiedMod.Core
         public string ProfilePicUrl { get; set; }
         public bool IsResolved { get; set; }
     }
-    [BepInPlugin("com.sbgl.unified", "SBGL Unified Mod", "0.1.0")]
+    [BepInPlugin("com.sbgl.unified", "SBGL Unified Mod", MyPluginInfo.PLUGIN_VERSION)]
     public class UnifiedPlugin : BaseUnityPlugin
     {
+
         // ==========================================
         // SINGLETON INSTANCE
         // ==========================================
@@ -235,6 +237,7 @@ namespace SBGL.UnifiedMod.Core
                 Logger.LogInfo("[API Setup] Rechecking staff status for environment change...");
                 DetectStaffUser();
                 SetupApiEndpoints();
+                StartCoroutine(ResolvePlayerProfile(CompCheck_PlayerId.Value));
             };
 
             // Initialize player profile resolution and features
@@ -418,10 +421,6 @@ namespace SBGL.UnifiedMod.Core
                         }
                     }
                     Logger.LogInfo($"[Staff List] ✓ Final staff list has {_dynamicStaffList.Count} members");
-                    
-                    // Re-run detection now that we have the fresh list
-                    DetectStaffUser();
-                    SetupApiEndpoints();
                 }
                 else
                 {
@@ -606,11 +605,6 @@ namespace SBGL.UnifiedMod.Core
             Logger.LogInfo($"Auth:      {maskedToken}");
             Logger.LogInfo("==========================================");
             
-            // When API environment changes, re-resolve player profile with new endpoint
-            // (player ID may be different in different environments)
-            Logger.LogInfo("[API Setup] Re-resolving player profile for new API environment...");
-            StartCoroutine(ResolvePlayerProfile(CompCheck_PlayerId.Value));
-            
             // Fire event to notify components of API change
             Logger.LogInfo("[API Setup] ✓ Notifying components of API configuration change");
             ApiConfigChanged?.Invoke();
@@ -669,6 +663,11 @@ namespace SBGL.UnifiedMod.Core
             UnityEngine.Object.DontDestroyOnLoad(pdsObj);
             Features.PseudoDedicatedServer pds = pdsObj.AddComponent<Features.PseudoDedicatedServer>();
             pds.SetConfig(PDS_Enabled, PDS_RequeueDelay, PDS_DefaultRuleset, Logger);
+
+            // Initialize Hit Tracker as a managed component
+            GameObject hitTrackerObj = new GameObject("SBGL-HitTracker");
+            UnityEngine.Object.DontDestroyOnLoad(hitTrackerObj);
+            hitTrackerObj.AddComponent<HitTrackerPlugin>();
         }
 
         private IEnumerator ResolvePlayerProfile(string playerIdOrName)

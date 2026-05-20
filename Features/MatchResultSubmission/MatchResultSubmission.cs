@@ -9,6 +9,7 @@ using UnityEngine.Networking;
 using SBGL.UnifiedMod.Core;
 using SBGLLiveLeaderboard;
 using Steamworks;
+using CompPluginCheck = SBGL.UnifiedMod.Features.CompetitivePluginCheck.CompetitivePluginCheck;
 
 namespace SBGLeagueAutomation
 {
@@ -287,7 +288,32 @@ namespace SBGLeagueAutomation
             Log($"<color=cyan>[Match Creation] Match configuration - Course: {courseName}, Type: {matchType}, Season: {season}</color>");
 
             string matchId = null;
-            yield return SubmitMatchEntry(matchStats, (id) => matchId = id);
+
+            // If a peer with a higher mod version is in the lobby, let them create the Match record.
+            // Wait up to 15 seconds for their SBGL_MATCH_ID: broadcast, then fall back to submitting our own.
+            if (CompPluginCheck.HasHigherVersionPeer())
+            {
+                Log("<color=cyan>[Match Creation] Higher-version peer detected — deferring Match creation to them, waiting for their Match ID...</color>");
+                ReceivedP2PMatchId = null;
+                float waitEnd = Time.realtimeSinceStartup + 15f;
+                while (string.IsNullOrEmpty(ReceivedP2PMatchId) && Time.realtimeSinceStartup < waitEnd)
+                    yield return null;
+
+                matchId = ReceivedP2PMatchId;
+                if (!string.IsNullOrEmpty(matchId))
+                {
+                    Log($"<color=green>[Match Creation] ✓ Adopted Match ID from higher-version peer: {matchId}</color>");
+                }
+                else
+                {
+                    Log("<color=yellow>[Match Creation] No Match ID received from higher-version peer within 15s — submitting own Match record</color>");
+                    yield return SubmitMatchEntry(matchStats, (id) => matchId = id);
+                }
+            }
+            else
+            {
+                yield return SubmitMatchEntry(matchStats, (id) => matchId = id);
+            }
 
             if (string.IsNullOrEmpty(matchId))
             {
@@ -389,6 +415,7 @@ namespace SBGLeagueAutomation
                 int adjustedScore = gamePoints + (scoreVsPar * -10);
                 string mmrField = !string.IsNullOrEmpty(preMatchMmr) ? $",\"pre_match_mmr\":{preMatchMmr}" : "";
                 string posField = startingPosition > 0 ? $",\"finish_position\":{startingPosition}" : "";
+                string modVer = UnifiedPlugin.Instance?.Info.Metadata.Version?.ToString() ?? "unknown";
                 string json = "{" +
                     $"\"match_id\":\"{matchId}\"," +
                     $"\"player_id\":\"{playerId}\"," +
@@ -399,7 +426,7 @@ namespace SBGLeagueAutomation
                     $"\"adjusted_match_score\":{adjustedScore}" +
                     mmrField +
                     posField +
-                    $",\"notes\":\"Progressive match tracking - created at round start\"" +
+                    $",\"notes\":\"Progressive match tracking - created at round start (Mod v{modVer})\"" +
                 "}";
 
                 Log($"<color=cyan>[Match Creation] JSON: {json}</color>");
@@ -514,13 +541,14 @@ namespace SBGLeagueAutomation
             Log($"<color=cyan>[Score Update] Hole completed for {playerName}: {gamePoints} pts, {scoreVsPar} vs par</color>");
 
             int adjustedScore = gamePoints + (scoreVsPar * -10);
+            string modVer = UnifiedPlugin.Instance?.Info.Metadata.Version?.ToString() ?? "unknown";
             string json = "{" +
                 $"\"game_points\":{gamePoints}," +
                 $"\"over_under\":{scoreVsPar}," +
                 $"\"score_vs_par\":{scoreVsPar}," +
                 $"\"adjusted_match_score\":{adjustedScore}," +
                 $"\"finish_position\":{finishPosition}," +
-                $"\"notes\":\"Updated after hole completion\"" +
+                $"\"notes\":\"Updated after hole completion (Mod v{modVer})\"" +
             "}";
 
             yield return _callApi($"/MatchEntry/{entryId}", "PUT", json, (res) =>
@@ -559,7 +587,7 @@ namespace SBGLeagueAutomation
                 ["status"] = "Pending",
                 ["submitted_by_name"] = stats.player_name,
                 ["mode"] = mode,
-                ["notes"] = "Auto-submitted via SBGL Unified Mod"
+                ["notes"] = $"Auto-submitted via SBGL Unified Mod v{UnifiedPlugin.Instance?.Info.Metadata.Version?.ToString() ?? "unknown"}"
             };
 
             if (isProSeries) {

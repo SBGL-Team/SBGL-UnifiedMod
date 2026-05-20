@@ -22,7 +22,7 @@ namespace SBGL.UnifiedMod.Core
 
             if (_melonLoaderDetected)
             {
-                Debug.LogError("[SBGL-MelonLoaderBridge] ⚠️⚠️⚠️ MELONLOADER DETECTED AT INITIALIZATION ⚠️⚠️⚠️");
+                Debug.LogWarning("[SBGL-MelonLoaderBridge] ⚠️⚠️⚠️ MELONLOADER DETECTED AT INITIALIZATION ⚠️⚠️⚠️");
             }
         }
 
@@ -35,7 +35,7 @@ namespace SBGL.UnifiedMod.Core
                 {
                     if (asm.GetName().Name.Equals("MelonLoader", StringComparison.OrdinalIgnoreCase))
                     {
-                        Debug.LogError("[SBGL-MelonLoaderBridge] ✓ Found MelonLoader in AppDomain.GetAssemblies()");
+                        Debug.LogWarning("[SBGL-MelonLoaderBridge] ✓ Found MelonLoader in AppDomain.GetAssemblies()");
                         return true;
                     }
                 }
@@ -45,7 +45,7 @@ namespace SBGL.UnifiedMod.Core
                 string melonLoaderPath = System.IO.Path.Combine(gameDir, "MelonLoader", "MelonLoader.dll");
                 if (System.IO.File.Exists(melonLoaderPath))
                 {
-                    Debug.LogError("[SBGL-MelonLoaderBridge] ✓ Found MelonLoader.dll file at: " + melonLoaderPath);
+                    Debug.LogWarning("[SBGL-MelonLoaderBridge] ✓ Found MelonLoader.dll file at: " + melonLoaderPath);
                     return true;
                 }
 

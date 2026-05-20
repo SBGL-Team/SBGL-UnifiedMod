@@ -5,7 +5,7 @@
   },
   "projects": {
     "C:\\Projects\\Super Battle Golf\\Mods\\SBGL-UnifiedMod\\SBGL-UnifiedMod.csproj": {
-      "version": "0.0.1",
+      "version": "0.1.12",
       "restore": {
         "projectUniqueName": "C:\\Projects\\Super Battle Golf\\Mods\\SBGL-UnifiedMod\\SBGL-UnifiedMod.csproj",
         "projectName": "SBGL.UnifiedMod",
@@ -85,7 +85,7 @@
               "privateAssets": "all"
             }
           },
-          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.203\\RuntimeIdentifierGraph.json"
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\10.0.204\\RuntimeIdentifierGraph.json"
         }
       }
     }

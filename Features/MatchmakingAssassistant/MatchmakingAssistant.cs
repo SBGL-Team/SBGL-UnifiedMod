@@ -1232,7 +1232,8 @@ namespace SBGLeagueAutomation
         }
 
         private IEnumerator WaitForExistingMatchBeforeFallback(float delaySeconds, Action<string> onResolved) {
-            if (_currentSession == null || delaySeconds <= 0f) {
+            string activeSessionId = _currentSession?.id ?? _localManualSessionId;
+            if (string.IsNullOrWhiteSpace(activeSessionId) || delaySeconds <= 0f) {
                 onResolved?.Invoke(null);
                 yield break;
             }
@@ -2423,8 +2424,8 @@ namespace SBGLeagueAutomation
                         goto createEntries;
                     }
 
-                    // API poll every 2 s (if we have a session to query by)
-                    if (_currentSession != null && waitElapsed >= nextApiCheckAt) {
+                    // API poll every 2 s (works for both matchmaking sessions and manual lobbies via _localManualSessionId)
+                    if (waitElapsed >= nextApiCheckAt && (!string.IsNullOrWhiteSpace(_currentSession?.id) || !string.IsNullOrWhiteSpace(_localManualSessionId))) {
                         nextApiCheckAt += 2f;
                         string apiMatchId = null;
                         yield return ResolveExistingMatchIdForCurrentSession((id) => apiMatchId = id, false);
@@ -2445,7 +2446,7 @@ namespace SBGLeagueAutomation
                 // non-host client posts, the rest keep polling and adopt it.
                 Log("<color=yellow>[Match Creation] Host did not upload within 12s — non-host fallback slot ordering...</color>");
 
-                if (_currentSession != null) {
+                {
                     float fallbackDelay = GetCurrentPlayerMatchUploadDelaySeconds();
                     string fallbackFoundId = null;
                     if (fallbackDelay > 0f) {
@@ -3525,7 +3526,7 @@ namespace SBGLeagueAutomation
                 ["status"] = "Pending",
                 ["submitted_by_name"] = stats.player_name,
                 ["mode"] = "",
-                ["notes"] = "Auto-submitted via SBGL Unified Mod"
+                ["notes"] = $"Auto-submitted via SBGL Unified Mod v{SBGL.UnifiedMod.MyPluginInfo.PLUGIN_VERSION}"
             };
 
             if (isProSeries) {
@@ -3640,6 +3641,12 @@ namespace SBGLeagueAutomation
             if (!foundScores) {
                 Log($"<color=yellow>[Match Stats] ⚠ No leaderboard data found for {playerDisplayName ?? playerId} after retries</color>");
             }
+
+            // Skip spectators / players who never scored
+            if (gamePoints == 0) {
+                Log($"<color=yellow>[Match Stats] Skipping MatchEntry for {playerDisplayName ?? playerId} — game points is 0</color>");
+                yield break;
+            }
             
             // Build JSON with player_name field included
             string json = "{" +
@@ -3648,7 +3655,7 @@ namespace SBGLeagueAutomation
                 $"\"player_name\":\"{playerDisplayName ?? "Unknown"}\"," +
                 $"\"game_points\":{gamePoints}," +
                 $"\"score_vs_par\":{scoreVsPar}," +
-                $"\"notes\":\"Auto-submitted player entry via SBGL Unified Mod\"" +
+                $"\"notes\":\"Auto-submitted player entry via SBGL Unified Mod v{SBGL.UnifiedMod.MyPluginInfo.PLUGIN_VERSION}\"" +
             "}";
 
             Log($"<color=cyan>[Match Stats] Submitting MatchEntry for {playerDisplayName ?? playerId}: {gamePoints} pts, {scoreVsPar} vs par</color>");
@@ -3754,16 +3761,31 @@ namespace SBGLeagueAutomation
                     GUI.enabled = true;
                 } else {
                     // --- QUEUE TYPE TOGGLE (RANKED | CASUAL) ---
+                    bool isPreProd = UnifiedPlugin.Instance != null &&
+                        string.Equals(UnifiedPlugin.Instance.API_Environment?.Value, "PreProd", StringComparison.OrdinalIgnoreCase);
+                    // Casual mode is only available in PreProd; force ranked in Production
+                    if (!isPreProd) _queueTypeSelection = "ranked";
+
                     float halfW = (uiWidth - 22f) / 2f;
                     bool isRankedSelected = _queueTypeSelection != "casual";
                     GUI.enabled = canInteract;
-                    GUI.backgroundColor = isRankedSelected ? new Color(0.1f, 0.4f, 0.9f, 1f) : Color.gray;
-                    if (GUI.Button(new Rect(rightX + 10, 50, halfW, 23), "RANKED")) {
-                        _queueTypeSelection = "ranked";
+                    if (isPreProd)
+                    {
+                        GUI.backgroundColor = isRankedSelected ? new Color(0.1f, 0.4f, 0.9f, 1f) : Color.gray;
+                        if (GUI.Button(new Rect(rightX + 10, 50, halfW, 23), "RANKED")) {
+                            _queueTypeSelection = "ranked";
+                        }
+                        GUI.backgroundColor = !isRankedSelected ? new Color(0.6f, 0.3f, 0.8f, 1f) : Color.gray;
+                        if (GUI.Button(new Rect(rightX + 12 + halfW, 50, halfW, 23), "CASUAL")) {
+                            _queueTypeSelection = "casual";
+                        }
                     }
-                    GUI.backgroundColor = !isRankedSelected ? new Color(0.6f, 0.3f, 0.8f, 1f) : Color.gray;
-                    if (GUI.Button(new Rect(rightX + 12 + halfW, 50, halfW, 23), "CASUAL")) {
-                        _queueTypeSelection = "casual";
+                    else
+                    {
+                        GUI.backgroundColor = new Color(0.1f, 0.4f, 0.9f, 1f);
+                        if (GUI.Button(new Rect(rightX + 10, 50, uiWidth - 20, 23), "RANKED")) {
+                            _queueTypeSelection = "ranked";
+                        }
                     }
 
                     // --- JOIN QUEUE BUTTON ---

@@ -43,7 +43,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         private ConfigEntry<bool> _configHideUIWindow, _configShowModList, _configShowDebugWindow;
         private ConfigEntry<bool> _configMelonLoaderChatEnabled;
         private ConfigEntry<string> _configPlayerId;
-        private const string ALLOWED_MODS_URL = "https://gist.githubusercontent.com/Kingcox22/59765f02af8dd87179ca920409ff3b27/raw/0d83e319856c884a802644864261f526888e05b1/Approved_Mods.json";
+        private const string ALLOWED_MODS_URL = "https://gist.githubusercontent.com/Kingcox22/59765f02af8dd87179ca920409ff3b27/raw/Approved_Mods.json";
 
         // --- NETWORKING CONSTANTS ---
         private const int SBGL_NET_CHANNEL = 2622;
@@ -1265,7 +1265,8 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 StringBuilder sb = new StringBuilder("SBGL_REPORT:");
                 
                 // Broadcast our own mod signature FIRST so others know we're compliant
-                sb.Append("⚡SBGL.UnifiedMod|1.0.0;");
+                string myModVer = UnifiedPlugin.Instance?.Info.Metadata.Version?.ToString() ?? "0.0.0";
+                sb.Append($"⚡SBGL.UnifiedMod|{myModVer};");
                 
                 // Check for MelonLoader first
                 bool hasMelonLoader = HasMelonLoaderLoaded();
@@ -1427,6 +1428,32 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             peers.UnionWith(instance._remotePlayerMods.Keys);
             if (SteamClient.IsValid) peers.Remove(SteamClient.SteamId);
             return peers;
+        }
+
+        /// <summary>
+        /// Returns true if any known peer is broadcasting a newer version of SBGL.UnifiedMod than this client.
+        /// Used by MatchResultSubmission to defer Match record creation to the highest-version player.
+        /// </summary>
+        internal static bool HasHigherVersionPeer()
+        {
+            var instance = UnityEngine.Object.FindFirstObjectByType<CompetitivePluginCheck>();
+            if (instance == null) return false;
+
+            System.Version myVersion = UnifiedPlugin.Instance?.Info.Metadata.Version ?? new System.Version(0, 0, 0);
+
+            foreach (var modList in instance._remotePlayerMods.Values)
+            {
+                if (string.IsNullOrEmpty(modList)) continue;
+                foreach (var entry in modList.Split(';'))
+                {
+                    if (!entry.StartsWith("⚡SBGL.UnifiedMod|")) continue;
+                    string versionStr = entry.Substring("⚡SBGL.UnifiedMod|".Length).Trim();
+                    if (System.Version.TryParse(versionStr, out System.Version peerVersion) && peerVersion > myVersion)
+                        return true;
+                    break;
+                }
+            }
+            return false;
         }
 
         internal static string GetCurrentSteamLobbyId()

@@ -5,7 +5,7 @@
         <AssemblyName>SBGL.UnifiedMod</AssemblyName>
         <RootNamespace>SBGL.UnifiedMod</RootNamespace>
         <Product>Super Battle Golf League Unified Mod</Product>
-        <Version>0.0.1</Version>
+        <Version>0.1.12</Version>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
         <LangVersion>latest</LangVersion>
         <RestoreAdditionalProjectSources>
