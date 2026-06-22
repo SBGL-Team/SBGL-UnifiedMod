@@ -4,16 +4,16 @@
     <RestoreSuccess Condition=" '$(RestoreSuccess)' == '' ">True</RestoreSuccess>
     <RestoreTool Condition=" '$(RestoreTool)' == '' ">NuGet</RestoreTool>
     <ProjectAssetsFile Condition=" '$(ProjectAssetsFile)' == '' ">$(MSBuildThisFileDirectory)project.assets.json</ProjectAssetsFile>
-    <NuGetPackageRoot Condition=" '$(NuGetPackageRoot)' == '' ">$(UserProfile)\.nuget\packages\</NuGetPackageRoot>
-    <NuGetPackageFolders Condition=" '$(NuGetPackageFolders)' == '' ">C:\Users\KC or Dan\.nuget\packages\</NuGetPackageFolders>
+    <NuGetPackageRoot Condition=" '$(NuGetPackageRoot)' == '' ">/home/kingcox22/.nuget/packages/</NuGetPackageRoot>
+    <NuGetPackageFolders Condition=" '$(NuGetPackageFolders)' == '' ">/home/kingcox22/.nuget/packages/</NuGetPackageFolders>
     <NuGetProjectStyle Condition=" '$(NuGetProjectStyle)' == '' ">PackageReference</NuGetProjectStyle>
     <NuGetToolVersion Condition=" '$(NuGetToolVersion)' == '' ">7.0.0</NuGetToolVersion>
   </PropertyGroup>
   <ItemGroup Condition=" '$(ExcludeRestorePackageImports)' != 'true' ">
-    <SourceRoot Include="C:\Users\KC or Dan\.nuget\packages\" />
+    <SourceRoot Include="/home/kingcox22/.nuget/packages/" />
   </ItemGroup>
   <ItemGroup Condition=" '$(Language)' == 'C#' AND '$(ExcludeRestorePackageImports)' != 'true' ">
-    <Compile Include="$(NuGetPackageRoot)bepinex.assemblypublicizer.msbuild\0.4.3\contentFiles\cs\any\IgnoresAccessChecksToAttribute.cs" Condition="Exists('$(NuGetPackageRoot)bepinex.assemblypublicizer.msbuild\0.4.3\contentFiles\cs\any\IgnoresAccessChecksToAttribute.cs')">
+    <Compile Include="$(NuGetPackageRoot)bepinex.assemblypublicizer.msbuild/0.4.3/contentFiles/cs/any/IgnoresAccessChecksToAttribute.cs" Condition="Exists('$(NuGetPackageRoot)bepinex.assemblypublicizer.msbuild/0.4.3/contentFiles/cs/any/IgnoresAccessChecksToAttribute.cs')">
       <NuGetPackageId>BepInEx.AssemblyPublicizer.MSBuild</NuGetPackageId>
       <NuGetPackageVersion>0.4.3</NuGetPackageVersion>
       <NuGetItemType>Compile</NuGetItemType>
@@ -23,11 +23,11 @@
     </Compile>
   </ItemGroup>
   <ImportGroup Condition=" '$(ExcludeRestorePackageImports)' != 'true' ">
-    <Import Project="$(NuGetPackageRoot)bepinex.plugininfoprops\2.1.0\build\BepInEx.PluginInfoProps.props" Condition="Exists('$(NuGetPackageRoot)bepinex.plugininfoprops\2.1.0\build\BepInEx.PluginInfoProps.props')" />
-    <Import Project="$(NuGetPackageRoot)bepinex.assemblypublicizer.msbuild\0.4.3\build\BepInEx.AssemblyPublicizer.MSBuild.props" Condition="Exists('$(NuGetPackageRoot)bepinex.assemblypublicizer.msbuild\0.4.3\build\BepInEx.AssemblyPublicizer.MSBuild.props')" />
+    <Import Project="$(NuGetPackageRoot)bepinex.plugininfoprops/2.1.0/build/BepInEx.PluginInfoProps.props" Condition="Exists('$(NuGetPackageRoot)bepinex.plugininfoprops/2.1.0/build/BepInEx.PluginInfoProps.props')" />
+    <Import Project="$(NuGetPackageRoot)bepinex.assemblypublicizer.msbuild/0.4.3/build/BepInEx.AssemblyPublicizer.MSBuild.props" Condition="Exists('$(NuGetPackageRoot)bepinex.assemblypublicizer.msbuild/0.4.3/build/BepInEx.AssemblyPublicizer.MSBuild.props')" />
   </ImportGroup>
   <PropertyGroup Condition=" '$(ExcludeRestorePackageImports)' != 'true' ">
-    <PkgBepInEx_Core Condition=" '$(PkgBepInEx_Core)' == '' ">C:\Users\KC or Dan\.nuget\packages\bepinex.core\5.4.21</PkgBepInEx_Core>
-    <PkgBepInEx_Analyzers Condition=" '$(PkgBepInEx_Analyzers)' == '' ">C:\Users\KC or Dan\.nuget\packages\bepinex.analyzers\1.0.8</PkgBepInEx_Analyzers>
+    <PkgBepInEx_Core Condition=" '$(PkgBepInEx_Core)' == '' ">/home/kingcox22/.nuget/packages/bepinex.core/5.4.21</PkgBepInEx_Core>
+    <PkgBepInEx_Analyzers Condition=" '$(PkgBepInEx_Analyzers)' == '' ">/home/kingcox22/.nuget/packages/bepinex.analyzers/1.0.8</PkgBepInEx_Analyzers>
   </PropertyGroup>
 </Project>

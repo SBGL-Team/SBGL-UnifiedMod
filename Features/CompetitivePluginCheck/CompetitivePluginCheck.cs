@@ -467,7 +467,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         private float ConfigAlpha { get => _configAlpha?.Value ?? PlayerPrefs.GetFloat("CompCheck_Alpha", 0.85f); }
         private float ConfigCompliancePanelX { get => _configCompliancePanelX?.Value ?? PlayerPrefs.GetFloat("CompCheck_ComplianceX", Screen.width - 420f); set { if (_configCompliancePanelX != null) _configCompliancePanelX.Value = value; } }
         private float ConfigCompliancePanelY { get => _configCompliancePanelY?.Value ?? PlayerPrefs.GetFloat("CompCheck_ComplianceY", Screen.height - 350f); set { if (_configCompliancePanelY != null) _configCompliancePanelY.Value = value; } }
-        private bool ConfigHideUIWindow { get => _configHideUIWindow?.Value ?? (PlayerPrefs.GetInt("CompCheck_HideUIWindow", 0) == 1); }
+        private bool ConfigHideUIWindow { get => _configHideUIWindow?.Value ?? (PlayerPrefs.GetInt("CompCheck_HideUIWindow", 0) == 1); set { if (_configHideUIWindow != null) _configHideUIWindow.Value = value; } }
         private bool ConfigShowModList { get => _configShowModList?.Value ?? (PlayerPrefs.GetInt("CompCheck_ShowModList", 0) == 1); set { if (_configShowModList != null) _configShowModList.Value = value; } }
         private bool ConfigShowDebugWindow { get => _configShowDebugWindow?.Value ?? (PlayerPrefs.GetInt("CompCheck_ShowDebugWindow", 0) == 1); set { if (_configShowDebugWindow != null) _configShowDebugWindow.Value = value; } }
         internal string ConfigPlayerId { get => _configPlayerId?.Value ?? PlayerPrefs.GetString("CompCheck_PlayerId", "PASTE_ID_HERE"); set { if (_configPlayerId != null) _configPlayerId.Value = value; } }
@@ -682,7 +682,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         void Update()
         {
             var kb = UnityEngine.InputSystem.Keyboard.current; if (kb == null) return;
-            if (kb[UnityEngine.InputSystem.Key.F9].wasPressedThisFrame) { ConfigShowModList = !ConfigShowModList; UpdateUIReport(); }
+            if (kb[UnityEngine.InputSystem.Key.F9].wasPressedThisFrame) { ConfigHideUIWindow = !ConfigHideUIWindow; }
             if (kb[UnityEngine.InputSystem.Key.F10].wasPressedThisFrame) { TriggerManualSync(); }
             if (kb[UnityEngine.InputSystem.Key.F11].wasPressedThisFrame) { ConfigShowDebugWindow = !ConfigShowDebugWindow; UpdateUIReport(); }
 
@@ -701,9 +701,9 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 if (clampedY != ConfigY) _configY.Value = clampedY;
             }
 
-            if (_canvasObj != null)
+            if (_bgObj != null)
             {
-                _canvasObj.SetActive(!ConfigHideUIWindow);
+                _bgObj.SetActive(!ConfigHideUIWindow);
             }
 
             // Update debug window visibility based on config
@@ -1793,9 +1793,11 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 }
             }
 
+            // Always fetch the allowed mods list regardless of whether the player has a linked ID
+            yield return CheckPluginsRoutine();
+
             if (!string.IsNullOrEmpty(idToUse) && idToUse != "None" && idToUse != "PASTE_ID_HERE")
             {
-                yield return CheckPluginsRoutine();
                 yield return FetchPlayerData(idToUse);
                 yield return FetchLeaderboardRank(idToUse);
                 yield return GetNetworkTime();
@@ -2071,16 +2073,6 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             sb.AppendLine($"MMR: <color=#00FFFF>{_playerMMR}</color> (<color={(delta >= 0 ? "#55FF55" : "#FF5555")}>{(delta >= 0 ? "+" : "")}{_lastChange}</color>)");
             sb.AppendLine($"Avg. Par: <color=#CC88FF>{_avgScore}</color>");
             sb.AppendLine($"Matches: <color=#FFFFFF>{_matches}</color> | Top 3s: <color=#00FF00>{_top3s}</color>");
-
-            if (ConfigShowModList)
-            {
-                sb.AppendLine("--- <color=#AAAAAA>MY MODS</color> ---");
-                foreach (var plugin in Chainloader.PluginInfos.Values)
-                {
-                    if (ShouldIgnorePluginGuid(plugin.Metadata.GUID)) continue;
-                    sb.AppendLine($"{(IsAllowedPluginGuid(plugin.Metadata.GUID) ? "<color=#00FF00>O</color>" : "<color=#FF0000>X</color>")} <size=11>{plugin.Metadata.Name}</size>");
-                }
-            }
 
             sb.AppendLine("---");
             sb.AppendLine($"<size=10><color=#888888>Sync: {_lastSyncTime} | Status: {_syncStatus}</color></size>");

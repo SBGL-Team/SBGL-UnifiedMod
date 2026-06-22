@@ -109,10 +109,4 @@
         </Reference>
     </ItemGroup>
 
-    <Target Name="PostBuild" AfterTargets="PostBuildEvent">
-        <PropertyGroup>
-            <GameExe>Super Battle Golf.exe</GameExe>
-        </PropertyGroup>
-        <Exec Command="taskkill /F /IM &quot;$(GameExe)&quot; /T 2&gt;nul &amp; xcopy /Y &quot;$(TargetDir)$(TargetName).dll&quot; &quot;$(SUPER_BATTLE_GOLF_PATH)\BepInEx\plugins\&quot; &amp; start /d &quot;$(SUPER_BATTLE_GOLF_PATH)&quot; &quot;&quot; &quot;$(GameExe)&quot;" />
-    </Target>
 </Project>
