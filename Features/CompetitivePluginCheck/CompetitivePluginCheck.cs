@@ -45,8 +45,11 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         private ConfigEntry<string> _configPlayerId;
         private const string ALLOWED_MODS_URL = "https://gist.githubusercontent.com/Kingcox22/59765f02af8dd87179ca920409ff3b27/raw/Approved_Mods.json";
 
+        public static CompetitivePluginCheck Instance { get; private set; }
+
         // --- NETWORKING CONSTANTS ---
-        private const int SBGL_NET_CHANNEL = 2622;
+        internal const int SBGL_NET_CHANNEL = 2622;
+        public static int NetChannel => SBGL_NET_CHANNEL;
         private Dictionary<ulong, string> _remotePlayerMods = new Dictionary<ulong, string>();
         private Dictionary<ulong, string> _playerDisplayNames = new Dictionary<ulong, string>();
         
@@ -55,10 +58,24 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         {
             public ulong SteamId { get; set; }
             public bool HasReportedMods { get; set; }
-            public bool IsCompliant { get; set; } // Has ⚡SBGL.UnifiedMod
+            public bool IsCompliant { get; set; } // Running a manifest-matching SBGL.UnifiedMod
             public bool HasMelonLoader { get; set; }
             public string ModList { get; set; }
             public float FirstSeenTime { get; set; }
+
+            // --- v2 report fields (receiver-verified) ---
+
+            /// <summary>True when this peer sent a v2 report we could verify ourselves.</summary>
+            public bool HasVerifiedReport { get; set; }
+
+            /// <summary>Legacy v1 report: carries no GUIDs or hashes, so nothing can be verified.</summary>
+            public bool IsLegacyReport { get; set; }
+
+            /// <summary>Plugins this peer reported that fail OUR copy of the manifest.</summary>
+            public List<string> FailedPlugins { get; } = new List<string>();
+
+            /// <summary>The peer's own local scan verdict, as self-reported.</summary>
+            public bool SelfReportedIllegal { get; set; }
         }
 
         private class LocalPluginScanResult
@@ -218,6 +235,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         private bool _hasLoggedDiscoveryInfo = false; // Only log discovery info once per scene
         private string _lastDiscoveryScene = ""; // Track the last scene where we discovered players
         private float _lastMelonLoaderAnnouncementTime = -100f; // Track when we last announced MelonLoader (init to far past)
+        private float _lastLobbyNameCheck = -100f;
         // Lobby name captured in real-time by Harmony patch on BNetworkManager.set_LobbyName
         internal static string _currentLobbyName = "";
         private int _lastPlayerCosmeticsCount = 0; // Track count of PlayerCosmetics to detect when players join/leave
@@ -226,10 +244,11 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         private GUIStyle _compWindowStyle;
 
 #pragma warning disable CS0649, CS0169
-        private GameObject _canvasObj, _profilePicContainer, _bgObj, _warnContainer, _debugWindowObj;
+        private GameObject _canvasObj, _profilePicContainer, _bgObj, _warnContainer, _debugWindowObj, _flagContainer;
         private TextMeshProUGUI _statsText, _illegalWarningText, _missingWarningText, _debugWindowText;
-        private Image _bgImage, _debugWindowBg;
-        private RawImage _profileIcon;
+        private TextMeshProUGUI _cardNameText, _cardMMRText, _cardRankText, _cardSecondaryText, _cardSyncText;
+        private Image _bgImage, _debugWindowBg, _rankColorStripImage;
+        private RawImage _profileIcon, _flagIcon;
         private RectTransform _bgRect, _debugWindowRect;
 #pragma warning restore CS0649, CS0169
 
@@ -251,6 +270,9 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         private string _lastSyncTime = "Never";
 
         public string _activeUsername = "Searching...", _playerRank = "N/A", _totalPlayers = "0", _playerMMR = "0", _matches = "0", _playerPeak = "0", _winRate = "0%", _lastChange = "0", _top3s = "0", _avgScore = "0.0", _syncStatus = "Idle";
+        private string _playerRegion = "", _playerState = "";
+        private string _clanTag = ""; // faction clan_tag, shown before the name on the stats card
+        private string _spectatedPlayerName = ""; // non-empty when showing a spectated player's card
 
         public string ResolvedName = "Not Found";
         public string ResolvedID = "None";
@@ -353,6 +375,42 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             }
         }
 
+        // Assembly hashes never change while the process is alive, and the compliance
+        // report is rebuilt every ~10s, so hash once per path and reuse.
+        private readonly Dictionary<string, string> _sha256Cache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        private string GetCachedSha256(string filePath)
+        {
+            if (string.IsNullOrWhiteSpace(filePath)) return string.Empty;
+            if (_sha256Cache.TryGetValue(filePath, out string cached)) return cached;
+
+            string hash = File.Exists(filePath) ? ComputeSha256Hex(filePath) : string.Empty;
+            _sha256Cache[filePath] = hash;
+            return hash;
+        }
+
+        /// <summary>Resolves the on-disk assembly backing a loaded plugin, or empty if it can't be determined.</summary>
+        private static string TryGetPluginAssemblyPath(BepInEx.PluginInfo plugin)
+        {
+            if (plugin == null) return string.Empty;
+            try
+            {
+                var instanceProperty = plugin.GetType().GetProperty("Instance", BindingFlags.Public | BindingFlags.Instance);
+                var instance = instanceProperty?.GetValue(plugin);
+                return TryGetAssemblyLocation(instance?.GetType().Assembly);
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        /// <summary>SHA-256 of the DLL backing a loaded plugin, or empty if unreadable.</summary>
+        private string GetPluginSha256(BepInEx.PluginInfo plugin)
+        {
+            return GetCachedSha256(TryGetPluginAssemblyPath(plugin));
+        }
+
         private KnownVisibleRuntimeAssemblies BuildKnownVisibleRuntimeAssemblies()
         {
             var knownAssemblies = new KnownVisibleRuntimeAssemblies();
@@ -394,6 +452,49 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             return _allowedModsSnapshot.ContainsGuid(guid);
         }
 
+        /// <summary>Outcome of checking one plugin (GUID + assembly hash) against the manifest.</summary>
+        internal enum PluginVerdict
+        {
+            Approved,      // GUID allow-listed and, where pinned, the hash matches
+            UnknownGuid,   // not in the manifest at all
+            HashMismatch,  // allow-listed GUID, but the assembly is not a pinned build
+            Unpinned,      // allow-listed GUID with no hash constraint - passes, but unverified
+            Unverifiable   // pinned GUID whose assembly hash could not be read/was not supplied
+        }
+
+        /// <summary>
+        /// The single source of truth for "is this plugin legitimate".
+        /// Deliberately takes a hash rather than reading disk, so the *identical* check runs
+        /// against locally-scanned plugins and against plugins reported by a remote peer.
+        /// Previously the local scan and the P2P check applied different rules, which let a
+        /// mod ship under a borrowed allow-listed GUID and pass remotely while failing locally.
+        /// </summary>
+        private PluginVerdict EvaluatePlugin(string guid, string sha256)
+        {
+            // The loader itself is not a manifest entry.
+            if (!string.IsNullOrWhiteSpace(guid) && guid.Equals("BepInEx", StringComparison.OrdinalIgnoreCase))
+                return PluginVerdict.Approved;
+
+            if (!_allowedModsSnapshot.ContainsGuid(guid))
+                return PluginVerdict.UnknownGuid;
+
+            var allowedHashes = _allowedModsSnapshot.GetAllowedHashes(guid);
+            if (allowedHashes == null || allowedHashes.Count == 0)
+                return PluginVerdict.Unpinned;
+
+            if (string.IsNullOrWhiteSpace(sha256))
+                return PluginVerdict.Unverifiable;
+
+            return allowedHashes.Contains(sha256) ? PluginVerdict.Approved : PluginVerdict.HashMismatch;
+        }
+
+        private static bool IsFailingVerdict(PluginVerdict verdict)
+        {
+            return verdict == PluginVerdict.UnknownGuid
+                || verdict == PluginVerdict.HashMismatch
+                || verdict == PluginVerdict.Unverifiable;
+        }
+
         private LocalPluginScanResult BuildLocalPluginScanResult()
         {
             var result = new LocalPluginScanResult();
@@ -406,39 +507,27 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
 
             foreach (var plugin in Chainloader.PluginInfos.Values)
             {
-                if (ShouldIgnorePluginGuid(plugin.Metadata.GUID)) continue;
-                if (!IsAllowedPluginGuid(plugin.Metadata.GUID))
+                string guid = plugin.Metadata.GUID;
+
+                // BepInEx itself is not a manifest entry. Note that com.sbgl.unified is
+                // deliberately NOT skipped here any more: the manifest pins a hash for this
+                // mod, and that pin was previously never enforced because the GUID was
+                // short-circuited before the hash check ran.
+                if (!string.IsNullOrWhiteSpace(guid) && guid.Equals("BepInEx", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var verdict = EvaluatePlugin(guid, GetPluginSha256(plugin));
+
+                // Don't break early - a full list of what failed is more useful than the
+                // first failure, and the report now carries per-plugin verdicts to peers.
+                if (verdict == PluginVerdict.HashMismatch || verdict == PluginVerdict.Unverifiable)
+                {
+                    result.TamperedModNames.Add(plugin.Metadata.Name);
+                    result.HasIllegalMods = true;
+                }
+                else if (verdict == PluginVerdict.UnknownGuid)
                 {
                     result.HasIllegalMods = true;
-                    break;
-                }
-
-                // Hash verification: if the manifest has hash constraints for this GUID, the installed DLL must match
-                if (_allowedModsSnapshot.HasHashConstraints)
-                {
-                    var allowedHashes = _allowedModsSnapshot.GetAllowedHashes(plugin.Metadata.GUID);
-                    if (allowedHashes != null && allowedHashes.Count > 0)
-                    {
-                        try
-                        {
-                            var instanceProperty = plugin.GetType().GetProperty("Instance", BindingFlags.Public | BindingFlags.Instance);
-                            var instance = instanceProperty?.GetValue(plugin);
-                            var assemblyPath = TryGetAssemblyLocation(instance?.GetType().Assembly);
-                            if (!string.IsNullOrWhiteSpace(assemblyPath) && File.Exists(assemblyPath))
-                            {
-                                string actualHash = ComputeSha256Hex(assemblyPath);
-                                if (!string.IsNullOrWhiteSpace(actualHash) && !allowedHashes.Contains(actualHash))
-                                {
-                                    result.TamperedModNames.Add(plugin.Metadata.Name);
-                                    result.HasIllegalMods = true;
-                                }
-                            }
-                        }
-                        catch
-                        {
-                            // If we can't read the assembly, treat it as suspicious
-                        }
-                    }
                 }
             }
 
@@ -457,12 +546,45 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 result.HasIllegalMods = true;
             }
 
+            LogScanResultIfChanged(result);
             return result;
         }
 
+        private string _lastLoggedScanSignature = null;
+
+        /// <summary>
+        /// The local scan previously only drove an on-screen banner, which made it impossible
+        /// to tell from a log whether a verdict was correct. This logs the verdict, but only
+        /// when it changes, since the scan runs on the broadcast cadence.
+        /// </summary>
+        private void LogScanResultIfChanged(LocalPluginScanResult result)
+        {
+            string signature = $"{result.HasIllegalMods}|{string.Join(",", result.TamperedModNames.ToArray())}|{string.Join(",", result.SuspiciousRuntimeAssemblies.ToArray())}|{result.MissingModNames.Count}";
+            if (signature == _lastLoggedScanSignature) return;
+            _lastLoggedScanSignature = signature;
+
+            if (_allowedModsSnapshot.Count == 0)
+            {
+                UnityEngine.Debug.LogWarning("[SBGL-CompPluginCheck] Local scan: approved-mods manifest is EMPTY (fetch failed?) - every installed plugin will read as illegal.");
+                return;
+            }
+
+            if (!result.HasIllegalMods)
+            {
+                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Local scan: CLEAN ({_allowedModsSnapshot.Count} approved entries, {result.MissingModNames.Count} not installed).");
+                return;
+            }
+
+            UnityEngine.Debug.LogWarning("[SBGL-CompPluginCheck] Local scan: ILLEGAL MODS DETECTED");
+            if (result.TamperedModNames.Count > 0)
+                UnityEngine.Debug.LogWarning($"[SBGL-CompPluginCheck]   hash mismatch / unverifiable: {string.Join(", ", result.TamperedModNames.ToArray())}");
+            if (result.SuspiciousRuntimeAssemblies.Count > 0)
+                UnityEngine.Debug.LogWarning($"[SBGL-CompPluginCheck]   suspicious assemblies: {string.Join(", ", result.SuspiciousRuntimeAssemblies.ToArray())}");
+        }
+
         // Config value accessors using ConfigEntry references
-        private float ConfigX { get => _configX?.Value ?? PlayerPrefs.GetFloat("CompCheck_X", 20f); }
-        private float ConfigY { get => _configY?.Value ?? PlayerPrefs.GetFloat("CompCheck_Y", 100f); }
+        private float ConfigX { get => _configX?.Value ?? PlayerPrefs.GetFloat("CompCheck_X", 0f); }
+        private float ConfigY { get => _configY?.Value ?? PlayerPrefs.GetFloat("CompCheck_Y", 12f); }
         private float ConfigWidth { get => _configWidth?.Value ?? PlayerPrefs.GetFloat("CompCheck_Width", 200f); }
         private float ConfigAlpha { get => _configAlpha?.Value ?? PlayerPrefs.GetFloat("CompCheck_Alpha", 0.85f); }
         private float ConfigCompliancePanelX { get => _configCompliancePanelX?.Value ?? PlayerPrefs.GetFloat("CompCheck_ComplianceX", Screen.width - 420f); set { if (_configCompliancePanelX != null) _configCompliancePanelX.Value = value; } }
@@ -630,9 +752,11 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
 
         void Awake()
         {
+            Instance = this;
+
             // Initialize configuration values from PlayerPrefs with defaults
-            if (!PlayerPrefs.HasKey("CompCheck_X")) PlayerPrefs.SetFloat("CompCheck_X", 20f);
-            if (!PlayerPrefs.HasKey("CompCheck_Y")) PlayerPrefs.SetFloat("CompCheck_Y", 100f);
+            if (!PlayerPrefs.HasKey("CompCheck_X")) PlayerPrefs.SetFloat("CompCheck_X", 0f);
+            if (!PlayerPrefs.HasKey("CompCheck_Y")) PlayerPrefs.SetFloat("CompCheck_Y", 12f);
             if (!PlayerPrefs.HasKey("CompCheck_Width")) PlayerPrefs.SetFloat("CompCheck_Width", 200f);
             if (!PlayerPrefs.HasKey("CompCheck_Alpha")) PlayerPrefs.SetFloat("CompCheck_Alpha", 0.85f);
             if (!PlayerPrefs.HasKey("CompCheck_UpdateInterval")) PlayerPrefs.SetFloat("CompCheck_UpdateInterval", 5f);
@@ -658,6 +782,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
 
         void OnDestroy()
         {
+            if (Instance == this) Instance = null;
             UnifiedPlugin.ApiConfigChanged -= OnApiConfigChanged;
             AppDomain.CurrentDomain.AssemblyLoad -= OnRuntimeAssemblyLoaded;
         }
@@ -686,47 +811,70 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             if (kb[UnityEngine.InputSystem.Key.F10].wasPressedThisFrame) { TriggerManualSync(); }
             if (kb[UnityEngine.InputSystem.Key.F11].wasPressedThisFrame) { ConfigShowDebugWindow = !ConfigShowDebugWindow; UpdateUIReport(); }
 
+            // Spectated player detection — poll every 0.5 s (30 frames at 60 fps)
+            if (Time.frameCount % 30 == 0)
+            {
+                string nowSpectating = GetSpectatedPlayerName();
+                if (nowSpectating != _spectatedPlayerName)
+                {
+                    _spectatedPlayerName = nowSpectating;
+                    if (string.IsNullOrEmpty(nowSpectating))
+                    {
+                        // Stopped spectating — resync local player
+                        TriggerManualSync();
+                    }
+                    else
+                    {
+                        // Switched to a new spectated player — clear stale avatar/flag then fetch
+                        if (_profileIcon != null) _profileIcon.color = new Color(1, 1, 1, 0);
+                        if (_flagIcon != null)    _flagIcon.color    = new Color(1, 1, 1, 0);
+                        StartCoroutine(FetchPlayerDataByName(nowSpectating));
+                    }
+                }
+            }
+
             if (_bgRect != null)
             {
-                // Clamp position to keep UI on screen
-                float clampedX = Mathf.Clamp(ConfigX, 0, Screen.width - ConfigWidth);
+                // Card uses bottom-center anchor; X is offset from screen center (0 = perfectly centered)
+                float halfW    = _bgRect.sizeDelta.x / 2f;
+                float clampedX = Mathf.Clamp(ConfigX, -(Screen.width / 2f - halfW), Screen.width / 2f - halfW);
                 float clampedY = Mathf.Clamp(ConfigY, 0, Screen.height - _bgRect.sizeDelta.y);
-                
-                _bgRect.anchoredPosition = new Vector2(clampedX, clampedY);
-                _bgRect.sizeDelta = new Vector2(ConfigWidth, _bgRect.sizeDelta.y);
-                _bgImage.color = new Color(0, 0, 0, ConfigAlpha);
-                
-                // Update config if position was clamped
-                if (clampedX != ConfigX) _configX.Value = clampedX;
-                if (clampedY != ConfigY) _configY.Value = clampedY;
+                var newPos = new Vector2(clampedX, clampedY);
+                if (_bgRect.anchoredPosition != newPos)
+                    _bgRect.anchoredPosition = newPos;
+                float targetAlpha = ConfigAlpha;
+                if (_bgImage.color.a != targetAlpha)
+                    _bgImage.color = new Color(0.04f, 0.06f, 0.08f, targetAlpha);
+                if (clampedX != ConfigX && _configX != null) _configX.Value = clampedX;
+                if (clampedY != ConfigY && _configY != null) _configY.Value = clampedY;
             }
 
-            if (_bgObj != null)
-            {
-                _bgObj.SetActive(!ConfigHideUIWindow);
-            }
+            bool wantHide = !ConfigHideUIWindow;
+            if (_bgObj != null && _bgObj.activeSelf != wantHide)
+                _bgObj.SetActive(wantHide);
 
-            // Update debug window visibility based on config
-            if (_debugWindowObj != null)
-            {
-                _debugWindowObj.SetActive(ConfigShowDebugWindow);
-            }
+            bool wantDebug = ConfigShowDebugWindow;
+            if (_debugWindowObj != null && _debugWindowObj.activeSelf != wantDebug)
+                _debugWindowObj.SetActive(wantDebug);
 
             // --- NETWORKING LOGIC IN UPDATE ---
-            // Check if player count has changed - if so, discover immediately (don't wait for 5-second timer)
-            int currentPlayerCount = 0;
-            try
+            // FindObjectsByType is expensive — throttle to every 60 frames instead of every frame
+            if (Time.frameCount % 60 == 0)
             {
-                currentPlayerCount = UnityEngine.Object.FindObjectsByType<PlayerCosmetics>(UnityEngine.FindObjectsSortMode.None).Length;
-            }
-            catch { }
-            
-            if (currentPlayerCount != _lastPlayerCosmeticsCount)
-            {
-                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] PlayerCosmetics count changed: {_lastPlayerCosmeticsCount} → {currentPlayerCount}, triggering immediate discovery");
-                _lastPlayerCosmeticsCount = currentPlayerCount;
-                _hasLoggedDiscoveryInfo = false; // Reset flag to allow fresh logging for new players
-                DiscoverLobbyPlayers();
+                int currentPlayerCount = 0;
+                try
+                {
+                    currentPlayerCount = UnityEngine.Object.FindObjectsByType<PlayerCosmetics>(UnityEngine.FindObjectsSortMode.None).Length;
+                }
+                catch { }
+
+                if (currentPlayerCount != _lastPlayerCosmeticsCount)
+                {
+                    UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] PlayerCosmetics count changed: {_lastPlayerCosmeticsCount} → {currentPlayerCount}, triggering immediate discovery");
+                    _lastPlayerCosmeticsCount = currentPlayerCount;
+                    _hasLoggedDiscoveryInfo = false;
+                    DiscoverLobbyPlayers();
+                }
             }
             
             // Periodically discover all lobby players (fallback in case count doesn't change)
@@ -746,9 +894,22 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 }
             }
             
-            // Accept P2P sessions from all peers we're trying to communicate with
-            AcceptIncomingP2PSessions();
-            
+            // Periodically re-read the Steam lobby name (handles renames and late metadata propagation)
+            if (_inLobby && Time.time - _lastLobbyNameCheck > 45f)
+            {
+                _lastLobbyNameCheck = Time.time;
+                string freshName = TryReadLobbyName(_currentLobby);
+                if (!string.IsNullOrWhiteSpace(freshName) && freshName != _currentLobbyName)
+                {
+                    _currentLobbyName = freshName;
+                    UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Lobby name refreshed: '{freshName}'");
+                }
+            }
+
+            // Accept P2P sessions occasionally — no need to call Steam API every frame
+            if (Time.frameCount % 120 == 0)
+                AcceptIncomingP2PSessions();
+
             ListenForModReports();
             if (Time.frameCount % 600 == 0)
             {
@@ -813,11 +974,12 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             GUILayout.Space(4);
 
             int total     = _playerComplianceStatus.Count;
-            int compliant = _playerComplianceStatus.Values.Count(s => s.IsCompliant && s.HasReportedMods && !s.HasMelonLoader);
-            int flagged   = _playerComplianceStatus.Values.Count(s => s.HasReportedMods && (!s.IsCompliant || s.HasMelonLoader));
+            int compliant = _playerComplianceStatus.Values.Count(s => s.HasReportedMods && s.IsCompliant && !s.HasMelonLoader && s.FailedPlugins.Count == 0 && !s.IsLegacyReport);
+            int flagged   = _playerComplianceStatus.Values.Count(s => s.HasReportedMods && (!s.IsCompliant || s.HasMelonLoader || s.FailedPlugins.Count > 0));
+            int unverified= _playerComplianceStatus.Values.Count(s => s.HasReportedMods && s.IsLegacyReport && s.IsCompliant && !s.HasMelonLoader);
             int pending   = _playerComplianceStatus.Values.Count(s => !s.HasReportedMods);
             GUILayout.Label(
-                $"<color=white>Players: <b>{total}</b></color>    <color=lime>✓ {compliant}</color>    <color=red>✗ {flagged}</color>    <color=yellow>? {pending}</color>",
+                $"<color=white>Players: <b>{total}</b></color>    <color=lime>✓ {compliant}</color>    <color=red>✗ {flagged}</color>    <color=#AAAAFF>◐ {unverified}</color>    <color=yellow>? {pending}</color>",
                 summaryStyle
             );
 
@@ -837,10 +999,12 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                     var status = kvp.Value;
                     string icon, color;
 
-                    if (!status.HasReportedMods)    { icon = "?"; color = "yellow"; }
-                    else if (status.HasMelonLoader) { icon = "⚠"; color = "orange"; }
-                    else if (status.IsCompliant)    { icon = "✓"; color = "lime"; }
-                    else                            { icon = "✗"; color = "red"; }
+                    if (!status.HasReportedMods)             { icon = "?"; color = "yellow"; }
+                    else if (status.HasMelonLoader)          { icon = "⚠"; color = "orange"; }
+                    else if (!status.IsCompliant)            { icon = "✗"; color = "red"; }
+                    else if (status.FailedPlugins.Count > 0) { icon = "✗"; color = "red"; }
+                    else if (status.IsLegacyReport)          { icon = "◐"; color = "#AAAAFF"; }
+                    else                                     { icon = "✓"; color = "lime"; }
 
                     string displayName = _playerDisplayNames.TryGetValue(status.SteamId, out string dn) ? dn : status.SteamId.ToString();
                     GUILayout.Label($"<color={color}>[{icon}]</color>  {displayName}", nameStyle);
@@ -848,16 +1012,45 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                     if (status.HasMelonLoader)
                         GUILayout.Label("      <color=orange>⚠ MelonLoader detected</color>", modStyle);
 
+                    // Plugins that failed OUR manifest check, not the sender's claim about them.
+                    foreach (var failed in status.FailedPlugins)
+                        GUILayout.Label($"      <color=#FF4444>✗ {failed}</color>", modStyle);
+
+                    if (status.SelfReportedIllegal && status.FailedPlugins.Count == 0)
+                        GUILayout.Label("      <color=orange>⚠ peer reports its own scan failed</color>", modStyle);
+
+                    if (status.IsLegacyReport)
+                        GUILayout.Label("      <color=#AAAAFF>◐ old mod version - report not verifiable</color>", modStyle);
+
                     if (_remotePlayerMods.TryGetValue(status.SteamId, out string modList))
                     {
+                        var failedNames = new HashSet<string>(
+                            status.FailedPlugins.Select(f => (f.Split('(')[0]).Trim().ToLowerInvariant()));
+
                         foreach (var m in modList.Split(';'))
                         {
                             if (string.IsNullOrEmpty(m) || m.Contains("USER_HAS_MELONLOADER")) continue;
                             string modName = m.Split('|')[0];
                             bool isOurMod = modName.StartsWith("⚡");
-                            bool isAllowed = isOurMod || allowedNames.Contains(modName.ToLowerInvariant());
-                            string modColor = isAllowed ? "#AAFFAA" : "#FF4444";
-                            string modPrefix = isAllowed ? "✓" : "✗";
+
+                            // For a verified report the verdict comes from the hash check.
+                            // For a legacy report only the name is available, so it is shown
+                            // as indeterminate rather than as a pass - matching on an
+                            // attacker-supplied name is exactly what was exploited before.
+                            string modColor, modPrefix;
+                            if (status.HasVerifiedReport)
+                            {
+                                bool failed = failedNames.Contains(modName.Trim().ToLowerInvariant());
+                                modColor  = failed ? "#FF4444" : "#AAFFAA";
+                                modPrefix = failed ? "✗" : "✓";
+                            }
+                            else
+                            {
+                                bool nameKnown = isOurMod || allowedNames.Contains(modName.ToLowerInvariant());
+                                modColor  = nameKnown ? "#AAAAFF" : "#FF4444";
+                                modPrefix = nameKnown ? "◐" : "✗";
+                            }
+
                             GUILayout.Label($"      <color={modColor}>{modPrefix} {modName}</color>", modStyle);
                         }
                     }
@@ -911,15 +1104,22 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 if (isFirstDiscovery && !_playerComplianceStatus.ContainsKey(SteamClient.SteamId))
                 {
                     bool selfHasMelon = HasMelonLoaderLoaded();
-                    _playerComplianceStatus[SteamClient.SteamId] = new PlayerComplianceStatus
+                    var selfScan = BuildLocalPluginScanResult();
+                    var selfEntry = new PlayerComplianceStatus
                     {
                         SteamId = SteamClient.SteamId,
                         FirstSeenTime = now,
                         IsCompliant = true,
                         HasReportedMods = true,
+                        HasVerifiedReport = true, // our own scan is the real thing, not a claim
                         HasMelonLoader = selfHasMelon,
-                        ModList = "⚡SBGL.UnifiedMod|1.0.0"
+                        SelfReportedIllegal = selfScan.HasIllegalMods,
+                        ModList = $"⚡SBGL.UnifiedMod|{UnifiedPlugin.Instance?.Info.Metadata.Version?.ToString() ?? "0.0.0"}"
                     };
+                    // Show ourselves the same verdict everyone else now sees.
+                    foreach (var tampered in selfScan.TamperedModNames)
+                        selfEntry.FailedPlugins.Add($"{tampered} (HashMismatch)");
+                    _playerComplianceStatus[SteamClient.SteamId] = selfEntry;
                     if (!_playerFirstSeenTime.ContainsKey(SteamClient.SteamId))
                     {
                         _playerFirstSeenTime[SteamClient.SteamId] = now;
@@ -1189,6 +1389,14 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             return true;
         }
 
+        public IEnumerable<ulong> GetKnownPeerIds()
+        {
+            var peers = new HashSet<ulong>(_knownPeers);
+            peers.UnionWith(_remotePlayerMods.Keys);
+            peers.Remove(SteamClient.SteamId);
+            return peers;
+        }
+
         private void TrySendCurrentMatchIdToPeer(ulong peerId, string reason)
         {
             if (!SteamClient.IsValid || peerId == 0 || peerId == SteamClient.SteamId) return;
@@ -1298,25 +1506,33 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                     _playerDisplayNames[SteamClient.SteamId] = SteamClient.Name ?? "Me";
 
                 byte[] data = Encoding.UTF8.GetBytes(sb.ToString());
+                byte[] dataV2 = Encoding.UTF8.GetBytes(BuildVerifiableReport(hasMelonLoader));
 
                 // Collect all known peers
                 var peersToSend = new HashSet<ulong>(_knownPeers);
                 peersToSend.UnionWith(_remotePlayerMods.Keys);
-                
+
                 // Also add peers from active P2P connections
                 // Suppress the "Found active NetworkManager" log — not useful in steady state
-                
+
                 // Remove self
                 peersToSend.Remove(SteamClient.SteamId);
-                
+
                 // Only log broadcast details if there are actually peers to send to
                 if (peersToSend.Count > 0)
                     UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Broadcasting to {peersToSend.Count} peers");
-                
-                // Remove the verbose per-send logs; only log send errors
+
+                // Both formats go out during the rollout: clients on the old build only
+                // understand SBGL_REPORT and would otherwise time this player out as
+                // non-compliant. Receivers that understand v2 prefer it and ignore the v1
+                // copy from the same peer.
                 foreach (var peer in peersToSend)
                 {
-                    try { SteamNetworking.SendP2PPacket(peer, data, -1, SBGL_NET_CHANNEL, P2PSend.Reliable); }
+                    try
+                    {
+                        SteamNetworking.SendP2PPacket(peer, data, -1, SBGL_NET_CHANNEL, P2PSend.Reliable);
+                        SteamNetworking.SendP2PPacket(peer, dataV2, -1, SBGL_NET_CHANNEL, P2PSend.Reliable);
+                    }
                     catch (Exception sendEx) { UnityEngine.Debug.LogWarning($"[SBGL-CompPluginCheck] Failed to send to peer {peer}: {sendEx.Message}"); }
                 }
             }
@@ -1324,6 +1540,129 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             {
                 UnityEngine.Debug.LogError($"[SBGL-CompPluginCheck] Error in BroadcastMyMods: {ex.Message}\n{ex.StackTrace}");
             }
+        }
+
+        // ==========================================
+        // VERIFIABLE COMPLIANCE REPORT (v2)
+        // ==========================================
+        // The v1 report carried only "Name|Version" per plugin, and the receiver's entire
+        // verdict was a substring test for the SBGL.UnifiedMod marker. Both the plugin
+        // names and that marker are attacker-chosen strings, so a cheat shipped under a
+        // borrowed allow-listed name read as fully compliant to every other player.
+        //
+        // v2 sends the GUID and the SHA-256 of each loaded assembly so the RECEIVER can run
+        // the manifest check itself, rather than trusting the sender's own claim.
+        internal const string REPORT_V2_PREFIX = "SBGL_REPORT2:";
+
+        /// <summary>Strips the field/record delimiters so a crafted plugin name can't forge extra records.</summary>
+        private static string SanitizeReportField(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return string.Empty;
+            return value.Replace(";", " ").Replace("|", " ").Replace("\n", " ").Replace("\r", " ").Trim();
+        }
+
+        private string BuildVerifiableReport(bool hasMelonLoader)
+        {
+            var sb = new StringBuilder(REPORT_V2_PREFIX);
+
+            // MOD record: this mod's own version and assembly hash. The receiver checks that
+            // hash against the manifest's pinned entry for com.sbgl.unified, so compliance is
+            // no longer "the payload contained a magic string".
+            string ownVersion = UnifiedPlugin.Instance?.Info.Metadata.Version?.ToString() ?? "0.0.0";
+            string ownHash = string.Empty;
+            foreach (var plugin in Chainloader.PluginInfos.Values)
+            {
+                if (string.Equals(plugin.Metadata.GUID, "com.sbgl.unified", StringComparison.OrdinalIgnoreCase))
+                {
+                    ownHash = GetPluginSha256(plugin);
+                    break;
+                }
+            }
+            sb.Append($"MOD|{SanitizeReportField(ownVersion)}|{ownHash};");
+
+            sb.Append($"ML|{(hasMelonLoader ? 1 : 0)};");
+
+            // The sender's own local scan verdict. Self-reported and therefore not trusted on
+            // its own, but a peer whose self-report disagrees with our independent check is a
+            // strong signal worth surfacing to staff.
+            var localScan = BuildLocalPluginScanResult();
+            sb.Append($"SCAN|{(localScan.HasIllegalMods ? 1 : 0)}|{localScan.TamperedModNames.Count}|{localScan.SuspiciousRuntimeAssemblies.Count};");
+
+            foreach (var plugin in Chainloader.PluginInfos.Values)
+            {
+                string guid = plugin.Metadata.GUID;
+                if (!string.IsNullOrWhiteSpace(guid) && guid.Equals("BepInEx", StringComparison.OrdinalIgnoreCase)) continue;
+
+                sb.Append($"P|{SanitizeReportField(guid)}|{SanitizeReportField(plugin.Metadata.Name)}|{SanitizeReportField(plugin.Metadata.Version?.ToString())}|{GetPluginSha256(plugin)};");
+            }
+
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// Verifies a peer's v2 report against OUR copy of the manifest. Nothing the sender
+        /// says about its own legitimacy is taken at face value.
+        /// </summary>
+        private void ApplyVerifiableReport(PlayerComplianceStatus status, string payload)
+        {
+            status.HasReportedMods = true;
+            status.HasVerifiedReport = true;
+            status.IsLegacyReport = false;
+            status.FailedPlugins.Clear();
+
+            bool unifiedModVerified = false;
+            var displayList = new StringBuilder();
+
+            foreach (var record in payload.Split(';'))
+            {
+                if (string.IsNullOrWhiteSpace(record)) continue;
+                string[] f = record.Split('|');
+
+                switch (f[0])
+                {
+                    case "MOD":
+                        // Compliance = the peer is running an assembly that matches the
+                        // manifest's pinned hash for this mod.
+                        if (f.Length >= 3)
+                        {
+                            unifiedModVerified = EvaluatePlugin("com.sbgl.unified", f[2]) == PluginVerdict.Approved;
+                            displayList.Append($"⚡SBGL.UnifiedMod|{f[1]};");
+                        }
+                        break;
+
+                    case "ML":
+                        status.HasMelonLoader = f.Length >= 2 && f[1] == "1";
+                        break;
+
+                    case "SCAN":
+                        status.SelfReportedIllegal = f.Length >= 2 && f[1] == "1";
+                        break;
+
+                    case "P":
+                        if (f.Length >= 5)
+                        {
+                            string guid = f[1], name = f[2], version = f[3], hash = f[4];
+                            if (string.Equals(guid, "com.sbgl.unified", StringComparison.OrdinalIgnoreCase)) break;
+
+                            var verdict = EvaluatePlugin(guid, hash);
+                            if (IsFailingVerdict(verdict))
+                                status.FailedPlugins.Add($"{name} ({verdict})");
+
+                            displayList.Append($"{name}|{version};");
+                        }
+                        break;
+                }
+            }
+
+            status.IsCompliant = unifiedModVerified;
+            status.ModList = displayList.ToString();
+            _remotePlayerMods[status.SteamId] = status.ModList;
+
+            if (!unifiedModVerified)
+                UnityEngine.Debug.LogError($"[SBGL-CompPluginCheck] ⚠️ Player {status.SteamId} is not running a manifest-matching SBGL.UnifiedMod.");
+
+            if (status.FailedPlugins.Count > 0)
+                UnityEngine.Debug.LogError($"[SBGL-CompPluginCheck] ⚠️ Player {status.SteamId} reported plugins failing verification: {string.Join(", ", status.FailedPlugins.ToArray())}");
         }
 
         private void ListenForModReports()
@@ -1344,7 +1683,11 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                     // Add this peer to our known peers so we broadcast back to them
                     _knownPeers.Add(remoteId.Value);
                     
-                    if (msg.StartsWith("SBGL_MATCH_ID:"))
+                    if (msg.StartsWith("SBGL_POLL_"))
+                    {
+                        Features.Poll.PollManager.Instance?.HandlePacket(msg, remoteId.Value);
+                    }
+                    else if (msg.StartsWith("SBGL_MATCH_ID:"))
                     {
                         string matchId = msg.Replace("SBGL_MATCH_ID:", "").Trim();
                         // Forward the incoming Match ID to the MatchResultSubmissionService, but delay slightly
@@ -1360,9 +1703,30 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                             UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Forwarded P2P Match ID (immediate fallback) from {remoteId.Value}: {matchId}");
                         }
                     }
+                    else if (msg.StartsWith(REPORT_V2_PREFIX))
+                    {
+                        TrySendCurrentMatchIdToPeer(remoteId.Value, "mod report received");
+
+                        if (!_playerComplianceStatus.ContainsKey(remoteId.Value))
+                            _playerComplianceStatus[remoteId.Value] = new PlayerComplianceStatus { FirstSeenTime = Time.time };
+
+                        var v2Status = _playerComplianceStatus[remoteId.Value];
+                        v2Status.SteamId = remoteId.Value;
+                        ApplyVerifiableReport(v2Status, msg.Substring(REPORT_V2_PREFIX.Length));
+
+                        if (!v2Status.IsCompliant || v2Status.FailedPlugins.Count > 0 || v2Status.HasMelonLoader)
+                            SendComplianceNotification(remoteId.Value, v2Status);
+
+                        UpdateUIReport();
+                    }
                     else if (msg.StartsWith("SBGL_REPORT:"))
                     {
                         string modList = msg.Replace("SBGL_REPORT:", "");
+
+                        // A verified v2 report always wins over the legacy copy the same peer
+                        // sends alongside it during the rollout.
+                        if (_playerComplianceStatus.TryGetValue(remoteId.Value, out var existing) && existing.HasVerifiedReport)
+                            continue;
 
                         // A mod report from a peer guarantees the P2P path is live, so reply with the
                         // current active match ID when we're already in a round. This lets late joiners or
@@ -1379,8 +1743,22 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                         status.SteamId = remoteId.Value;
                         status.HasReportedMods = true;
                         status.ModList = modList;
-                        status.IsCompliant = modList.Contains("⚡SBGL.UnifiedMod");
                         status.HasMelonLoader = modList.Contains("⚠️USER_HAS_MELONLOADER");
+
+                        // Legacy report: the payload carries no GUIDs and no hashes, so this
+                        // marker check proves only that something claimed to be the mod. It is
+                        // retained for peers still on the old build and is surfaced in the UI as
+                        // unverified rather than as a clean pass.
+                        //
+                        // ROLLOUT: this branch is a downgrade path. A client can decline to send
+                        // the v2 packet and be graded as "unverified" instead of "flagged".
+                        // DELETE this entire branch once the fleet is on a v2-capable build, so
+                        // that anything not sending a verifiable report simply times out as
+                        // non-compliant.
+                        status.IsLegacyReport = true;
+                        status.HasVerifiedReport = false;
+                        status.FailedPlugins.Clear();
+                        status.IsCompliant = modList.Contains("⚡SBGL.UnifiedMod");
                         
                         // Check for MelonLoader alert in the mod list
                         if (status.HasMelonLoader)
@@ -1471,7 +1849,17 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             
             _playersNotifiedAbout.Add(steamId);
             
-            string message = $"[SBGL] ⚠️ Player {steamId} failed compliance check: {(status.HasMelonLoader ? "MelonLoader detected" : "Missing SBGL.UnifiedMod")}";
+            string reason;
+            if (status.HasMelonLoader)
+                reason = "MelonLoader detected";
+            else if (status.FailedPlugins.Count > 0)
+                reason = "failed plugin verification: " + string.Join(", ", status.FailedPlugins.ToArray());
+            else if (!status.IsCompliant)
+                reason = "no manifest-matching SBGL.UnifiedMod";
+            else
+                reason = "unverified report";
+
+            string message = $"[SBGL] ⚠️ Player {steamId} failed compliance check: {reason}";
             
             // Log the notification
             UnityEngine.Debug.LogWarning($"[SBGL-CompPluginCheck] NOTIFICATION: {message}");
@@ -1699,7 +2087,9 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             _activeUsername = userStatus;
             _playerRank = "N/A"; _playerMMR = "0"; _playerPeak = "0"; _matches = "0";
             _lastChange = "0"; _top3s = "0"; _avgScore = "0.0"; _winRate = "0%";
-            if (_profilePicContainer != null) _profilePicContainer.SetActive(false);
+            if (_profileIcon != null) _profileIcon.color = new Color(1, 1, 1, 0); // hide avatar, keep placeholder visible
+            if (_flagIcon != null) _flagIcon.color = new Color(1, 1, 1, 0);
+            _playerRegion = ""; _playerState = ""; _clanTag = "";
         }
 
         private string GetInGameName()
@@ -1758,6 +2148,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         IEnumerator TriggerFullSync(string configId)
         {
             if (_isSyncing) yield break;
+            if (!string.IsNullOrEmpty(_spectatedPlayerName)) yield break; // keep spectated view
             _isSyncing = true;
             _syncStatus = "Syncing...";
             ResetPlayerData();
@@ -1820,15 +2211,13 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
 
         IEnumerator FetchRecentMatches(string id)
         {
-            string query = "{\"player_id\":\"" + id + "\"}";
-            string appId = UnifiedPlugin.GetCurrentAppId();
             string authToken = UnifiedPlugin.GetCurrentAuthToken();
-            string url = $"https://sbgleague.com/api/apps/{appId}/entities/MatchEntry?q={UnityWebRequest.EscapeURL(query)}&sort=-match_date&limit=5";
+            string url = $"{UnifiedPlugin.GetCurrentBaseApi()}/match_entry?player_id=eq.{UnityWebRequest.EscapeURL(id)}&order=match_date.desc&limit=5";
 
             using (UnityWebRequest r = UnityWebRequest.Get(url))
             {
-                r.SetRequestHeader("X-App-Id", appId);
-                r.SetRequestHeader("api_key", authToken);
+                r.SetRequestHeader("apikey", authToken);
+                r.SetRequestHeader("Authorization", $"Bearer {authToken}");
                 r.certificateHandler = new BypassCertificate();
                 yield return r.SendWebRequest();
                 if (r.result == UnityWebRequest.Result.Success)
@@ -1869,13 +2258,12 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
 
         IEnumerator FetchEvents()
         {
-            string appId = UnifiedPlugin.GetCurrentAppId();
             string authToken = UnifiedPlugin.GetCurrentAuthToken();
-            string url = $"https://sbgleague.com/api/apps/{appId}/entities/ProSeriesEvent?sort=event_date&limit=50";
+            string url = $"{UnifiedPlugin.GetCurrentBaseApi()}/pro_series_event?order=event_date.asc&limit=50";
             using (UnityWebRequest r = UnityWebRequest.Get(url))
             {
-                r.SetRequestHeader("X-App-Id", appId);
-                r.SetRequestHeader("api_key", authToken);
+                r.SetRequestHeader("apikey", authToken);
+                r.SetRequestHeader("Authorization", $"Bearer {authToken}");
                 r.certificateHandler = new BypassCertificate();
                 yield return r.SendWebRequest();
                 if (r.result == UnityWebRequest.Result.Success)
@@ -1906,14 +2294,12 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
 
         IEnumerator ResolvePlayerIdFromName(string playerName)
         {
-            string query = "{\"display_name\":{\"$regex\":\"^" + playerName + "$\",\"$options\":\"i\"}}";
-            string appId = UnifiedPlugin.GetCurrentAppId();
             string authToken = UnifiedPlugin.GetCurrentAuthToken();
-            string url = $"https://sbgleague.com/api/apps/{appId}/entities/MatchEntry?q={UnityWebRequest.EscapeURL(query)}&sort=-match_date&limit=5";
+            string url = $"{UnifiedPlugin.GetCurrentBaseApi()}/match_entry?display_name=ilike.{UnityWebRequest.EscapeURL(playerName)}&order=match_date.desc&limit=5";
             using (UnityWebRequest r = UnityWebRequest.Get(url))
             {
-                r.SetRequestHeader("X-App-Id", appId);
-                r.SetRequestHeader("api_key", authToken);
+                r.SetRequestHeader("apikey", authToken);
+                r.SetRequestHeader("Authorization", $"Bearer {authToken}");
                 r.certificateHandler = new BypassCertificate();
                 yield return r.SendWebRequest();
                 if (r.result == UnityWebRequest.Result.Success)
@@ -1937,13 +2323,12 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
 
         IEnumerator FetchPlayerData(string id)
         {
-            string appId = UnifiedPlugin.GetCurrentAppId();
             string authToken = UnifiedPlugin.GetCurrentAuthToken();
-            string url = $"https://sbgleague.com/api/apps/{appId}/entities/Player?q=" + UnityWebRequest.EscapeURL("{\"id\":\"" + id + "\"}");
+            string url = $"{UnifiedPlugin.GetCurrentPlayerApi()}?id=eq.{UnityWebRequest.EscapeURL(id)}";
             using (UnityWebRequest r = UnityWebRequest.Get(url))
             {
-                r.SetRequestHeader("X-App-Id", appId);
-                r.SetRequestHeader("api_key", authToken);
+                r.SetRequestHeader("apikey", authToken);
+                r.SetRequestHeader("Authorization", $"Bearer {authToken}");
                 r.certificateHandler = new BypassCertificate();
                 yield return r.SendWebRequest();
                 if (r.result == UnityWebRequest.Result.Success)
@@ -1964,6 +2349,12 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                         _winRate = t > 0 ? $"{(w / t * 100):F0}%" : "0%";
                         if (p["profile_pic_url"] != null && !string.IsNullOrEmpty(p["profile_pic_url"].ToString()))
                             StartCoroutine(DownloadProfilePic(p["profile_pic_url"].ToString()));
+                        _playerRegion = p["region"]?.ToString() ?? "";
+                        _playerState  = p["state_province"]?.ToString() ?? "";
+                        bool regionPrivate = p["region_private"]?.ToObject<bool>() ?? false;
+                        ResolveAndShowFlag(_playerState, _playerRegion, regionPrivate);
+
+                        StartCoroutine(FetchClanTag(p["id"]?.ToString() ?? id));
                     }
                     catch { ResetPlayerData("Data Error"); }
                 }
@@ -1971,17 +2362,52 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             }
         }
 
-        IEnumerator FetchLeaderboardRank(string id)
+        /// <summary>
+        /// Looks up the player's faction and caches its clan tag for display on the stats card.
+        /// The faction table stores its roster as a member_player_ids array, so a single
+        /// containment query resolves the tag without needing a join.
+        /// </summary>
+        IEnumerator FetchClanTag(string playerId)
         {
-            string filter = "%7B%22matches_played%22%3A%7B%22%24gt%22%3A0%7D%7D";
-            string appId = UnifiedPlugin.GetCurrentAppId();
+            _clanTag = "";
+            if (string.IsNullOrWhiteSpace(playerId)) yield break;
+
             string authToken = UnifiedPlugin.GetCurrentAuthToken();
-            string url = $"https://sbgleague.com/api/apps/{appId}/entities/Player?q={filter}&sort=-current_mmr";
+            string filter = UnityWebRequest.EscapeURL($"cs.[\"{playerId}\"]");
+            string url = $"{UnifiedPlugin.GetCurrentBaseApi()}/faction?member_player_ids={filter}&select=clan_tag&limit=1";
 
             using (UnityWebRequest r = UnityWebRequest.Get(url))
             {
-                r.SetRequestHeader("X-App-Id", appId);
-                r.SetRequestHeader("api_key", authToken);
+                r.SetRequestHeader("apikey", authToken);
+                r.SetRequestHeader("Authorization", $"Bearer {authToken}");
+                r.certificateHandler = new BypassCertificate();
+                yield return r.SendWebRequest();
+
+                if (r.result != UnityWebRequest.Result.Success) yield break;
+
+                try
+                {
+                    var ja = JArray.Parse(r.downloadHandler.text);
+                    if (ja.Count > 0)
+                    {
+                        _clanTag = ja[0]["clan_tag"]?.ToString()?.Trim() ?? "";
+                    }
+                }
+                catch { _clanTag = ""; }
+            }
+
+            UpdateUIReport();
+        }
+
+        IEnumerator FetchLeaderboardRank(string id)
+        {
+            string authToken = UnifiedPlugin.GetCurrentAuthToken();
+            string url = $"{UnifiedPlugin.GetCurrentPlayerApi()}?active_status=eq.true&matches_played=gt.0&order=current_mmr.desc&select=id,current_mmr";
+
+            using (UnityWebRequest r = UnityWebRequest.Get(url))
+            {
+                r.SetRequestHeader("apikey", authToken);
+                r.SetRequestHeader("Authorization", $"Bearer {authToken}");
                 r.certificateHandler = new BypassCertificate();
 
                 yield return r.SendWebRequest();
@@ -2040,12 +2466,213 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             if (url.StartsWith("http://")) url = url.Replace("http://", "https://");
             using (UnityWebRequest request = UnityWebRequestTexture.GetTexture(url))
             {
+                request.certificateHandler = new BypassCertificate();
                 yield return request.SendWebRequest();
                 if (request.result == UnityWebRequest.Result.Success)
                 {
-                    _profileIcon.texture = DownloadHandlerTexture.GetContent(request);
-                    _profilePicContainer.SetActive(true);
+                    var tex = DownloadHandlerTexture.GetContent(request);
+                    _profileIcon.texture = tex;
+                    // Center-crop non-square images using uvRect so they aren't stretched
+                    if (tex != null && tex.width != tex.height)
+                    {
+                        if (tex.width > tex.height)
+                        {
+                            float u = (float)tex.height / tex.width;
+                            _profileIcon.uvRect = new Rect((1f - u) / 2f, 0f, u, 1f);
+                        }
+                        else
+                        {
+                            float v = (float)tex.width / tex.height;
+                            _profileIcon.uvRect = new Rect(0f, (1f - v) / 2f, 1f, v);
+                        }
+                    }
+                    else
+                    {
+                        _profileIcon.uvRect = new Rect(0f, 0f, 1f, 1f);
+                    }
+                    _profileIcon.color = Color.white;
                 }
+            }
+        }
+
+        private static Texture2D _sbglLogoCache;
+        private const string SBGL_LOGO_URL = "https://liquipedia.net/commons/images/1/19/Super_Battle_Golf_League_allmode.png";
+
+        private void ResolveAndShowFlag(string stateProvince, string region, bool regionPrivate)
+        {
+            if (regionPrivate)
+            {
+                StartCoroutine(ShowSbglLogoCoroutine());
+                return;
+            }
+
+            string country = NormalizeFlagCode(region);
+            string stateCode = string.IsNullOrEmpty(stateProvince) ? null
+                : string.IsNullOrEmpty(country) ? NormalizeFlagCode(stateProvince)
+                : $"{country}-{stateProvince.Trim().ToLower()}";
+
+            if (!string.IsNullOrEmpty(stateCode))
+                StartCoroutine(DownloadFlagWithFallback(stateCode, country));
+            else if (!string.IsNullOrEmpty(country))
+                StartCoroutine(DownloadFlagWithFallback(country, null));
+            else
+                StartCoroutine(ShowSbglLogoCoroutine());
+        }
+
+        private string NormalizeFlagCode(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            string code = raw.Trim().ToLower();
+            if (code == "uk") code = "gb";
+            return code.Length >= 2 ? code : null;
+        }
+
+        IEnumerator DownloadFlagWithFallback(string primaryCode, string fallbackCode)
+        {
+            using (UnityWebRequest req = UnityWebRequestTexture.GetTexture($"https://flagcdn.com/48x36/{primaryCode}.png"))
+            {
+                req.timeout = 5;
+                yield return req.SendWebRequest();
+                if (req.result == UnityWebRequest.Result.Success && _flagIcon != null)
+                {
+                    SetFlagTexture(DownloadHandlerTexture.GetContent(req));
+                    yield break;
+                }
+            }
+            if (!string.IsNullOrEmpty(fallbackCode))
+                StartCoroutine(DownloadFlagWithFallback(fallbackCode, null));
+            else
+                StartCoroutine(ShowSbglLogoCoroutine());
+        }
+
+        void SetFlagTexture(Texture2D tex)
+        {
+            if (_flagIcon == null || tex == null) return;
+            _flagIcon.texture = tex;
+            if (tex.width != tex.height)
+            {
+                if (tex.width > tex.height)
+                {
+                    float u = (float)tex.height / tex.width;
+                    _flagIcon.uvRect = new Rect((1f - u) / 2f, 0f, u, 1f);
+                }
+                else
+                {
+                    float v = (float)tex.width / tex.height;
+                    _flagIcon.uvRect = new Rect(0f, (1f - v) / 2f, 1f, v);
+                }
+            }
+            else
+            {
+                _flagIcon.uvRect = new Rect(0f, 0f, 1f, 1f);
+            }
+            _flagIcon.color = Color.white;
+        }
+
+        IEnumerator ShowSbglLogoCoroutine()
+        {
+            if (_sbglLogoCache != null)
+            {
+                if (_flagIcon != null) SetFlagTexture(_sbglLogoCache);
+                yield break;
+            }
+            using (UnityWebRequest req = UnityWebRequestTexture.GetTexture(SBGL_LOGO_URL))
+            {
+                req.timeout = 10;
+                yield return req.SendWebRequest();
+                if (req.result == UnityWebRequest.Result.Success && _flagIcon != null)
+                {
+                    _sbglLogoCache = DownloadHandlerTexture.GetContent(req);
+                    SetFlagTexture(_sbglLogoCache);
+                }
+            }
+        }
+
+        private string GetSpectatedPlayerName()
+        {
+            try
+            {
+                var spectator = GameManager.LocalPlayerAsSpectator;
+                if (spectator == null) return "";
+                var target = spectator.TargetPlayer;
+                if (target == null) return "";
+                return target.GetComponent<PlayerId>()?.PlayerName ?? "";
+            }
+            catch { return ""; }
+        }
+
+        IEnumerator FetchPlayerDataByName(string displayName)
+        {
+            // Clear up front so the previous player's tag can't linger while this one resolves
+            _clanTag = "";
+            string authToken = UnifiedPlugin.GetCurrentAuthToken();
+            // ilike, not eq: in-game names differ in case from the registered display_name
+            // (e.g. "JaBoB" in game vs "JaBob" on the site), and eq is case-sensitive so the
+            // card would fall through to "Not Registered" while the scoreboard resolved fine.
+            string url = $"{UnifiedPlugin.GetCurrentPlayerApi()}?display_name=ilike.{UnityWebRequest.EscapeURL(displayName)}";
+            using (UnityWebRequest r = UnityWebRequest.Get(url))
+            {
+                r.SetRequestHeader("apikey", authToken);
+                r.SetRequestHeader("Authorization", $"Bearer {authToken}");
+                r.certificateHandler = new BypassCertificate();
+                yield return r.SendWebRequest();
+                if (r.result == UnityWebRequest.Result.Success)
+                {
+                    try
+                    {
+                        var ja = JArray.Parse(r.downloadHandler.text);
+
+                        // ilike treats _ and % as wildcards, so a name containing them can match
+                        // the wrong player. Keep only an exact case-insensitive match.
+                        var exact = ja.FirstOrDefault(row =>
+                            string.Equals(row["display_name"]?.ToString(), displayName, StringComparison.OrdinalIgnoreCase));
+                        if (exact != null) ja = new JArray(exact);
+
+                        if (ja.Count == 0)
+                        {
+                            // Player not found in SBGL database — show name only
+                            _activeUsername = displayName;
+                            _playerMMR = "---"; _playerRank = "---"; _winRate = "---";
+                            _matches = "---"; _top3s = "---"; _avgScore = "---";
+                            _lastChange = "0"; _syncStatus = "Not Registered";
+                            UpdateUIReport();
+                            yield break;
+                        }
+                        var p = ja[0];
+                        _activeUsername = p["display_name"]?.ToString() ?? displayName;
+                        _playerMMR     = p["current_mmr"]?.ToString() ?? "0";
+                        _playerPeak    = p["highest_mmr_ever"]?.ToString() ?? "0";
+                        _matches       = p["matches_played"]?.ToString() ?? "0";
+                        _lastChange    = p["latest_mmr_change"]?.ToString() ?? "0";
+                        _top3s         = p["top_3_finishes"]?.ToString() ?? "0";
+                        float.TryParse(p["average_score_vs_par"]?.ToString() ?? "0", out float avg);
+                        _avgScore = avg.ToString("F1");
+                        float w = 0, t = 0;
+                        float.TryParse(p["wins"]?.ToString(), out w);
+                        float.TryParse(p["matches_played"]?.ToString(), out t);
+                        _winRate = t > 0 ? $"{(w / t * 100):F0}%" : "0%";
+
+                        string foundId = p["id"]?.ToString() ?? "";
+                        if (!string.IsNullOrEmpty(foundId))
+                        {
+                            StartCoroutine(FetchLeaderboardRank(foundId));
+                            StartCoroutine(FetchClanTag(foundId));
+                        }
+
+                        if (p["profile_pic_url"] != null && !string.IsNullOrEmpty(p["profile_pic_url"].ToString()))
+                            StartCoroutine(DownloadProfilePic(p["profile_pic_url"].ToString()));
+
+                        _playerRegion = p["region"]?.ToString() ?? "";
+                        _playerState  = p["state_province"]?.ToString() ?? "";
+                        bool regionPrivate = p["region_private"]?.ToObject<bool>() ?? false;
+                        ResolveAndShowFlag(_playerState, _playerRegion, regionPrivate);
+
+                        _syncStatus = "Spectating";
+                        UpdateUIReport();
+                    }
+                    catch { _activeUsername = displayName; UpdateUIReport(); }
+                }
+                else { _activeUsername = displayName; UpdateUIReport(); }
             }
         }
 
@@ -2064,25 +2691,45 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
 
         private void UpdateUIReport()
         {
-            StringBuilder sb = new StringBuilder();
             var localPluginScan = BuildLocalPluginScanResult();
-            sb.AppendLine($"User: <color=#FFFFFF>{_activeUsername}</color>");
-            sb.AppendLine($"Rank: <color=#00FF00>#{_playerRank}</color> / {_totalPlayers}");
-            sb.AppendLine($"Win Rate: <color=#FFA500>{_winRate}</color>");
+
+            float.TryParse(_playerMMR, out float mmrValue);
             float.TryParse(_lastChange, out float delta);
-            sb.AppendLine($"MMR: <color=#00FFFF>{_playerMMR}</color> (<color={(delta >= 0 ? "#55FF55" : "#FF5555")}>{(delta >= 0 ? "+" : "")}{_lastChange}</color>)");
-            sb.AppendLine($"Avg. Par: <color=#CC88FF>{_avgScore}</color>");
-            sb.AppendLine($"Matches: <color=#FFFFFF>{_matches}</color> | Top 3s: <color=#00FF00>{_top3s}</color>");
+            string rankName  = SBGL.UnifiedMod.Core.Season2RuleSet.GetRankName(mmrValue);
+            string rankColor = SBGL.UnifiedMod.Core.Season2RuleSet.GetRankColor(mmrValue);
 
-            sb.AppendLine("---");
-            sb.AppendLine($"<size=10><color=#888888>Sync: {_lastSyncTime} | Status: {_syncStatus}</color></size>");
+            if (_cardNameText != null)
+            {
+                // The name keeps its real casing; only the clan tag is uppercased.
+                // Rich text is disabled on this field (so display names can't inject markup),
+                // so the tag is plain text rather than coloured.
+                string cardName = _activeUsername ?? "---";
+                if (!string.IsNullOrWhiteSpace(_clanTag))
+                    cardName = $"[{_clanTag.ToUpper()}] {cardName}";
+                _cardNameText.text = cardName;
+            }
 
-            if (_statsText != null) _statsText.text = sb.ToString();
-            
-            // Update debug window content
+            if (_cardMMRText != null)
+            {
+                string deltaColor = delta >= 0 ? "#55FF55" : "#FF5555";
+                string deltaStr   = $"({(delta >= 0 ? "+" : "")}{_lastChange})";
+                _cardMMRText.text = $"<color={rankColor}><b>{_playerMMR} MMR</b>  {rankName}</color>  <color={deltaColor}><size=10>{deltaStr}</size></color>";
+            }
+
+            if (_rankColorStripImage != null && ColorUtility.TryParseHtmlString(rankColor, out Color sc))
+                _rankColorStripImage.color = new Color(sc.r, sc.g, sc.b, 1f);
+
+            if (_cardRankText != null)
+                _cardRankText.text = $"<color=#88CC88>#{_playerRank}</color> / {_totalPlayers}  ·  <color=#FFA500>{_winRate}</color> Win Rate";
+
+            if (_cardSecondaryText != null)
+                _cardSecondaryText.text = $"<color=#CC88FF>{_avgScore}</color> Par  ·  <color=#FFFFFF>{_matches}</color> Matches  ·  <color=#00FF00>{_top3s}</color> Top 3s";
+
+            if (_cardSyncText != null)
+                _cardSyncText.text = $"Sync: {_lastSyncTime}  |  {_syncStatus}";
+
             UpdateDebugWindow(localPluginScan);
-            
-            // Update warning text UI elements
+
             if (_illegalWarningText != null) _illegalWarningText.gameObject.SetActive(localPluginScan.HasIllegalMods);
             if (_missingWarningText != null)
             {
@@ -2147,36 +2794,94 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         {
             _canvasObj = new GameObject("SBG_Canvas");
             Canvas c = _canvasObj.AddComponent<Canvas>(); c.renderMode = RenderMode.ScreenSpaceOverlay; c.sortingOrder = 99999;
-            _bgObj = new GameObject("BG"); _bgObj.transform.SetParent(_canvasObj.transform, false);
-            _bgImage = _bgObj.AddComponent<Image>(); _bgImage.color = new Color(0, 0, 0, ConfigAlpha);
-            _bgRect = _bgObj.GetComponent<RectTransform>(); _bgRect.anchorMin = _bgRect.anchorMax = _bgRect.pivot = Vector2.zero;
-            VerticalLayoutGroup vlg = _bgObj.AddComponent<VerticalLayoutGroup>(); vlg.padding = new RectOffset(10, 10, 10, 10);
-            _bgObj.AddComponent<ContentSizeFitter>().verticalFit = ContentSizeFitter.FitMode.PreferredSize;
 
+            // Card background — anchored bottom-left, auto-sized to content
+            _bgObj = new GameObject("BG"); _bgObj.transform.SetParent(_canvasObj.transform, false);
+            _bgImage = _bgObj.AddComponent<Image>(); _bgImage.color = new Color(0.04f, 0.06f, 0.08f, ConfigAlpha);
+            _bgRect = _bgObj.GetComponent<RectTransform>();
+            _bgRect.anchorMin = _bgRect.anchorMax = new Vector2(0.5f, 0f); // bottom-center anchor
+            _bgRect.pivot = new Vector2(0.5f, 0f);
+            ContentSizeFitter bgFit = _bgObj.AddComponent<ContentSizeFitter>();
+            bgFit.horizontalFit = ContentSizeFitter.FitMode.PreferredSize;
+            bgFit.verticalFit   = ContentSizeFitter.FitMode.PreferredSize;
+            HorizontalLayoutGroup hlg = _bgObj.AddComponent<HorizontalLayoutGroup>();
+            hlg.padding = new RectOffset(14, 12, 10, 10); hlg.spacing = 10;
+            hlg.childAlignment = TextAnchor.MiddleLeft;
+            hlg.childForceExpandWidth = false; hlg.childForceExpandHeight = false;
+            hlg.childControlWidth = true;     hlg.childControlHeight = true;
+
+            // Rank tier color left strip (absolute, bypasses layout)
+            var stripObj = new GameObject("Strip"); stripObj.transform.SetParent(_bgObj.transform, false);
+            _rankColorStripImage = stripObj.AddComponent<Image>(); _rankColorStripImage.color = new Color(0.5f, 0.5f, 0.5f, 1f);
+            RectTransform stripRt = stripObj.GetComponent<RectTransform>();
+            stripRt.anchorMin = Vector2.zero; stripRt.anchorMax = new Vector2(0, 1);
+            stripRt.pivot = Vector2.zero; stripRt.anchoredPosition = Vector2.zero; stripRt.sizeDelta = new Vector2(4, 0);
+            stripObj.AddComponent<LayoutElement>().ignoreLayout = true;
+
+            // Avatar circle — always visible; grey placeholder shows until texture loads
             _profilePicContainer = new GameObject("PicContainer"); _profilePicContainer.transform.SetParent(_bgObj.transform, false);
-            RectTransform picRect = _profilePicContainer.AddComponent<RectTransform>();
-            picRect.anchorMin = picRect.anchorMax = picRect.pivot = new Vector2(1, 1); picRect.anchoredPosition = new Vector2(-10, -10); picRect.sizeDelta = new Vector2(42, 42);
-            _profilePicContainer.AddComponent<LayoutElement>().ignoreLayout = true; _profilePicContainer.AddComponent<RectMask2D>();
+            _profilePicContainer.AddComponent<RectMask2D>();
+            LayoutElement picLE = _profilePicContainer.AddComponent<LayoutElement>();
+            picLE.preferredWidth = 52; picLE.preferredHeight = 52; picLE.flexibleWidth = 0; picLE.flexibleHeight = 0;
+
+            var placeholder = new GameObject("PH").AddComponent<Image>();
+            placeholder.transform.SetParent(_profilePicContainer.transform, false);
+            placeholder.color = new Color(0.22f, 0.25f, 0.28f, 1f);
+            placeholder.rectTransform.anchorMin = Vector2.zero; placeholder.rectTransform.anchorMax = Vector2.one; placeholder.rectTransform.sizeDelta = Vector2.zero;
 
             _profileIcon = new GameObject("I").AddComponent<RawImage>(); _profileIcon.transform.SetParent(_profilePicContainer.transform, false);
             _profileIcon.rectTransform.anchorMin = Vector2.zero; _profileIcon.rectTransform.anchorMax = Vector2.one; _profileIcon.rectTransform.sizeDelta = Vector2.zero;
-            _profilePicContainer.SetActive(false);
+            _profileIcon.color = new Color(1, 1, 1, 0); // transparent until avatar loads
 
-            _statsText = new GameObject("S").AddComponent<TextMeshProUGUI>(); _statsText.transform.SetParent(_bgObj.transform, false);
-            _statsText.fontSize = 13; _statsText.richText = true;
+            // Stats section — stacked vertically to the right of avatar
+            var statsSection = new GameObject("Stats"); statsSection.transform.SetParent(_bgObj.transform, false);
+            statsSection.AddComponent<LayoutElement>().preferredWidth = 230;
+            VerticalLayoutGroup vStats = statsSection.AddComponent<VerticalLayoutGroup>();
+            vStats.spacing = 2; vStats.childAlignment = TextAnchor.UpperLeft;
+            vStats.childForceExpandWidth = true; vStats.childForceExpandHeight = false;
+            vStats.childControlWidth = true;    vStats.childControlHeight = true;
+            statsSection.AddComponent<ContentSizeFitter>().verticalFit = ContentSizeFitter.FitMode.PreferredSize;
 
+            _cardNameText      = MakeCardTMP(statsSection.transform, 17, FontStyles.Bold,   Color.white,                        richText: false);
+            _cardMMRText       = MakeCardTMP(statsSection.transform, 13, FontStyles.Normal, Color.white,                        richText: true);
+            _cardRankText      = MakeCardTMP(statsSection.transform, 11, FontStyles.Normal, new Color(0.65f, 0.65f, 0.7f),      richText: true);
+            _cardSecondaryText = MakeCardTMP(statsSection.transform, 11, FontStyles.Normal, new Color(0.65f, 0.65f, 0.7f),      richText: true);
+            _cardSyncText      = MakeCardTMP(statsSection.transform,  9, FontStyles.Normal, new Color(0.40f, 0.40f, 0.45f),     richText: false);
+
+            // Flag image — right of stats section, hidden until a flag is downloaded
+            _flagContainer = new GameObject("Flag"); _flagContainer.transform.SetParent(_bgObj.transform, false);
+            LayoutElement flagLE = _flagContainer.AddComponent<LayoutElement>();
+            flagLE.preferredWidth = 52; flagLE.preferredHeight = 52; flagLE.flexibleWidth = 0; flagLE.flexibleHeight = 0;
+            _flagIcon = new GameObject("FlagImg").AddComponent<RawImage>(); _flagIcon.transform.SetParent(_flagContainer.transform, false);
+            _flagIcon.rectTransform.anchorMin = Vector2.zero; _flagIcon.rectTransform.anchorMax = Vector2.one; _flagIcon.rectTransform.sizeDelta = Vector2.zero;
+            _flagIcon.color = new Color(1, 1, 1, 0); // transparent until loaded
+
+            // Warning overlay — screen bottom-center (unchanged)
             _warnContainer = new GameObject("WarnContainer"); _warnContainer.transform.SetParent(_canvasObj.transform, false);
             RectTransform warnRect = _warnContainer.AddComponent<RectTransform>();
-            warnRect.anchorMin = warnRect.anchorMax = new Vector2(0.5f, 0); warnRect.pivot = new Vector2(0.5f, 0); warnRect.anchoredPosition = new Vector2(0, 15); warnRect.sizeDelta = new Vector2(1000, 200);
+            warnRect.anchorMin = warnRect.anchorMax = new Vector2(0.5f, 0); warnRect.pivot = new Vector2(0.5f, 0);
+            warnRect.anchoredPosition = new Vector2(0, 15); warnRect.sizeDelta = new Vector2(1000, 200);
             VerticalLayoutGroup warnVlg = _warnContainer.AddComponent<VerticalLayoutGroup>(); warnVlg.childAlignment = TextAnchor.LowerCenter;
 
             _illegalWarningText = new GameObject("RT").AddComponent<TextMeshProUGUI>(); _illegalWarningText.transform.SetParent(_warnContainer.transform, false);
-            _illegalWarningText.text = "ILLEGAL MODS DETECTED"; _illegalWarningText.color = Color.red; _illegalWarningText.fontSize = 32; _illegalWarningText.alignment = TextAlignmentOptions.Center; _illegalWarningText.fontStyle = FontStyles.Bold; _illegalWarningText.gameObject.SetActive(false);
+            _illegalWarningText.text = "ILLEGAL MODS DETECTED"; _illegalWarningText.color = Color.red; _illegalWarningText.fontSize = 32;
+            _illegalWarningText.alignment = TextAlignmentOptions.Center; _illegalWarningText.fontStyle = FontStyles.Bold; _illegalWarningText.gameObject.SetActive(false);
 
             _missingWarningText = new GameObject("YT").AddComponent<TextMeshProUGUI>(); _missingWarningText.transform.SetParent(_warnContainer.transform, false);
-            _missingWarningText.color = Color.yellow; _missingWarningText.fontSize = 18; _missingWarningText.alignment = TextAlignmentOptions.Center; _missingWarningText.gameObject.SetActive(false);
+            _missingWarningText.color = Color.yellow; _missingWarningText.fontSize = 18;
+            _missingWarningText.alignment = TextAlignmentOptions.Center; _missingWarningText.gameObject.SetActive(false);
 
             UnityEngine.Object.DontDestroyOnLoad(_canvasObj);
+        }
+
+        private TextMeshProUGUI MakeCardTMP(Transform parent, float fontSize, FontStyles style, Color color, bool richText)
+        {
+            var go = new GameObject("T"); go.transform.SetParent(parent, false);
+            var tmp = go.AddComponent<TextMeshProUGUI>();
+            tmp.fontSize = fontSize; tmp.fontStyle = style; tmp.color = color;
+            tmp.richText = richText; tmp.textWrappingMode = TextWrappingModes.NoWrap;
+            tmp.overflowMode = TextOverflowModes.Overflow;
+            return tmp;
         }
     }
 

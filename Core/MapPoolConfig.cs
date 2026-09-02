@@ -4,8 +4,8 @@ using System.Linq;
 namespace SBGL.UnifiedMod.Core
 {
     /// <summary>
-    /// Immutable Season 1 map pool configuration with approved and banned courses.
-    /// Course names use readable identifiers matching the Season 1 ruleset document.
+    /// Map pool configuration. Season 2: Central Park, Showdown, and Vertigo are banned for the rest of the season.
+    /// Course names use readable identifiers matching the in-game names.
     /// </summary>
     public static class MapPoolConfig
     {
@@ -23,19 +23,21 @@ namespace SBGL.UnifiedMod.Core
             }
         }
 
-        // Season 1 Approved Maps (28 total)
+        // Season 2 approved pool (Central Park, Showdown, Vertigo banned — see BannedCourses)
         private static readonly Course[] ApprovedCourses = new[]
         {
-            // Snow (7) — UI# = ParentCourseIndex+1; asset suffix ≠ UI#
-            new Course("Snow 1", "Snow", true),  // UI 1 — Taiga Woods
-            new Course("Snow 3", "Snow", true),  // UI 2 — Frozen Bay
-            new Course("Snow 6", "Snow", true),  // UI 5 — Gorge
-            new Course("Snow 7", "Snow", true),  // UI 6 — Slippery Slope
-            new Course("Snow 2", "Snow", true),  // UI 7 — Ice Skating
-            new Course("Snow 8", "Snow", true),  // UI 8 — Mountain Ridge
-            new Course("Snow 9", "Snow", true),  // UI 9 — Outcrop
-            
-            // Coast (10)
+            // Snow
+            new Course("Snow 1", "Snow", true),
+            new Course("Snow 2", "Snow", true),
+            new Course("Snow 3", "Snow", true),
+            new Course("Snow 4", "Snow", true),
+            new Course("Snow 5", "Snow", true),
+            new Course("Snow 6", "Snow", true),
+            new Course("Snow 7", "Snow", true),
+            new Course("Snow 8", "Snow", true),
+            new Course("Snow 9", "Snow", true),
+
+            // Coast
             new Course("Twin Beach", "Coast", true),
             new Course("Cove", "Coast", true),
             new Course("Woodland Bay", "Coast", true),
@@ -46,49 +48,41 @@ namespace SBGL.UnifiedMod.Core
             new Course("Atoll", "Coast", true),
             new Course("Hidden Lagoon", "Coast", true),
             new Course("Jungle", "Coast", true),
-            
-            // Forest (6)
+            new Course("Long Beach", "Coast", true),
+            new Course("Downhill", "Coast", true),
+            new Course("Bullseye", "Coast", true),
+            new Course("Shallows", "Coast", true),
+            new Course("Catwalk", "Coast", true),
+            new Course("Spiral", "Coast", true),
+            new Course("Seaside Cliff", "Coast", true),
+            new Course("Gauntlet", "Coast", true),
+
+            // Forest
             new Course("Twin Path", "Forest", true),
             new Course("Overgrown", "Forest", true),
             new Course("Roundabout", "Forest", true),
             new Course("Blast Off", "Forest", true),
             new Course("Hilltops", "Forest", true),
             new Course("Terraces", "Forest", true),
-            
-            // Desert (5)
+            new Course("Overlook", "Forest", true),
+            new Course("Donut", "Forest", true),
+            new Course("Upward", "Forest", true),
+
+            // Desert
             new Course("Patches", "Desert", true),
             new Course("Big Rock", "Desert", true),
             new Course("Oasis", "Desert", true),
             new Course("Sand Traps", "Desert", true),
             new Course("Serpent Trail", "Desert", true),
+            new Course("Underpass", "Desert", true),
+            new Course("Chasm", "Desert", true),
         };
 
-        // Season 1 Banned Maps (17 total)
+        // Season 2: banned for the rest of the season
         private static readonly Course[] BannedCourses = new[]
         {
-            // Snow (2)
-            new Course("Snow 4", "Snow", false), // UI 3 — Over the Hill
-            new Course("Snow 5", "Snow", false), // UI 4 — Base Jump
-            
-            // Coast (8)
-            new Course("Long Beach", "Coast", false),
-            new Course("Downhill", "Coast", false),
-            new Course("Bullseye", "Coast", false),
-            new Course("Shallows", "Coast", false),
-            new Course("Catwalk", "Coast", false),
-            new Course("Spiral", "Coast", false),
-            new Course("Seaside Cliff", "Coast", false),
-            new Course("Gauntlet", "Coast", false),
-            
-            // Forest (3)
-            new Course("Overlook", "Forest", false),
-            new Course("Donut", "Forest", false),
-            new Course("Upward", "Forest", false),
-            
-            // Desert (4)
+            new Course("Central Park", "City", false),
             new Course("Showdown", "Desert", false),
-            new Course("Underpass", "Desert", false),
-            new Course("Chasm", "Desert", false),
             new Course("Vertigo", "Desert", false),
         };
 

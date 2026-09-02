@@ -26,7 +26,7 @@ namespace SBGL.UnifiedMod.Features {
         private string _tooltipRanked = null;
         private string _tooltipPro    = null;
         private string _tooltipCasual = null;
-        private string _noRulesetTooltip = "<b>Applies Classic preset only.</b>\n<color=#AAFFAA>No Season 1 rules or item bans enforced.</color>";
+        private string _noRulesetTooltip = "<b>Applies Classic preset only.</b>\n<color=#AAFFAA>No Season 2 rules enforced.</color>";
         private string _lastSceneName = string.Empty;
         private bool _defaultAppliedForScene = false;
 
@@ -57,8 +57,8 @@ namespace SBGL.UnifiedMod.Features {
                 // Reset ruleset selection whenever the player returns to the main menu so
                 // the next driving-range session always starts with Ranked as the default.
                 PlayerPrefs.SetString("HostRuleset", "ranked");
-                PlayerPrefs.SetString("MatchType", "ranked_season_1");
-                PlayerPrefs.SetInt("Season", 1);
+                PlayerPrefs.SetString("MatchType", Core.Season2RuleSet.MATCH_TYPE_RANKED);
+                PlayerPrefs.SetInt("Season", Core.Season2RuleSet.SEASON);
                 PlayerPrefs.Save();
                 Debug.Log("[RuleSetDisplayManager] Returned to main menu — ruleset reset to ranked");
             }
@@ -97,8 +97,8 @@ namespace SBGL.UnifiedMod.Features {
             // changes. When the player returns to the main menu, OnSceneLoaded resets the
             // selection back to ranked for the next visit.
             PlayerPrefs.SetString("HostRuleset", "ranked");
-            PlayerPrefs.SetString("MatchType", "ranked_season_1");
-            PlayerPrefs.SetInt("Season", 1);
+            PlayerPrefs.SetString("MatchType", Core.Season2RuleSet.MATCH_TYPE_RANKED);
+            PlayerPrefs.SetInt("Season", Core.Season2RuleSet.SEASON);
 
             string currentCourse = PlayerPrefs.GetString("SelectedCourse", "");
             if (string.IsNullOrWhiteSpace(currentCourse))
@@ -154,7 +154,7 @@ namespace SBGL.UnifiedMod.Features {
             }
 
             bool showDetails = _showDetails?.Value ?? false;
-            bool rulesEnabled = _applyRulesets?.Value ?? true;
+            bool rulesEnabled = _applyRulesets?.Value ?? false;
             string activeRuleset = rulesEnabled ? PlayerPrefs.GetString("HostRuleset", "ranked") : "none";
 
             float panelWidth = 450f;
@@ -181,15 +181,17 @@ namespace SBGL.UnifiedMod.Features {
             if (_tooltipRanked == null)
             {
                 int courseCount = Core.MapPoolConfig.GetApprovedCourses().Count;
-                _tooltipRanked = Core.Season1RuleSet.BuildRulesDescription(Core.Season1RuleSet.GetRulesSettings())
-                    + $"\n<b>Banned Items:</b> <color=#AAFFAA>{Core.Season1RuleSet.BuildBannedItemsDescription()}</color>"
-                    + $"\n<b>Courses:</b> <color=#AAFFAA>Random ({courseCount} approved)</color>";
+                _tooltipRanked = Core.Season2RuleSet.BuildRulesDescription(Core.Season2RuleSet.GetRankedRulesSettings())
+                    + "\n<b>Items:</b> <color=#AAFFAA>Game defaults</color>"
+                    + $"\n<b>Courses:</b> <color=#AAFFAA>Random ({courseCount} maps)</color>"
+                    + "\n<b>Holes:</b> <color=#AAFFAA>9</color>";
             }
             if (_tooltipPro == null)
             {
-                _tooltipPro = Core.Season1RuleSet.BuildRulesDescription(Core.Season1RuleSet.GetProSeriesRulesSettings())
-                    + "\n<b>Items:</b> <color=#AAFFAA>Game defaults (all enabled)</color>"
-                    + "\n<b>Courses:</b> <color=#AAFFAA>Manual selection</color>";
+                _tooltipPro = Core.Season2RuleSet.BuildRulesDescription(Core.Season2RuleSet.GetProSeriesRulesSettings())
+                    + "\n<b>Items:</b> <color=#AAFFAA>Game defaults</color>"
+                    + "\n<b>Courses:</b> <color=#AAFFAA>Manual selection</color>"
+                    + "\n<b>Holes:</b> <color=#AAFFAA>9</color>";
             }
             if (_tooltipCasual == null)
             {
@@ -282,15 +284,15 @@ namespace SBGL.UnifiedMod.Features {
             // Store the ruleset choice
             PlayerPrefs.SetString("HostRuleset", rulesetName);
             
-            int season = Core.Season1RuleSet.SEASON;
+            int season = Core.Season2RuleSet.SEASON;
 
             // Update match type to indicate the selected ruleset
             if (rulesetName == "ranked") {
-                PlayerPrefs.SetString("MatchType", Core.Season1RuleSet.MATCH_TYPE_RANKED);
+                PlayerPrefs.SetString("MatchType", Core.Season2RuleSet.MATCH_TYPE_RANKED);
             } else if (rulesetName == "pro_series") {
-                PlayerPrefs.SetString("MatchType", Core.Season1RuleSet.MATCH_TYPE_PRO_SERIES);
+                PlayerPrefs.SetString("MatchType", Core.Season2RuleSet.MATCH_TYPE_PRO_SERIES);
             } else if (rulesetName == "casual") {
-                PlayerPrefs.SetString("MatchType", Core.Season1RuleSet.MATCH_TYPE_CASUAL);
+                PlayerPrefs.SetString("MatchType", Core.Season2RuleSet.MATCH_TYPE_CASUAL);
                 season = 0;
             }
             

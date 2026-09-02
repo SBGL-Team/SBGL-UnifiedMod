@@ -34,7 +34,11 @@ namespace SBGLeagueAutomation
         internal static void HandleIncomingMatchIdBroadcast(string matchId)
         {
             if (!string.IsNullOrEmpty(matchId))
+            {
                 ReceivedP2PMatchId = matchId;
+                // Update the shared static so non-host clients see the match ID in the leaderboard display
+                SBGLPlugin.CurrentMatchId = matchId;
+            }
         }
 
         /// <summary>Broadcasts a Match ID to all known peers over Steam P2P.</summary>
@@ -77,6 +81,8 @@ namespace SBGLeagueAutomation
         private Func<string> _getBaseApiUrl;
         private Action<string> _logger;
         private Func<string, string, string, Action<string>, IEnumerator> _callApi;
+        // Writes go through the mod gateway: (action, payload, onSuccess, onError)
+        private Func<string, JObject, Action<JObject>, Action<string>, IEnumerator> _callGateway;
         private Func<string, JObject> _parseApiSingleObject;
         private Action<IEnumerator> _startCoroutine;
 
@@ -84,12 +90,14 @@ namespace SBGLeagueAutomation
             Func<string> getBaseApiUrl,
             Action<string> logger,
             Func<string, string, string, Action<string>, IEnumerator> callApi,
+            Func<string, JObject, Action<JObject>, Action<string>, IEnumerator> callGateway,
             Func<string, JObject> parseApiSingleObject,
             Action<IEnumerator> startCoroutine)
         {
             _getBaseApiUrl = getBaseApiUrl;
             _logger = logger;
             _callApi = callApi;
+            _callGateway = callGateway;
             _parseApiSingleObject = parseApiSingleObject;
             _startCoroutine = startCoroutine;
         }
@@ -120,10 +128,10 @@ namespace SBGLeagueAutomation
 
             string normalizedName = playerName.Trim();
             string escapedName = normalizedName.Replace("\\", "\\\\").Replace("\"", "\\\"");
-            string query = "{\"$or\":[{\"display_name\":\"" + escapedName + "\"},{\"ign\":\"" + escapedName + "\"}]}";
             string resolvedId = null;
 
-            yield return _callApi($"/Player?q={UnityWebRequest.EscapeURL(query)}&limit=1", "GET", "", (res) =>
+            // ilike, not eq: in-game names differ in case from the registered display_name
+            yield return _callApi($"/player?display_name=ilike.{UnityWebRequest.EscapeURL(escapedName)}&limit=1", "GET", "", (res) =>
             {
                 if (string.IsNullOrWhiteSpace(res))
                 {
@@ -187,7 +195,7 @@ namespace SBGLeagueAutomation
 
                 int casualMatchesPlayed = 0;
                 string resolvedDisplayName = leaderboardName;
-                yield return _callApi($"/Player/{playerId}", "GET", "", (res) =>
+                yield return _callApi($"/player?id=eq.{playerId}&select=*", "GET", "", (res) =>
                 {
                     JObject profile = _parseApiSingleObject(res);
                     if (profile != null)
@@ -200,7 +208,7 @@ namespace SBGLeagueAutomation
                 int updatedCount = casualMatchesPlayed + 1;
                 string json = "{" + $"\"casual_matches_played\":{updatedCount}" + "}";
                 bool updated = false;
-                yield return _callApi($"/Player/{playerId}", "PUT", json, (res) =>
+                yield return _callApi($"/player?id=eq.{playerId}", "PATCH", json, (res) =>
                 {
                     if (_parseApiSingleObject(res) != null)
                     {
@@ -289,6 +297,15 @@ namespace SBGLeagueAutomation
 
             string matchId = null;
 
+            // The gateway creates the Match and all of its MatchEntry rows in one call, so the
+            // roster has to be resolved before submitting — entries cannot be added afterwards.
+            _playerMatchEntryIds.Clear();
+            _lastSubmittedScores.Clear();
+            _lastSubmittedScoresVsPar.Clear();
+
+            List<RosterPlayer> roster = null;
+            yield return BuildRoster(playerIds, startingLeaderboard, (built) => roster = built);
+
             // If a peer with a higher mod version is in the lobby, let them create the Match record.
             // Wait up to 15 seconds for their SBGL_MATCH_ID: broadcast, then fall back to submitting our own.
             if (CompPluginCheck.HasHigherVersionPeer())
@@ -307,12 +324,12 @@ namespace SBGLeagueAutomation
                 else
                 {
                     Log("<color=yellow>[Match Creation] No Match ID received from higher-version peer within 15s — submitting own Match record</color>");
-                    yield return SubmitMatchEntry(matchStats, (id) => matchId = id);
+                    yield return SubmitMatchWithRoster(matchStats, roster, (id) => matchId = id);
                 }
             }
             else
             {
-                yield return SubmitMatchEntry(matchStats, (id) => matchId = id);
+                yield return SubmitMatchWithRoster(matchStats, roster, (id) => matchId = id);
             }
 
             if (string.IsNullOrEmpty(matchId))
@@ -325,130 +342,47 @@ namespace SBGLeagueAutomation
             Log($"<color=green>[Match Creation] ✓ Match created: {matchId}</color>");
 
             // Step 1b: Link Match ID back to the MatchmakingSession so the website can detect mod-submitted matches
-            yield return _callApi($"/MatchmakingSession/{_currentSession.id}", "PUT", $"{{\"match_id\":\"{matchId}\"}}", (res) =>
+            var sessionLinkPayload = new JObject {
+                ["matchmaking_session_id"] = _currentSession.id,
+                ["match_id"] = matchId
+            };
+            yield return _callGateway("session.update", sessionLinkPayload, (res) =>
             {
-                try
-                {
-                    JObject response = _parseApiSingleObject(res);
-                    if (response != null)
-                        Log($"<color=green>[Match Creation] ✓ MatchmakingSession {_currentSession.id} linked to match: {matchId}</color>");
-                    else
-                        Log($"<color=yellow>[Match Creation] Could not confirm MatchmakingSession update</color>");
-                }
-                catch (System.Exception ex)
-                {
-                    Log($"<color=yellow>[Match Creation] Error updating MatchmakingSession: {ex.Message}</color>");
-                }
+                Log($"<color=green>[Match Creation] ✓ MatchmakingSession {_currentSession.id} linked to match: {matchId}</color>");
+            }, (err) =>
+            {
+                Log($"<color=yellow>[Match Creation] Could not confirm MatchmakingSession update: {err}</color>");
             });
 
-            // Step 2: Create initial MatchEntry records for all players
-            _playerMatchEntryIds.Clear();
-            _lastSubmittedScores.Clear();
-            _lastSubmittedScoresVsPar.Clear();
-
-            foreach (string playerId in playerIds)
+            // Step 2: Fall back to reading entry IDs for any player the submit response didn't cover.
+            foreach (var rosterPlayer in roster)
             {
-                string playerName = null;
-                string preMatchMmr = null;
-                int gamePoints = 0;
-                int scoreVsPar = 0;
+                if (_playerMatchEntryIds.ContainsKey(rosterPlayer.PlayerId)) continue;
 
-                // Get player name, MMR and initial scores
-                if (playerId == _userProfile.id)
-                {
-                    playerName = _userProfile.display_name;
-                    preMatchMmr = _userProfile.current_mmr.ToString();
-                    Log($"<color=cyan>[Match Creation] Current player: {playerName} (MMR: {preMatchMmr})</color>");
-                }
-                else
-                {
-                    yield return _callApi($"/Player/{playerId}", "GET", "", (res) =>
-                    {
-                        try
-                        {
-                            JObject profile = _parseApiSingleObject(res);
-                            if (profile != null)
-                            {
-                                playerName = (string)profile["display_name"];
-                                if (string.IsNullOrEmpty(playerName))
-                                {
-                                    Log($"<color=yellow>[Match Creation] Player {playerId} has no display_name, using ID</color>");
-                                    playerName = playerId;
-                                }
-                                object mmrObj = profile["current_mmr"];
-                                if (mmrObj != null)
-                                {
-                                    preMatchMmr = mmrObj.ToString();
-                                }
-                                Log($"<color=cyan>[Match Creation] Fetched player: {playerName} (MMR: {preMatchMmr})</color>");
-                            }
-                            else
-                            {
-                                Log($"<color=yellow>[Match Creation] Failed to fetch Player {playerId} - response null</color>");
-                                playerName = playerId;
-                            }
-                        }
-                        catch (System.Exception ex)
-                        {
-                            Log($"<color=yellow>[Match Creation] Error fetching Player {playerId}: {ex.Message}</color>");
-                            playerName = playerId;
-                        }
-                    });
-                }
-
-                if (!string.IsNullOrEmpty(playerName))
-                {
-                    if (_cachedLeaderboardScores.TryGetValue(playerName, out int score))
-                    {
-                        gamePoints = score;
-                        _cachedLeaderboardScoresVsPar.TryGetValue(playerName, out scoreVsPar);
-                    }
-
-                    _lastSubmittedScores[playerName] = gamePoints;
-                    _lastSubmittedScoresVsPar[playerName] = scoreVsPar;
-                }
-
-                // Get starting position from leaderboard
-                int startingPosition = GetPlayerFinishPosition(playerName, startingLeaderboard);
-
-                // Create MatchEntry with MMR snapshot and adjusted score
-                int adjustedScore = gamePoints + (scoreVsPar * -10);
-                string mmrField = !string.IsNullOrEmpty(preMatchMmr) ? $",\"pre_match_mmr\":{preMatchMmr}" : "";
-                string posField = startingPosition > 0 ? $",\"finish_position\":{startingPosition}" : "";
-                string modVer = UnifiedPlugin.Instance?.Info.Metadata.Version?.ToString() ?? "unknown";
-                string json = "{" +
-                    $"\"match_id\":\"{matchId}\"," +
-                    $"\"player_id\":\"{playerId}\"," +
-                    $"\"player_name\":\"{playerName ?? "Unknown"}\"," +
-                    $"\"game_points\":{gamePoints}," +
-                    $"\"over_under\":{scoreVsPar}," +
-                    $"\"score_vs_par\":{scoreVsPar}," +
-                    $"\"adjusted_match_score\":{adjustedScore}" +
-                    mmrField +
-                    posField +
-                    $",\"notes\":\"Progressive match tracking - created at round start (Mod v{modVer})\"" +
-                "}";
-
-                Log($"<color=cyan>[Match Creation] JSON: {json}</color>");
-
-                string entryId = null;
-                yield return _callApi("/MatchEntry", "POST", json, (res) =>
+                string resolvedEntryId = null;
+                yield return _callApi($"/match_entry?match_id=eq.{matchId}&player_id=eq.{rosterPlayer.PlayerId}&limit=1", "GET", "", (res) =>
                 {
                     try
                     {
-                        JObject response = _parseApiSingleObject(res);
-                        if (response != null)
-                        {
-                            entryId = (string)response["id"];
-                            _playerMatchEntryIds[playerId] = entryId;
-                            Log($"<color=green>[Match Creation] ✓ MatchEntry created for {playerName}: {entryId}</color>");
-                        }
+                        JToken token = JToken.Parse(res ?? "");
+                        JObject row = token is JArray arr ? arr.OfType<JObject>().FirstOrDefault() : token as JObject;
+                        resolvedEntryId = (string)row?["id"];
                     }
                     catch (System.Exception ex)
                     {
-                        Log($"<color=yellow>[Match Creation] Could not parse MatchEntry: {ex.Message}</color>");
+                        Log($"<color=yellow>[Match Creation] Could not read MatchEntry for {rosterPlayer.PlayerName}: {ex.Message}</color>");
                     }
                 });
+
+                if (!string.IsNullOrWhiteSpace(resolvedEntryId))
+                {
+                    _playerMatchEntryIds[rosterPlayer.PlayerId] = resolvedEntryId;
+                    Log($"<color=green>[Match Creation] ✓ Resolved MatchEntry for {rosterPlayer.PlayerName}: {resolvedEntryId}</color>");
+                }
+                else
+                {
+                    Log($"<color=yellow>[Match Creation] No MatchEntry found for {rosterPlayer.PlayerName} — live score updates will be skipped for them</color>");
+                }
             }
 
             _matchEntriesCreated = true;
@@ -542,51 +476,170 @@ namespace SBGLeagueAutomation
 
             int adjustedScore = gamePoints + (scoreVsPar * -10);
             string modVer = UnifiedPlugin.Instance?.Info.Metadata.Version?.ToString() ?? "unknown";
-            string json = "{" +
-                $"\"game_points\":{gamePoints}," +
-                $"\"over_under\":{scoreVsPar}," +
-                $"\"score_vs_par\":{scoreVsPar}," +
-                $"\"adjusted_match_score\":{adjustedScore}," +
-                $"\"finish_position\":{finishPosition}," +
-                $"\"notes\":\"Updated after hole completion (Mod v{modVer})\"" +
-            "}";
+            var payload = new JObject {
+                ["match_entry_id"] = entryId,
+                ["game_points"] = gamePoints,
+                ["over_under"] = scoreVsPar,
+                ["score_vs_par"] = scoreVsPar,
+                ["adjusted_match_score"] = adjustedScore,
+                ["finish_position"] = finishPosition,
+                ["notes"] = $"Updated after hole completion (Mod v{modVer})"
+            };
 
-            yield return _callApi($"/MatchEntry/{entryId}", "PUT", json, (res) =>
+            yield return _callGateway("entry.update", payload, (res) =>
             {
-                try
-                {
-                    JObject response = _parseApiSingleObject(res);
-                    if (response != null)
-                    {
-                        Log($"<color=green>[Score Update] ✓ MatchEntry updated for {playerName}</color>");
-                    }
-                }
-                catch (System.Exception ex)
-                {
-                    Log($"<color=yellow>[Score Update] Could not update MatchEntry: {ex.Message}</color>");
-                }
+                Log($"<color=green>[Score Update] ✓ MatchEntry updated for {playerName}</color>");
+            }, (err) =>
+            {
+                Log($"<color=yellow>[Score Update] Could not update MatchEntry: {err}</color>");
             });
         }
 
-        private IEnumerator SubmitMatchEntry(SBGLPlugin.MatchStats stats, System.Action<string> onMatchIdReceived)
+        /// <summary>
+        /// A player as submitted to the gateway in match.submit's players array.
+        /// </summary>
+        private class RosterPlayer
+        {
+            public string PlayerId;
+            public string PlayerName;
+            public string PreMatchMmr;
+            public int GamePoints;
+            public int ScoreVsPar;
+            public int FinishPosition;
+        }
+
+        /// <summary>
+        /// Resolves display name, pre-match MMR and starting scores for every player so the
+        /// whole roster can be submitted in a single match.submit call.
+        /// </summary>
+        private IEnumerator BuildRoster(
+            List<string> playerIds,
+            List<LiveLeaderboardPlugin.SBGLPlayer> startingLeaderboard,
+            Action<List<RosterPlayer>> onBuilt)
+        {
+            var roster = new List<RosterPlayer>();
+
+            foreach (string playerId in playerIds ?? new List<string>())
+            {
+                string playerName = null;
+                string preMatchMmr = null;
+                int gamePoints = 0;
+                int scoreVsPar = 0;
+
+                if (playerId == _userProfile.id)
+                {
+                    playerName = _userProfile.display_name;
+                    preMatchMmr = _userProfile.current_mmr.ToString();
+                    Log($"<color=cyan>[Match Creation] Current player: {playerName} (MMR: {preMatchMmr})</color>");
+                }
+                else
+                {
+                    yield return _callApi($"/player?id=eq.{playerId}&select=*", "GET", "", (res) =>
+                    {
+                        try
+                        {
+                            JObject profile = _parseApiSingleObject(res);
+                            if (profile != null)
+                            {
+                                playerName = (string)profile["display_name"];
+                                if (string.IsNullOrEmpty(playerName))
+                                {
+                                    Log($"<color=yellow>[Match Creation] Player {playerId} has no display_name, using ID</color>");
+                                    playerName = playerId;
+                                }
+                                object mmrObj = profile["current_mmr"];
+                                if (mmrObj != null)
+                                {
+                                    preMatchMmr = mmrObj.ToString();
+                                }
+                                Log($"<color=cyan>[Match Creation] Fetched player: {playerName} (MMR: {preMatchMmr})</color>");
+                            }
+                            else
+                            {
+                                Log($"<color=yellow>[Match Creation] Failed to fetch Player {playerId} - response null</color>");
+                                playerName = playerId;
+                            }
+                        }
+                        catch (System.Exception ex)
+                        {
+                            Log($"<color=yellow>[Match Creation] Error fetching Player {playerId}: {ex.Message}</color>");
+                            playerName = playerId;
+                        }
+                    });
+                }
+
+                if (!string.IsNullOrEmpty(playerName))
+                {
+                    if (_cachedLeaderboardScores.TryGetValue(playerName, out int score))
+                    {
+                        gamePoints = score;
+                        _cachedLeaderboardScoresVsPar.TryGetValue(playerName, out scoreVsPar);
+                    }
+
+                    _lastSubmittedScores[playerName] = gamePoints;
+                    _lastSubmittedScoresVsPar[playerName] = scoreVsPar;
+                }
+
+                roster.Add(new RosterPlayer
+                {
+                    PlayerId = playerId,
+                    PlayerName = string.IsNullOrWhiteSpace(playerName) ? playerId : playerName,
+                    PreMatchMmr = preMatchMmr,
+                    GamePoints = gamePoints,
+                    ScoreVsPar = scoreVsPar,
+                    FinishPosition = GetPlayerFinishPosition(playerName, startingLeaderboard)
+                });
+            }
+
+            onBuilt?.Invoke(roster);
+        }
+
+        /// <summary>
+        /// Submits the Match and every MatchEntry in one idempotent match.submit call.
+        /// Resubmitting the same matchmaking session returns the existing match rather than
+        /// creating a second one, so this is safe to retry.
+        /// </summary>
+        private IEnumerator SubmitMatchWithRoster(SBGLPlugin.MatchStats stats, List<RosterPlayer> roster, System.Action<string> onMatchIdReceived)
         {
             if (stats == null || _currentSession == null) yield break;
 
-            string seasonId = Season1RuleSet.SEASON_ID;
+            if (roster == null || roster.Count == 0)
+            {
+                Log("<color=red>[Match Stats] Refusing to submit a match with an empty roster — entries cannot be added after submission.</color>");
+                yield break;
+            }
+
             bool isProSeries = IsProSeriesMatchType(stats.match_type);
-            string apiMatchType = isProSeries ? "pro_series" : "mmr";
-            string mode = isProSeries ? "Pro Series" : "Ranked";
+
+            var players = new JArray();
+            foreach (var rosterPlayer in roster)
+            {
+                var entry = new JObject {
+                    ["player_id"] = rosterPlayer.PlayerId,
+                    ["player_name"] = rosterPlayer.PlayerName,
+                    ["game_points"] = rosterPlayer.GamePoints,
+                    ["over_under"] = rosterPlayer.ScoreVsPar
+                };
+                if (rosterPlayer.FinishPosition > 0)
+                {
+                    entry["finish_position"] = rosterPlayer.FinishPosition;
+                }
+                if (!string.IsNullOrWhiteSpace(rosterPlayer.PreMatchMmr)
+                    && float.TryParse(rosterPlayer.PreMatchMmr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float preMmr))
+                {
+                    entry["pre_match_mmr"] = preMmr;
+                }
+                players.Add(entry);
+            }
 
             var payload = new JObject {
                 ["matchmaking_session_id"] = _currentSession.id,
-                ["season_id"] = seasonId,
-                ["match_date"] = stats.match_date,
-                ["match_type"] = apiMatchType,
+                ["season_id"] = Season1RuleSet.SEASON_ID,
+                ["match_datetime_utc"] = stats.match_date,
+                ["mode"] = Season2RuleSet.ToGatewayMode(stats.match_type),
                 ["course_name"] = stats.course_name,
-                ["player_count"] = 2,
-                ["status"] = "Pending",
                 ["submitted_by_name"] = stats.player_name,
-                ["mode"] = mode,
+                ["players"] = players,
                 ["notes"] = $"Auto-submitted via SBGL Unified Mod v{UnifiedPlugin.Instance?.Info.Metadata.Version?.ToString() ?? "unknown"}"
             };
 
@@ -602,26 +655,56 @@ namespace SBGLeagueAutomation
                     payload["pro_series_event_name"] = proSeriesEventName;
             }
 
-            string json = payload.ToString(Newtonsoft.Json.Formatting.None);
+            Log($"<color=cyan>[Match Stats] Submitting match with {roster.Count} players via gateway</color>");
 
-            Log($"<color=cyan>[Match Stats] Submitting Match entry to API</color>");
-            Log($"<color=cyan>[Match Stats] Full URL: {_getBaseApiUrl()}/Match</color>");
-            Log($"<color=cyan>[Match Stats] Payload: {json}</color>");
-
-            yield return _callApi("/Match", "POST", json, (res) =>
+            yield return _callGateway("match.submit", payload, (response) =>
             {
-                JObject response = _parseApiSingleObject(res);
-                if (response != null)
-                {
-                    string entryId = (string)response["id"] ?? "unknown";
-                    Log($"<color=green>[Match Stats] ✓ Match entry created (ID: {entryId})</color>");
-                    onMatchIdReceived?.Invoke(entryId);
-                }
-                else
+                string matchId = response == null ? null : ((string)response["match_id"] ?? (string)response["id"]);
+                if (string.IsNullOrWhiteSpace(matchId))
                 {
                     Log("<color=yellow>[Match Stats] Response received but could not parse ID</color>");
+                    return;
                 }
-            });
+
+                CacheEntryIdsFromSubmitResponse(response);
+                Log($"<color=green>[Match Stats] ✓ Match submitted (ID: {matchId})</color>");
+                onMatchIdReceived?.Invoke(matchId);
+            }, null);
+        }
+
+        /// <summary>
+        /// Caches the per-player MatchEntry IDs returned by match.submit so live score updates
+        /// can address them via entry.update. The gateway's exact response shape is not
+        /// documented, so several plausible shapes are accepted.
+        /// </summary>
+        private void CacheEntryIdsFromSubmitResponse(JObject response)
+        {
+            if (response == null) return;
+
+            JArray entries = response["entries"] as JArray
+                ?? response["match_entries"] as JArray
+                ?? response["players"] as JArray;
+
+            if (entries == null)
+            {
+                Log("<color=cyan>[Match Stats] Submit response carried no entry IDs — live score updates will be skipped.</color>");
+                return;
+            }
+
+            int cached = 0;
+            foreach (var token in entries.OfType<JObject>())
+            {
+                string playerId = (string)token["player_id"];
+                string entryId = (string)token["id"] ?? (string)token["entry_id"] ?? (string)token["match_entry_id"];
+
+                if (!string.IsNullOrWhiteSpace(playerId) && !string.IsNullOrWhiteSpace(entryId))
+                {
+                    _playerMatchEntryIds[playerId] = entryId;
+                    cached++;
+                }
+            }
+
+            Log($"<color=cyan>[Match Stats] Cached {cached} MatchEntry ID(s) from submit response.</color>");
         }
 
         private int GetPlayerFinishPosition(string playerName, List<LiveLeaderboardPlugin.SBGLPlayer> leaderboard)
@@ -652,8 +735,7 @@ namespace SBGLeagueAutomation
             var ordered = leaderboard
                 .Where(p => p != null && !string.IsNullOrWhiteSpace(p.Name))
                 .Select(p => new { Player = p, Stroke = ParseScoreVsPar(p.RawStrokes) })
-                .OrderByDescending(x => x.Player.AdjustedPoints)
-                .ThenByDescending(x => x.Player.BaseScore)
+                .OrderByDescending(x => x.Player.BaseScore)
                 .ThenBy(x => x.Stroke)
                 .ThenBy(x => x.Player.Name, StringComparer.OrdinalIgnoreCase)
                 .ToList();

@@ -10,102 +10,146 @@ using System.Linq;
 using System.Reflection;
 using System.Text.RegularExpressions;
 using Newtonsoft.Json.Linq;
+using Mirror;
+using UnityEngine.Localization;
 
 namespace SBGLLiveLeaderboard
 {
     public class LiveLeaderboardPlugin : MonoBehaviour
     {
-        // Config entry references (injected by UnifiedPlugin)
-        private ConfigEntry<float> _configWidth, _configMaxHeight, _configPosX, _configPosY, _configOpacity;
-        private ConfigEntry<int> _configMaxPlayers;
+        public static LiveLeaderboardPlugin Instance { get; private set; }
 
+        // Config entry references (injected by UnifiedPlugin)
+        private ConfigEntry<int> _configMaxPlayers;
+        private ConfigEntry<Key> _configViewToggleKey;
 
         private const float K_FACTOR = 24f;
 
         // Config helpers using ConfigEntry references
-        private float ConfigWidth { get => _configWidth?.Value ?? PlayerPrefs.GetFloat("LL_Width", 350f); }
-        private float ConfigMaxHeight { get => _configMaxHeight?.Value ?? PlayerPrefs.GetFloat("LL_MaxHeight", 999f); }
-        private float ConfigPosX { get => _configPosX?.Value ?? PlayerPrefs.GetFloat("LL_PosX", 5f); }
-        private float ConfigPosY { get => _configPosY?.Value ?? PlayerPrefs.GetFloat("LL_PosY", 200f); }
-        private float ConfigOpacity { get => _configOpacity?.Value ?? PlayerPrefs.GetFloat("LL_Opacity", 0.85f); }
         private int ConfigMaxPlayers { get => _configMaxPlayers?.Value ?? PlayerPrefs.GetInt("LL_MaxPlayers", 16); }
-        private Key ToggleKey => Key.F8;
+        private Key ViewToggleKey    { get => _configViewToggleKey?.Value ?? Key.F8; }
 
         // Set config entries from parent plugin
-        public void SetConfig(ConfigEntry<float> width, ConfigEntry<float> maxHeight, ConfigEntry<float> posX, 
-            ConfigEntry<float> posY, ConfigEntry<float> opacity, ConfigEntry<int> maxPlayers)
+        public void SetConfig(ConfigEntry<int> maxPlayers, ConfigEntry<Key> viewToggleKey = null)
         {
-            _configWidth = width;
-            _configMaxHeight = maxHeight;
-            _configPosX = posX;
-            _configPosY = posY;
-            _configOpacity = opacity;
-            _configMaxPlayers = maxPlayers;
+            _configMaxPlayers    = maxPlayers;
+            _configViewToggleKey = viewToggleKey;
         }
 
-        private bool _showWindow = true;
-        private float _updateInterval = 2.0f;
+        private float _updateInterval = 30f; // Slow background poll — only needed for MMR refresh; data comes from Scoreboard.Refresh() hook
         private float _nextUpdateTime = 0f;
-        private float _lastOpacity = -1f;
 
         private List<SBGLPlayer> _persistentLeaderboard = new List<SBGLPlayer>();
         private List<SBGLPlayer> _finalLeaderboardSnapshot = new List<SBGLPlayer>(); // Store final scores when leaving gameplay
         private bool _showFinalSnapshot = false; // True when in driving range to freeze display
         private readonly Dictionary<string, SBGLPlayer> _lastKnownRoundPlayers = new Dictionary<string, SBGLPlayer>(System.StringComparer.OrdinalIgnoreCase);
         private bool _roundCacheActive = false;
+        private bool _isInSbglGameplay = false;
+        private bool _cachedInMenu = false;
+        private bool _cachedInDrivingRange = false;
+        private string _cachedSceneName = string.Empty;
+        private int _cachedTotalHoles = 9;
+        private string _cachedCourseName = "";
+        private int _cachedHoleGlobalIndex = -1;
+        // Set by LeaderboardPatches when the native scoreboard would open in an SBGL lobby
+        public static bool SbglOverlayOpen = false;
+
+        // When true, the native in-game scoreboard is shown instead of the mod overlay (default: true)
+        public static bool UseNativeScoreboard
+        {
+            get => _useNativeScoreboard;
+            set { _useNativeScoreboard = value; PlayerPrefs.SetInt("LL_UseNative", value ? 1 : 0); }
+        }
+        private static bool _useNativeScoreboard = PlayerPrefs.GetInt("LL_UseNative", 1) == 1;
         private Dictionary<string, (string mmr, float lastFetchTime)> _mmrCache = new Dictionary<string, (string, float)>();
         private HashSet<string> _pendingRequests = new HashSet<string>();
-        
+        // Clan tags keyed by scoreboard display name. Populated as a follow-up to the MMR lookup,
+        // which is what resolves a scoreboard name to an SBGL player id in the first place.
+        private Dictionary<string, string> _clanTagCache = new Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase);
+        // Registered display_name keyed by scoreboard name, so the overlay can present the casing
+        // the player actually registered even though lookups are case-insensitive.
+        private Dictionary<string, string> _canonicalNameCache = new Dictionary<string, string>(System.StringComparer.OrdinalIgnoreCase);
+
         private FieldInfo _entriesField;
         private Scoreboard _cachedScoreboard;
-        private GUIStyle _windowStyle, _centeredStyle, _headerStyle, _nameStyle, _posStyle, _negStyle;
-        private Texture2D _blackTexture;
+        private GUIStyle _centeredStyle, _headerStyle, _nameStyle, _posStyle, _negStyle, _solidStyle, _toggleStyle;
+        private Texture2D _whiteTexture, _toggleTex, _toggleHoverTex;
+
 
         public class SBGLPlayer {
             public string Name;
             public int BaseScore;
-            public int AdjustedPoints;
             public string RawStrokes;
             public string MMR = "...";
-            public string ProjectedDisplay = "..."; 
+            public string ProjectedDisplay = "...";
+            public bool IsSpectator;
+            public string ClanTag = ""; // faction clan_tag, shown before the name
+
+            /// <summary>
+            /// The registered display_name from the site, which may differ in case from the
+            /// in-game Name (e.g. "JaBob" vs "JaBoB"). Presentation only — Name stays the key
+            /// used for score lookups, so it must not be overwritten with this.
+            /// </summary>
+            public string CanonicalName = "";
+
+            /// <summary>Registered casing when known, otherwise the name as the game renders it.</summary>
+            public string PresentationName =>
+                string.IsNullOrWhiteSpace(CanonicalName) ? Name : CanonicalName;
+
+            /// <summary>Name prefixed with the clan tag when the player belongs to a faction.</summary>
+            public string DisplayNameWithTag =>
+                string.IsNullOrWhiteSpace(ClanTag) ? PresentationName : $"[{ClanTag.ToUpper()}] {PresentationName}";
         }
 
         void Awake()
         {
-            // Initialize PlayerPrefs with defaults
-            if (!PlayerPrefs.HasKey("LL_Width")) PlayerPrefs.SetFloat("LL_Width", 350f);
-            if (!PlayerPrefs.HasKey("LL_MaxHeight")) PlayerPrefs.SetFloat("LL_MaxHeight", 999f);
-            if (!PlayerPrefs.HasKey("LL_PosX")) PlayerPrefs.SetFloat("LL_PosX", 5f);
-            if (!PlayerPrefs.HasKey("LL_PosY")) PlayerPrefs.SetFloat("LL_PosY", 200f);
-            if (!PlayerPrefs.HasKey("LL_Opacity")) PlayerPrefs.SetFloat("LL_Opacity", 0.85f);
+            Instance = this;
+
             if (!PlayerPrefs.HasKey("LL_MaxPlayers")) PlayerPrefs.SetInt("LL_MaxPlayers", 16);
 
             _entriesField = typeof(Scoreboard).GetField("entries", BindingFlags.NonPublic | BindingFlags.Instance);
-            _blackTexture = new Texture2D(1, 1);
-            
-            // Subscribe to API configuration changes
+            _whiteTexture = new Texture2D(1, 1);
+            _whiteTexture.SetPixel(0, 0, Color.white);
+            _whiteTexture.Apply();
+
             SBGL.UnifiedMod.Core.UnifiedPlugin.ApiConfigChanged += OnApiConfigChanged;
-            
+
             UnityEngine.Object.DontDestroyOnLoad(this.gameObject);
+        }
+
+        void OnDestroy()
+        {
+            if (Instance == this) Instance = null;
         }
 
         private void OnApiConfigChanged()
         {
             // Clear cache and force immediate resync when API changes
             _mmrCache.Clear();
+            _clanTagCache.Clear();
+            _canonicalNameCache.Clear();
             _pendingRequests.Clear();
             _nextUpdateTime = Time.time;
         }
 
         void Update()
         {
-            if (Keyboard.current != null && Keyboard.current[ToggleKey].wasPressedThisFrame)
-                _showWindow = !_showWindow;
+            // Configurable key toggles between SBGL leaderboard and native scoreboard
+            var kb = Keyboard.current;
+            if (kb != null && kb[ViewToggleKey].wasPressedThisFrame)
+                UseNativeScoreboard = !UseNativeScoreboard;
 
-            // Check current scene and adjust behavior
+            // Cache scene name — only recompute when it actually changes
             string currentScene = SceneManager.GetActiveScene().name ?? string.Empty;
-            bool inDrivingRange = currentScene.Contains("Driving") || currentScene.Contains("Range");
-            bool inMenuScene = currentScene.ToLowerInvariant().Contains("menu");
+            if (currentScene != _cachedSceneName)
+            {
+                _cachedSceneName = currentScene;
+                string lower = currentScene.ToLowerInvariant();
+                _cachedInMenu = lower.Contains("menu");
+                _cachedInDrivingRange = lower.Contains("driving") || lower.Contains("range");
+            }
+            bool inDrivingRange = _cachedInDrivingRange;
+            bool inMenuScene = _cachedInMenu;
 
             if (inDrivingRange) {
                 _showFinalSnapshot = true;  // Freeze on final snapshot
@@ -118,6 +162,34 @@ namespace SBGLLiveLeaderboard
                 ResetForMainMenu();
             }
 
+            // Safety poll: the ForceDisplayScoreboardChanged event can fire before the new scene's
+            // Scoreboard subscribes, causing SbglOverlayOpen to get stuck true. Clear it whenever
+            // neither the native scoreboard nor ForceDisplayScoreboard actually wants it open.
+            if (SbglOverlayOpen && !CourseManager.ForceDisplayScoreboard && !Scoreboard.IsVisible)
+                SbglOverlayOpen = false;
+
+            _isInSbglGameplay = !inMenuScene && SbglOverlayOpen;
+
+            if (_isInSbglGameplay)
+            {
+                var matchSetupMenu = SingletonNetworkBehaviour<MatchSetupMenu>.HasInstance
+                    ? SingletonNetworkBehaviour<MatchSetupMenu>.Instance : null;
+                if (matchSetupMenu != null)
+                    _cachedTotalHoles = matchSetupMenu.randomCupNumHoles;
+
+                int globalIndex = CourseManager.CurrentHoleGlobalIndex;
+                if (globalIndex != _cachedHoleGlobalIndex)
+                {
+                    _cachedHoleGlobalIndex = globalIndex;
+                    try
+                    {
+                        var locName = CourseManager.GetCurrentHoleLocalizedName();
+                        _cachedCourseName = locName != null ? locName.GetLocalizedString() : "";
+                    }
+                    catch { _cachedCourseName = ""; }
+                }
+            }
+
             if (Time.time >= _nextUpdateTime)
             {
                 ScrapeData();
@@ -127,168 +199,343 @@ namespace SBGLLiveLeaderboard
 
         void OnGUI()
         {
-            // Use final snapshot if in driving range, otherwise use live data
-            List<SBGLPlayer> displayLeaderboard = _showFinalSnapshot && _finalLeaderboardSnapshot.Count > 0 
-                ? _finalLeaderboardSnapshot 
-                : _persistentLeaderboard;
-            
-            // If we're trying to show final snapshot but it's empty yet, still show the window (prevent flickering)
-            if (!_showWindow) return;
-            if (!_showFinalSnapshot && displayLeaderboard.Count == 0) return;
-
             float scale = Screen.height / 1080f;
-            float edgePadding = 4f * scale;
-            float headerHeight = 26f * scale;
-            float baseRowHeight = 22f * scale;
 
-            if (_windowStyle == null || Mathf.Abs(_lastOpacity - ConfigOpacity) > 0.01f)
+            if (_solidStyle == null)
             {
-                _lastOpacity = ConfigOpacity;
-                _blackTexture.SetPixel(0, 0, new Color(0, 0, 0, _lastOpacity));
-                _blackTexture.Apply();
-
-                _windowStyle = new GUIStyle(GUI.skin.window) { normal = { background = _blackTexture }, border = new RectOffset(0, 0, 0, 0) };
-                
-                _centeredStyle = new GUIStyle(GUI.skin.label) { 
-                    fontSize = Mathf.RoundToInt(11 * scale), 
-                    alignment = TextAnchor.MiddleCenter, 
+                _centeredStyle = new GUIStyle(GUI.skin.label) {
+                    fontSize = Mathf.RoundToInt(11 * scale),
+                    alignment = TextAnchor.MiddleCenter,
                     richText = true,
-                    wordWrap = false 
+                    wordWrap = false
                 };
 
                 _headerStyle = new GUIStyle(_centeredStyle) { fontStyle = FontStyle.Bold, wordWrap = false };
                 _nameStyle = new GUIStyle(GUI.skin.label) { alignment = TextAnchor.MiddleLeft, richText = true, wordWrap = false, fontSize = Mathf.RoundToInt(12 * scale) };
-                
+
                 _posStyle = new GUIStyle(_centeredStyle) { normal = { textColor = Color.green } };
-                // Lighter, more readable red (Soft Coral)
                 _negStyle = new GUIStyle(_centeredStyle) { normal = { textColor = new Color(1f, 0.45f, 0.45f) } };
-            }
+                _solidStyle = new GUIStyle { normal = { background = _whiteTexture }, border = new RectOffset(0, 0, 0, 0) };
 
-            // Percentage Weights
-            float wRank = 0.08f;
-            float wName = 0.35f;
-            float wMMR = 0.26f;
-            float wPoints = 0.12f;
-            float wStroke = 0.09f;
-            float wBase = 0.10f;
-
-            float finalWidth = ConfigWidth * scale;
-            float usableWidth = finalWidth - (edgePadding * 2);
-
-            float rankW = usableWidth * wRank;
-            float nameW = usableWidth * wName;
-            float mmrW = usableWidth * wMMR;
-            float ptsW = usableWidth * wPoints;
-            float strokeW = usableWidth * wStroke;
-            float baseW = usableWidth * wBase;
-
-            float totalHeight = (edgePadding * 2) + (headerHeight * 2) + (displayLeaderboard.Count * baseRowHeight);
-            // Add a small row for the match ID debug line when one is present
-            if (!string.IsNullOrWhiteSpace(SBGLeagueAutomation.SBGLPlugin.CurrentMatchId))
-                totalHeight += headerHeight * 0.7f;
-            float dynamicHeight = Mathf.Min(totalHeight, ConfigMaxHeight * scale);
-            
-            // Clamp window position to screen bounds
-            float clampedX = Mathf.Clamp(ConfigPosX * scale, 0, Screen.width - finalWidth);
-            float clampedY = Mathf.Clamp(ConfigPosY * scale, 0, Screen.height - dynamicHeight);
-            
-            Rect windowRect = new Rect(clampedX, clampedY, finalWidth, dynamicHeight);
-            
-            // Update config if position changed (manual clamping)
-            if (clampedX != ConfigPosX * scale) _configPosX.Value = clampedX / scale;
-            if (clampedY != ConfigPosY * scale) _configPosY.Value = clampedY / scale;
-
-            GUI.Box(windowRect, "", _windowStyle);
-            GUILayout.BeginArea(windowRect);
-            
-            float currentY = edgePadding;
-            GUIStyle goldStyle = new GUIStyle(_centeredStyle) { normal = { textColor = new Color(1f, 0.85f, 0f) }, fontStyle = FontStyle.Bold };
-            GUIStyle titleStyle = new GUIStyle(_headerStyle) { fontSize = Mathf.RoundToInt(10 * scale) };
-            if (_showFinalSnapshot) {
-                titleStyle.normal.textColor = new Color(1f, 0.65f, 0.2f); // Orange for Final Score
-            } else {
-                titleStyle.normal.textColor = new Color(0.4f, 1f, 0.4f); // Green for Live
-            }
-
-            // Draw title showing Live or Final Score
-            string title = _showFinalSnapshot ? "FINAL SCORE" : "LIVE";
-            GUI.Label(new Rect(edgePadding, currentY, finalWidth - (edgePadding * 2), headerHeight), title, titleStyle);
-            currentY += headerHeight;
-
-            // Show current match ID for debugging
-            string matchId = SBGLeagueAutomation.SBGLPlugin.CurrentMatchId;
-            if (!string.IsNullOrWhiteSpace(matchId)) {
-                GUIStyle matchIdStyle = new GUIStyle(titleStyle) { fontStyle = FontStyle.Normal, fontSize = Mathf.RoundToInt(8 * scale) };
-                matchIdStyle.normal.textColor = new Color(0.6f, 0.6f, 0.6f);
-                string shortId = matchId.Length > 12 ? matchId.Substring(matchId.Length - 12) : matchId;
-                GUI.Label(new Rect(edgePadding, currentY, finalWidth - (edgePadding * 2), headerHeight * 0.7f), $"ID: {shortId}", matchIdStyle);
-                currentY += headerHeight * 0.7f;
-            }
-
-            // Draw Headers
-            float hX = edgePadding;
-            GUI.Label(new Rect(hX, currentY, rankW, headerHeight), "#", _headerStyle); hX += rankW;
-            GUI.Label(new Rect(hX, currentY, nameW, headerHeight), "PLAYER", _headerStyle); hX += nameW;
-            GUI.Label(new Rect(hX, currentY, mmrW, headerHeight), "MMR", _headerStyle); hX += mmrW;
-            GUI.Label(new Rect(hX, currentY, ptsW, headerHeight), "PTS", _headerStyle); hX += ptsW;
-            GUI.Label(new Rect(hX, currentY, strokeW, headerHeight), "+/-", _headerStyle); hX += strokeW;
-            GUI.Label(new Rect(hX, currentY, baseW, headerHeight), "BASE", _headerStyle);
-
-            currentY += headerHeight;
-
-            // Draw Players (or loading message if snapshot not ready)
-            if (displayLeaderboard.Count == 0 && _showFinalSnapshot) {
-                // Show placeholder while snapshot is loading
-                GUIStyle placeholderStyle = new GUIStyle(_centeredStyle) { normal = { textColor = Color.gray } };
-                GUI.Label(new Rect(edgePadding, currentY, finalWidth - (edgePadding * 2), baseRowHeight), "Loading final scores...", placeholderStyle);
-            } else {
-                foreach (var p in displayLeaderboard)
+                _toggleTex = MakeTex(new Color(0.10f, 0.36f, 0.58f, 0.88f));
+                _toggleHoverTex = MakeTex(new Color(0.14f, 0.46f, 0.70f, 0.95f));
+                _toggleStyle = new GUIStyle(GUI.skin.button)
                 {
-                    float rX = edgePadding;
-
-                    GUI.Label(new Rect(rX, currentY, rankW, baseRowHeight), $"{displayLeaderboard.IndexOf(p) + 1}.", _centeredStyle);
-                    rX += rankW;
-
-                GUI.Label(new Rect(rX, currentY, nameW, baseRowHeight), p.Name, _nameStyle);
-                rX += nameW;
-
-                // MMR Projection Logic
-                string rawMMR = p.MMR;
-                string projection = p.ProjectedDisplay.Replace(rawMMR, "").Trim();
-                Vector2 mmrSize = _centeredStyle.CalcSize(new GUIContent(rawMMR));
-                Vector2 projSize = _centeredStyle.CalcSize(new GUIContent(projection));
-                float gap = 3f * scale;
-                float groupW = mmrSize.x + (string.IsNullOrEmpty(projection) ? 0 : projSize.x + gap);
-                float mmrStartX = rX + (mmrW / 2f) - (groupW / 2f);
-
-                GUI.Label(new Rect(mmrStartX, currentY, mmrSize.x, baseRowHeight), rawMMR, _centeredStyle);
-                if (!string.IsNullOrEmpty(projection))
-                {
-                    GUIStyle colorStyle = projection.Contains("+") ? _posStyle : _negStyle;
-                    GUI.Label(new Rect(mmrStartX + mmrSize.x + gap, currentY, projSize.x, baseRowHeight), projection, colorStyle);
-                }
-                rX += mmrW;
-
-                GUI.Label(new Rect(rX, currentY, ptsW, baseRowHeight), $"{p.AdjustedPoints}", goldStyle);
-                rX += ptsW;
-
-                GUI.Label(new Rect(rX, currentY, strokeW, baseRowHeight), p.RawStrokes, _centeredStyle);
-                rX += strokeW;
-
-                GUI.Label(new Rect(rX, currentY, baseW, baseRowHeight), $"{p.BaseScore}", _centeredStyle);
-
-                currentY += baseRowHeight;
-                if (currentY > dynamicHeight - edgePadding) break;
-                }
+                    normal   = { background = _toggleTex,      textColor = Color.white },
+                    hover    = { background = _toggleHoverTex, textColor = Color.white },
+                    active   = { background = _toggleHoverTex, textColor = Color.white },
+                    focused  = { background = _toggleTex,      textColor = Color.white },
+                    fontSize  = Mathf.RoundToInt(10f * scale),
+                    fontStyle = FontStyle.Bold,
+                    alignment = TextAnchor.MiddleCenter,
+                    border    = new RectOffset(2, 2, 2, 2)
+                };
             }
-            GUILayout.EndArea();
+
+            // Native mode: show a small hint label so players know how to switch back
+            if (UseNativeScoreboard && Scoreboard.IsVisible)
+            {
+                float lblW = 160f * scale;
+                float lblH = 20f * scale;
+                GUI.Label(new Rect((Screen.width - lblW) / 2f, Screen.height * 0.055f, lblW, lblH),
+                    $"[{ViewToggleKey}] Switch to SBGL View", _toggleStyle);
+                return;
+            }
+
+            if (!_isInSbglGameplay) return;
+
+            List<SBGLPlayer> displayLeaderboard = _showFinalSnapshot && _finalLeaderboardSnapshot.Count > 0
+                ? _finalLeaderboardSnapshot
+                : _persistentLeaderboard;
+
+            float edgePadding = 4f * scale;
+            float headerHeight = 26f * scale;
+            float baseRowHeight = 22f * scale;
+
+            DrawReplacementLeaderboard(displayLeaderboard, scale, edgePadding, headerHeight, baseRowHeight);
         }
 
-        private void ScrapeData()
+        private static Texture2D MakeTex(Color col)
+        {
+            var t = new Texture2D(1, 1);
+            t.SetPixel(0, 0, col);
+            t.Apply();
+            return t;
+        }
+
+        private void DrawReplacementLeaderboard(List<SBGLPlayer> players, float scale, float edgePad, float headerH, float rowH)
+        {
+            if (_solidStyle == null) return;
+
+            string lobbyName = SBGL.UnifiedMod.Features.CompetitivePluginCheck.CompetitivePluginCheck._currentLobbyName ?? "";
+            string matchType = GetMatchTypeDisplayName(PlayerPrefs.GetString("MatchType", ""));
+            string matchId = SBGLeagueAutomation.SBGLPlugin.CurrentMatchId ?? "";
+            bool isFinal = _showFinalSnapshot;
+
+            // Dimensions — all relative to screen size so any resolution works
+            float panelW = Screen.width * 0.52f;
+            float accentH = 5f * scale;          // top green stripe
+            float titleH = 30f * scale;           // lobby / match info row
+            float colH = 22f * scale;             // column header row
+            float pRowH = 26f * scale;            // player row
+            float leftStripW = 4f * scale;        // rank-tier colour strip
+            float pad = 10f * scale;
+
+            int playerCount = Mathf.Max(players.Count, 1);
+            float footH = Mathf.Max(pad * 1.8f, 18f * scale);
+            float panelH = accentH + titleH + colH + playerCount * pRowH + footH;
+            float panelX = (Screen.width - panelW) / 2f;
+            float panelY = Screen.height * 0.055f;
+
+            var saved = GUI.backgroundColor;
+
+            // ── Cream background ─────────────────────────────────────────
+            ColorUtility.TryParseHtmlString("#FEFAEE", out Color cream);
+            GUI.backgroundColor = cream;
+            GUI.Box(new Rect(panelX, panelY, panelW, panelH), GUIContent.none, _solidStyle);
+
+            // ── Top SBGL-green accent stripe ──────────────────────────────
+            ColorUtility.TryParseHtmlString("#1ABD60", out Color sbglGreen);
+            GUI.backgroundColor = sbglGreen;
+            GUI.Box(new Rect(panelX, panelY, panelW, accentH), GUIContent.none, _solidStyle);
+
+            GUI.backgroundColor = saved;
+            float y = panelY + accentH;
+
+            // ── Title row: "SBGL SEASON 2" left · lobby name center · type right ──
+            Color dark = new Color(0.12f, 0.12f, 0.14f);
+            Color mid  = new Color(0.35f, 0.35f, 0.38f);
+            Color greenText = sbglGreen;
+
+            GUIStyle titleLeftStyle = new GUIStyle(_headerStyle) {
+                fontSize = Mathf.RoundToInt(13f * scale),
+                alignment = TextAnchor.MiddleLeft
+            };
+            titleLeftStyle.normal.textColor = greenText;
+
+            GUIStyle titleCenterStyle = new GUIStyle(_headerStyle) {
+                fontSize = Mathf.RoundToInt(14f * scale),
+                alignment = TextAnchor.MiddleCenter
+            };
+            titleCenterStyle.normal.textColor = dark;
+
+            GUIStyle titleRightStyle = new GUIStyle(_headerStyle) {
+                fontSize = Mathf.RoundToInt(11f * scale),
+                alignment = TextAnchor.MiddleRight
+            };
+            titleRightStyle.normal.textColor = isFinal ? new Color(0.80f, 0.45f, 0.05f) : mid;
+
+            GUI.Label(new Rect(panelX + pad, y, panelW * 0.32f, titleH), "SBGL SEASON 2", titleLeftStyle);
+            GUI.Label(new Rect(panelX, y, panelW, titleH), lobbyName, titleCenterStyle);
+            int currentHole = CourseManager.CurrentHoleCourseIndex + 1;
+            string holeStr = currentHole > 0 ? $"{currentHole}/{_cachedTotalHoles}" : "";
+            string rightLabel = matchType
+                + (string.IsNullOrEmpty(_cachedCourseName) ? "" : $"  ·  {_cachedCourseName}")
+                + (string.IsNullOrEmpty(holeStr) ? "" : $"  ·  {holeStr}")
+                + (isFinal ? "  ·  FINAL" : "  ·  LIVE");
+            GUI.Label(new Rect(panelX, y, panelW - pad, titleH), rightLabel, titleRightStyle);
+            y += titleH;
+
+            // ── Thin divider under title ──────────────────────────────────
+            GUI.backgroundColor = new Color(0.78f, 0.74f, 0.68f, 1f);
+            GUI.Box(new Rect(panelX + pad, y - 1f, panelW - pad * 2f, 1f), GUIContent.none, _solidStyle);
+            GUI.backgroundColor = saved;
+
+            // ── Column headers ────────────────────────────────────────────
+            float usable = panelW - leftStripW - pad * 2f;
+            float cPos     = usable * 0.07f;
+            float cName    = usable * 0.37f;
+            float cMMR     = usable * 0.28f;
+            float cPts     = usable * 0.12f;
+            float cStrokes = usable * 0.16f;
+
+            GUIStyle colHStyle = new GUIStyle(_headerStyle) {
+                fontSize = Mathf.RoundToInt(9f * scale),
+                alignment = TextAnchor.MiddleCenter
+            };
+            colHStyle.normal.textColor = mid;
+
+            GUIStyle colHNameStyle = new GUIStyle(colHStyle) { alignment = TextAnchor.MiddleLeft };
+
+            float cx = panelX + leftStripW + pad;
+            GUI.Label(new Rect(cx, y, cPos, colH), "POS", colHStyle);   cx += cPos;
+            GUI.Label(new Rect(cx, y, cName, colH), "PLAYER", colHNameStyle); cx += cName;
+            GUI.Label(new Rect(cx, y, cMMR, colH), "MMR", colHStyle);   cx += cMMR;
+            GUI.Label(new Rect(cx, y, cPts, colH), "PTS", colHStyle);    cx += cPts;
+            GUI.Label(new Rect(cx, y, cStrokes, colH), "+/-", colHStyle);
+            y += colH;
+
+            // ── Thin divider under column headers ─────────────────────────
+            GUI.backgroundColor = new Color(0.78f, 0.74f, 0.68f, 1f);
+            GUI.Box(new Rect(panelX + pad, y, panelW - pad * 2f, 1f), GUIContent.none, _solidStyle);
+            GUI.backgroundColor = saved;
+
+            // ── Player rows ───────────────────────────────────────────────
+            GUIStyle nameStyle = new GUIStyle(_nameStyle) {
+                fontSize = Mathf.RoundToInt(13f * scale)
+            };
+            nameStyle.normal.textColor = dark;
+
+            GUIStyle dataStyle = new GUIStyle(_centeredStyle) {
+                fontSize = Mathf.RoundToInt(12f * scale)
+            };
+            dataStyle.normal.textColor = dark;
+
+            if (players.Count == 0)
+            {
+                GUIStyle emptyStyle = new GUIStyle(dataStyle);
+                emptyStyle.normal.textColor = mid;
+                GUI.Label(new Rect(panelX + pad, y, panelW - pad * 2f, pRowH), "Waiting for player data...", emptyStyle);
+                return;
+            }
+
+            int rankPos = 0; // counts only active (non-spectator) players for position numbers
+            for (int i = 0; i < players.Count; i++)
+            {
+                var p = players[i];
+
+                if (!p.IsSpectator) rankPos++;
+
+                // Row tint: gold for leader, subtle alternating for active players; dim for spectators
+                if (p.IsSpectator)
+                {
+                    GUI.backgroundColor = new Color(0f, 0f, 0f, 0.06f);
+                    GUI.Box(new Rect(panelX, y, panelW, pRowH), GUIContent.none, _solidStyle);
+                }
+                else if (rankPos == 1)
+                {
+                    GUI.backgroundColor = new Color(1f, 0.92f, 0.55f, 0.35f);
+                    GUI.Box(new Rect(panelX, y, panelW, pRowH), GUIContent.none, _solidStyle);
+                }
+                else if (rankPos % 2 == 0)
+                {
+                    GUI.backgroundColor = new Color(0f, 0f, 0f, 0.04f);
+                    GUI.Box(new Rect(panelX, y, panelW, pRowH), GUIContent.none, _solidStyle);
+                }
+                GUI.backgroundColor = saved;
+
+                // Left rank-tier colour strip — grey for spectators
+                float mmrVal = 0f;
+                float.TryParse(p.MMR, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out mmrVal);
+                string rankHex = p.IsSpectator ? "#555555" : (p.MMR == "..." || p.MMR == "--") ? "#888888" : SBGL.UnifiedMod.Core.Season2RuleSet.GetRankColor(mmrVal);
+                if (ColorUtility.TryParseHtmlString(rankHex, out Color stripColor))
+                {
+                    GUI.backgroundColor = stripColor;
+                    GUI.Box(new Rect(panelX, y, leftStripW, pRowH), GUIContent.none, _solidStyle);
+                    GUI.backgroundColor = saved;
+                }
+
+                cx = panelX + leftStripW + pad;
+
+                GUIStyle specDimStyle = new GUIStyle(dataStyle);
+                specDimStyle.normal.textColor = mid;
+
+                if (p.IsSpectator)
+                {
+                    // Spectator row: "SPEC" badge in position column, name, then blank score cells
+                    GUIStyle specBadge = new GUIStyle(dataStyle) { fontStyle = FontStyle.Bold };
+                    specBadge.normal.textColor = new Color(0.55f, 0.55f, 0.60f);
+                    GUI.Label(new Rect(cx, y, cPos, pRowH), "👁", specBadge); cx += cPos;
+                    GUI.Label(new Rect(cx, y, cName, pRowH), p.DisplayNameWithTag, specDimStyle); cx += cName;
+                    GUI.Label(new Rect(cx, y, cMMR + cPts + cStrokes, pRowH), "SPECTATING", specDimStyle);
+                    y += pRowH;
+                    continue;
+                }
+
+                // Position number
+                GUIStyle posStyle = new GUIStyle(dataStyle) { fontStyle = rankPos == 1 ? FontStyle.Bold : FontStyle.Normal };
+                if (rankPos == 1) posStyle.normal.textColor = new Color(0.60f, 0.45f, 0.02f);
+                GUI.Label(new Rect(cx, y, cPos, pRowH), $"{rankPos}", posStyle); cx += cPos;
+
+                // Player name (prefixed with the clan tag when they belong to a faction)
+                GUI.Label(new Rect(cx, y, cName, pRowH), p.DisplayNameWithTag, nameStyle); cx += cName;
+
+                // MMR (rank-colored) + projected change centred in column
+                string rawMMR = p.MMR;
+                string proj   = p.ProjectedDisplay.Replace(rawMMR, "").Trim();
+                GUIStyle mmrS = new GUIStyle(dataStyle);
+                if (ColorUtility.TryParseHtmlString(rankHex, out Color rc)) mmrS.normal.textColor = rc;
+
+                Vector2 mmrSz  = mmrS.CalcSize(new GUIContent(rawMMR));
+                Vector2 projSz = _centeredStyle.CalcSize(new GUIContent(proj));
+                float gap      = 3f * scale;
+                float groupW   = mmrSz.x + (string.IsNullOrEmpty(proj) ? 0f : projSz.x + gap);
+                float mmrX     = cx + (cMMR / 2f) - (groupW / 2f);
+                GUI.Label(new Rect(mmrX, y, mmrSz.x, pRowH), rawMMR, mmrS);
+                if (!string.IsNullOrEmpty(proj))
+                    GUI.Label(new Rect(mmrX + mmrSz.x + gap, y, projSz.x, pRowH),
+                        proj, proj.Contains("+") ? _posStyle : _negStyle);
+                cx += cMMR;
+
+                // Points (gold)
+                GUIStyle ptsS = new GUIStyle(dataStyle) { fontStyle = FontStyle.Bold };
+                ptsS.normal.textColor = new Color(0.72f, 0.52f, 0.02f);
+                GUI.Label(new Rect(cx, y, cPts, pRowH), $"{p.BaseScore}", ptsS); cx += cPts;
+
+                // Strokes vs par — single column: red if over, green if under, grey if even
+                int strokeVal = 0;
+                if (!string.IsNullOrEmpty(p.RawStrokes))
+                    int.TryParse(p.RawStrokes.Replace("±", "").Replace("+", "").Trim(), out strokeVal);
+
+                GUIStyle strokeS = new GUIStyle(dataStyle);
+                strokeS.normal.textColor = strokeVal > 0 ? new Color(0.80f, 0.15f, 0.15f)
+                                         : strokeVal < 0 ? new Color(0.10f, 0.60f, 0.20f)
+                                         : mid;
+                string strokeLabel = strokeVal > 0 ? $"+{strokeVal}" : strokeVal < 0 ? strokeVal.ToString() : "E";
+                GUI.Label(new Rect(cx, y, cStrokes, pRowH), strokeLabel, strokeS);
+
+                y += pRowH;
+            }
+
+            // ── Footer row: site left, match ID right ─────────────────────
+            GUIStyle footStyle = new GUIStyle(_centeredStyle) {
+                fontSize = Mathf.RoundToInt(11f * scale),
+                fontStyle = FontStyle.Bold,
+                alignment = TextAnchor.MiddleLeft
+            };
+            footStyle.normal.textColor = new Color(0.18f, 0.85f, 0.32f);
+            GUI.Label(new Rect(panelX + pad, y, panelW * 0.45f, footH), "SBGLeague.com", footStyle);
+
+            GUIStyle footRightStyle = new GUIStyle(_centeredStyle) {
+                fontSize = Mathf.RoundToInt(10f * scale),
+                alignment = TextAnchor.MiddleRight
+            };
+            footRightStyle.normal.textColor = new Color(0.45f, 0.50f, 0.60f);
+
+            string footRight = string.IsNullOrWhiteSpace(matchId)
+                ? $"[{ViewToggleKey}] Native View"
+                : $"[{ViewToggleKey}] Native View  ·  Match: {(matchId.Length > 14 ? matchId.Substring(matchId.Length - 14) : matchId)}";
+            GUI.Label(new Rect(panelX, y, panelW - pad * 0.5f, footH), footRight, footRightStyle);
+        }
+
+        private string GetMatchTypeDisplayName(string matchType)
+        {
+            if (SBGL.UnifiedMod.Core.Season2RuleSet.IsTeamMatchType(matchType))
+            {
+                int size = SBGL.UnifiedMod.Core.Season2RuleSet.GetTeamSize(matchType);
+                return $"Ranked {size}v{size}";
+            }
+            if (SBGL.UnifiedMod.Core.Season2RuleSet.IsRankedMatchType(matchType))     return "Ranked";
+            if (SBGL.UnifiedMod.Core.Season2RuleSet.IsProSeriesMatchType(matchType))  return "Pro Series";
+            if (SBGL.UnifiedMod.Core.Season2RuleSet.IsCasualMatchType(matchType))     return "Casual";
+            return "Unknown";
+        }
+
+        /// <summary>
+        /// Called by the Scoreboard.Refresh() Harmony postfix — fires at the same instant
+        /// the official scoreboard updates, giving us zero-delay sync with the game's own data.
+        /// </summary>
+        public void OnScoreboardRefreshed(Scoreboard scoreboard)
+        {
+            if (scoreboard == null) return;
+            _cachedScoreboard = scoreboard;
+            ScrapeData(scoreboard);
+        }
+
+        private void ScrapeData(Scoreboard inScoreboard = null)
         {
             string scene = SceneManager.GetActiveScene().name;
             if (scene.Contains("Driving") || scene.Contains("Range")) {
-                // End of round/lobby scene: next gameplay scene should start a fresh cache.
                 _roundCacheActive = false;
                 return;
             }
@@ -298,8 +545,9 @@ namespace SBGLLiveLeaderboard
                 _roundCacheActive = true;
             }
 
-            if (_cachedScoreboard == null)
-                _cachedScoreboard = Object.FindAnyObjectByType<Scoreboard>(FindObjectsInactive.Include);
+            Scoreboard board = inScoreboard ?? _cachedScoreboard
+                ?? Object.FindAnyObjectByType<Scoreboard>(FindObjectsInactive.Include);
+            if (board != null) _cachedScoreboard = board;
 
             if (_cachedScoreboard == null || _entriesField == null) return;
             var entries = _entriesField.GetValue(_cachedScoreboard) as List<ScoreboardEntry>;
@@ -310,59 +558,65 @@ namespace SBGLLiveLeaderboard
             {
                 if (entry == null) continue;
                 string rawName = CleanTMP(entry.name?.text);
-                if (string.IsNullOrEmpty(rawName)) continue;
+                if (string.IsNullOrEmpty(rawName) || rawName == "Name") continue;
 
-                string nameLower = rawName.ToLowerInvariant();
-                // Filter common spectator/observer/ui placeholder labels
-                if (rawName == "Name" || nameLower.Contains("spectator") || nameLower.Contains("observer") || nameLower.Contains("spectating") || nameLower.Contains("spec ")) continue;
-
-                string strokesStr = CleanTMP(entry.strokes?.text);
+                string strokesStr     = CleanTMP(entry.strokes?.text);
                 string courseScoreStr = CleanTMP(entry.courseScore?.text);
 
-                if (!string.IsNullOrEmpty(strokesStr) && strokesStr.ToUpper().Contains("SPEC")) continue;
+                // Detect spectators by the game's own "SPEC" marker; keep them rather than discard
+                bool isSpec = !string.IsNullOrEmpty(strokesStr) && strokesStr.ToUpper().Contains("SPEC");
 
-                // Skip entries that look like UI placeholders (dashes) with no numeric data
-                bool strokesHasDigits = Regex.IsMatch(strokesStr ?? string.Empty, @"\d");
-                bool courseHasDigits = Regex.IsMatch(courseScoreStr ?? string.Empty, @"\d");
+                // Skip pure UI placeholder rows (only dashes, no digits) unless spec entry
+                if (!isSpec) {
+                    bool strokesHasDigits  = Regex.IsMatch(strokesStr ?? string.Empty, @"\d");
+                    bool courseHasDigits   = Regex.IsMatch(courseScoreStr ?? string.Empty, @"\d");
                     bool strokesOnlyDashes = !string.IsNullOrEmpty(strokesStr) && Regex.IsMatch(strokesStr, @"^[\-\u2013\u2014\s]+$");
-                if (!strokesHasDigits && !courseHasDigits && strokesOnlyDashes) continue;
+                    if (!strokesHasDigits && !courseHasDigits && strokesOnlyDashes) continue;
+                }
 
                 int.TryParse(courseScoreStr, out int baseScore);
-                int.TryParse(strokesStr.Replace("±", "").Replace("+", "").Trim(), out int strokeOffset);
-                
+
                 string playerMMR = "...";
-                if (_mmrCache.TryGetValue(rawName, out var cachedData))
-                {
+                if (_mmrCache.TryGetValue(rawName, out var cachedData)) {
                     playerMMR = cachedData.mmr;
                     if (Time.time - cachedData.lastFetchTime > 300f && !_pendingRequests.Contains(rawName))
                         StartCoroutine(GetMMRForPlayer(rawName));
-                }
-                else if (!_pendingRequests.Contains(rawName))
-                {
+                } else if (!_pendingRequests.Contains(rawName)) {
                     StartCoroutine(GetMMRForPlayer(rawName));
                 }
 
+                _clanTagCache.TryGetValue(rawName, out string clanTag);
+                _canonicalNameCache.TryGetValue(rawName, out string canonicalName);
+
                 newList.Add(new SBGLPlayer {
-                    Name = rawName, 
-                    BaseScore = baseScore, 
-                    RawStrokes = strokesStr,
-                    AdjustedPoints = baseScore + (strokeOffset * -10),
+                    Name = rawName,
+                    BaseScore = baseScore,
+                    RawStrokes = isSpec ? "SPEC" : strokesStr,
                     MMR = playerMMR,
-                    ProjectedDisplay = playerMMR 
+                    ProjectedDisplay = playerMMR,
+                    IsSpectator = isSpec,
+                    ClanTag = clanTag ?? "",
+                    CanonicalName = canonicalName ?? ""
                 });
             }
 
+            // Keep disconnected players visible with their last known score
             HashSet<string> liveNames = new HashSet<string>(newList.Select(p => p.Name), System.StringComparer.OrdinalIgnoreCase);
-
-            // Keep disconnected players visible with the score they had when they left.
             foreach (var kvp in _lastKnownRoundPlayers) {
-                if (!liveNames.Contains(kvp.Key) && kvp.Value != null) {
+                if (!liveNames.Contains(kvp.Key) && kvp.Value != null)
                     newList.Add(ClonePlayer(kvp.Value));
-                }
             }
 
-            if (newList.Count > 1) CalculateProjectedMMR(newList);
-            _persistentLeaderboard = newList.OrderByDescending(p => p.AdjustedPoints).Take(ConfigMaxPlayers).ToList();
+            var activePlayers = newList.Where(p => !p.IsSpectator).ToList();
+            var spectators    = newList.Where(p =>  p.IsSpectator).ToList();
+
+            if (activePlayers.Count > 1) CalculateProjectedMMR(activePlayers);
+
+            _persistentLeaderboard = activePlayers
+                .OrderByDescending(p => p.BaseScore)
+                .Take(ConfigMaxPlayers)
+                .Concat(spectators)
+                .ToList();
 
             _lastKnownRoundPlayers.Clear();
             foreach (var player in _persistentLeaderboard) {
@@ -377,10 +631,12 @@ namespace SBGLLiveLeaderboard
             return new SBGLPlayer {
                 Name = source.Name,
                 BaseScore = source.BaseScore,
-                AdjustedPoints = source.AdjustedPoints,
                 RawStrokes = source.RawStrokes,
                 MMR = source.MMR,
-                ProjectedDisplay = source.ProjectedDisplay
+                ProjectedDisplay = source.ProjectedDisplay,
+                IsSpectator = source.IsSpectator,
+                ClanTag = source.ClanTag,
+                CanonicalName = source.CanonicalName
             };
         }
 
@@ -397,7 +653,7 @@ namespace SBGLLiveLeaderboard
                     if (float.TryParse(pA.MMR, out float mmrA) && float.TryParse(pB.MMR, out float mmrB))
                     {
                         float expectedA = 1f / (1f + Mathf.Pow(10f, (mmrB - mmrA) / 400f));
-                        float actualA = (pA.AdjustedPoints > pB.AdjustedPoints) ? 1.0f : (pA.AdjustedPoints < pB.AdjustedPoints ? 0.0f : 0.5f);
+                        float actualA = (pA.BaseScore > pB.BaseScore) ? 1.0f : (pA.BaseScore < pB.BaseScore ? 0.0f : 0.5f);
                         float change = K_FACTOR * (actualA - expectedA);
                         deltas[pA.Name] += change;
                         deltas[pB.Name] -= change;
@@ -420,46 +676,95 @@ namespace SBGLLiveLeaderboard
             if (_pendingRequests.Contains(originalName)) yield break;
             _pendingRequests.Add(originalName);
 
-            // Replace BASE_API with the accessor from your UnifiedPlugin
-            string query = "{\"display_name\":{\"$regex\":\"^" + originalName + "$\",\"$options\":\"i\"}}";
-            string url = $"{SBGL.UnifiedMod.Core.UnifiedPlugin.GetCurrentPlayerApi()}?q={UnityWebRequest.EscapeURL(query)}";
-            
+            string url = $"{SBGL.UnifiedMod.Core.UnifiedPlugin.GetCurrentPlayerApi()}?display_name=ilike.{UnityWebRequest.EscapeURL(originalName)}";
+
             bool needsFallback = false;
+            string resolvedId = null;
             using (UnityWebRequest r = UnityWebRequest.Get(url)) {
-                // Replace APP_ID and AUTH_TOKEN with UnifiedPlugin accessors
-                r.SetRequestHeader("X-App-Id", SBGL.UnifiedMod.Core.UnifiedPlugin.GetCurrentAppId());
-                r.SetRequestHeader("api_key", SBGL.UnifiedMod.Core.UnifiedPlugin.GetCurrentAuthToken());
+                r.SetRequestHeader("apikey", SBGL.UnifiedMod.Core.UnifiedPlugin.GetCurrentAuthToken());
+                r.SetRequestHeader("Authorization", $"Bearer {SBGL.UnifiedMod.Core.UnifiedPlugin.GetCurrentAuthToken()}");
                 
                 yield return r.SendWebRequest();
 
                 if (r.result == UnityWebRequest.Result.Success) {
                     var res = JArray.Parse(r.downloadHandler.text);
-                    if (res.Count > 0) _mmrCache[originalName] = (res[0]["current_mmr"]?.ToString() ?? "--", Time.time);
+                    if (res.Count > 0) {
+                        _mmrCache[originalName] = (res[0]["current_mmr"]?.ToString() ?? "--", Time.time);
+                        resolvedId = res[0]["id"]?.ToString();
+                        CacheCanonicalName(originalName, res[0]["display_name"]?.ToString());
+                    }
                     else needsFallback = true;
                 } else needsFallback = true;
             }
 
-            if (needsFallback) yield return GetMMRFuzzyFallback(originalName);
+            if (needsFallback) yield return GetMMRFuzzyFallback(originalName, (id) => resolvedId = id);
+
+            if (!string.IsNullOrEmpty(resolvedId))
+                yield return GetClanTagForPlayer(originalName, resolvedId);
+
             _pendingRequests.Remove(originalName);
         }
 
-        // Update these lines in GetMMRFuzzyFallback
-        IEnumerator GetMMRFuzzyFallback(string originalName)
+        /// <summary>
+        /// Records the registered casing for a scoreboard name. Only accepted when the two differ
+        /// by case alone — the fuzzy fallback can match a different player entirely (searching
+        /// "JaBoB" also turns up "Jabobus.o7"), and relabelling someone with another player's
+        /// name would be worse than just showing the in-game casing.
+        /// </summary>
+        private void CacheCanonicalName(string scrapedName, string registeredName)
         {
-            string query = "{\"display_name\":{\"$regex\":\"" + originalName + "\",\"$options\":\"i\"}}";
-            // Replace BASE_API here as well
-            string url = $"{SBGL.UnifiedMod.Core.UnifiedPlugin.GetCurrentPlayerApi()}?q={UnityWebRequest.EscapeURL(query)}";
-            
+            if (string.IsNullOrWhiteSpace(registeredName) || string.IsNullOrWhiteSpace(scrapedName)) return;
+            if (!string.Equals(registeredName.Trim(), scrapedName.Trim(), System.StringComparison.OrdinalIgnoreCase)) return;
+            _canonicalNameCache[scrapedName] = registeredName.Trim();
+        }
+
+        /// <summary>
+        /// Resolves a player's faction clan tag and caches it against their scoreboard name.
+        /// The faction table stores its roster as a member_player_ids array, so a single
+        /// containment query gets the tag without needing a join.
+        /// </summary>
+        IEnumerator GetClanTagForPlayer(string originalName, string playerId)
+        {
+            string filter = UnityWebRequest.EscapeURL($"cs.[\"{playerId}\"]");
+            string url = $"{SBGL.UnifiedMod.Core.UnifiedPlugin.GetCurrentBaseApi()}/faction?member_player_ids={filter}&select=clan_tag&limit=1";
+
             using (UnityWebRequest r = UnityWebRequest.Get(url)) {
-                // Replace APP_ID and AUTH_TOKEN here as well
-                r.SetRequestHeader("X-App-Id", SBGL.UnifiedMod.Core.UnifiedPlugin.GetCurrentAppId());
-                r.SetRequestHeader("api_key", SBGL.UnifiedMod.Core.UnifiedPlugin.GetCurrentAuthToken());
-                
+                r.SetRequestHeader("apikey", SBGL.UnifiedMod.Core.UnifiedPlugin.GetCurrentAuthToken());
+                r.SetRequestHeader("Authorization", $"Bearer {SBGL.UnifiedMod.Core.UnifiedPlugin.GetCurrentAuthToken()}");
+
+                yield return r.SendWebRequest();
+
+                string tag = "";
+                if (r.result == UnityWebRequest.Result.Success) {
+                    try {
+                        var res = JArray.Parse(r.downloadHandler.text);
+                        if (res.Count > 0) tag = res[0]["clan_tag"]?.ToString()?.Trim() ?? "";
+                    } catch { tag = ""; }
+                }
+
+                // Cached even when empty so players without a faction aren't re-queried every refresh
+                _clanTagCache[originalName] = tag;
+            }
+        }
+
+        // Update these lines in GetMMRFuzzyFallback
+        IEnumerator GetMMRFuzzyFallback(string originalName, System.Action<string> onPlayerIdResolved = null)
+        {
+            string url = $"{SBGL.UnifiedMod.Core.UnifiedPlugin.GetCurrentPlayerApi()}?display_name=ilike.*{UnityWebRequest.EscapeURL(originalName)}*";
+
+            using (UnityWebRequest r = UnityWebRequest.Get(url)) {
+                r.SetRequestHeader("apikey", SBGL.UnifiedMod.Core.UnifiedPlugin.GetCurrentAuthToken());
+                r.SetRequestHeader("Authorization", $"Bearer {SBGL.UnifiedMod.Core.UnifiedPlugin.GetCurrentAuthToken()}");
+
                 yield return r.SendWebRequest();
                 string val = "--";
                 if (r.result == UnityWebRequest.Result.Success) {
                     var res = JArray.Parse(r.downloadHandler.text);
-                    if (res.Count > 0) val = res[0]["current_mmr"]?.ToString() ?? "--";
+                    if (res.Count > 0) {
+                        val = res[0]["current_mmr"]?.ToString() ?? "--";
+                        onPlayerIdResolved?.Invoke(res[0]["id"]?.ToString());
+                        CacheCanonicalName(originalName, res[0]["display_name"]?.ToString());
+                    }
                 }
                 _mmrCache[originalName] = (val, Time.time);
             }
@@ -498,8 +803,11 @@ namespace SBGLLiveLeaderboard
             _lastKnownRoundPlayers.Clear();
             _roundCacheActive = false;
             _mmrCache.Clear();
+            _clanTagCache.Clear();
+            _canonicalNameCache.Clear();
             _pendingRequests.Clear();
             _cachedScoreboard = null;
+            SbglOverlayOpen = false;
             _nextUpdateTime = Time.time + _updateInterval;
             Debug.Log("[LiveLeaderboard] Reset leaderboard state on main menu");
         }

@@ -31,7 +31,7 @@ namespace SBGLeagueAutomation
         private static readonly List<string> _sbglTestNames = new List<string> {
             "TrashxCat","KingCire03","FucklTheIRS","Jackie","TikTok Z4C_FN","adthykrshnn","mrguy7608","Noah_Boatt","YoMaMMeJr","TheMrEStudio","Odius9064","Jake paul","f19chy","Kodakblackarack","ArrowTheFighter","limbo","Marcus_Pipes","That Traynor","Blinkerfluid","TaxiCAB","Achunl2","Cinereous","Liafeon","Peter","Inkie","LLENN","Nanainasuit","Midnight","PattyTits","Bekuh","Lunwik","yackback","AlpineMilk","HandsomeSkippy","TheOneKP","RealJosher","Ooshida","Moto","Jozza","Patrick Swayze","ryan.scibetta","Zaikr","Thalosii","paradiorevey","Ricee","Slacker87","MRGoldberg","trusted","designedsilence","The Oreo Orgy","Zoboomafoo","Yoda Cage","Black Dolphin","Pengini","antyde","Glider","lyth","Jabobus.o7","dkgaming219","Cody","Sidimmu","снусмумрик","Skydown26","Jeb","Vac","Slem Dogg","Batto","Broj0e"
         };
-        private string GetBaseApiUrl() => UnifiedPlugin.GetCurrentPlayerApi().Replace("/Player", "");
+        private string GetBaseApiUrl() => UnifiedPlugin.GetCurrentBaseApi();
         private string GetAppId() => UnifiedPlugin.GetCurrentAppId();
         private string GetAuthToken() => UnifiedPlugin.GetCurrentAuthToken();
 
@@ -143,7 +143,7 @@ namespace SBGLeagueAutomation
         private bool _isHost = false;
         private bool _hasAccepted = false;
         private string _hostRulesetSelection = "ranked"; // "ranked", "casual", or "pro_series"
-        private string _queueTypeSelection = "ranked"; // "ranked" or "casual", set from queue panel
+        private string _queueTypeSelection = "ranked"; // "ranked", "casual", or a team_NvN_ranked type; set from queue panel
         private DateTime? _queueStartTime = null;
         private bool _hostLobbyStarted = false;
         private bool _hostServerWasActive = false;
@@ -175,6 +175,9 @@ namespace SBGLeagueAutomation
         private int _matchExpectedPlayerCount = 2;
         private int _lastUploadedPlayerCount = -1;
         private List<CachedLeaderboardPlayer> _finalLeaderboardSnapshot = new List<CachedLeaderboardPlayer>();
+        // Red/Blue assignment captured from the game while still in the match. Finalization can run
+        // after returning to the driving range, by which point CourseManager.PlayerStates is gone.
+        private Dictionary<string, Team> _cachedTeamAssignments = new Dictionary<string, Team>(StringComparer.OrdinalIgnoreCase);
         private byte[] _pendingMatchScreenshotBytes = null;
         private string _pendingMatchScreenshotFileName = null;
         private string _pendingUploadedScreenshotUrl = null;
@@ -183,6 +186,7 @@ namespace SBGLeagueAutomation
         private bool _matchEntriesCreated = false;
         private bool _matchCreationInProgress = false;
         private bool _isInGameplay = false;
+        private bool _cachedIsMenuScene = false;
         private bool _matchEndedReceived = false;
         private Coroutine _monitorCoroutine = null;
         private Coroutine _lobbyMonitorCoroutine = null;
@@ -199,7 +203,9 @@ namespace SBGLeagueAutomation
         
         // Active season cache - fetched from API at startup
         private string _activeSeasonId = null;
+        private string _activeSeasonName = null;
         private bool _activeSeasonFetched = false;
+        private bool IsActiveSeason => _activeSeasonFetched && !string.IsNullOrEmpty(_activeSeasonId);
         
         // UI Helpers
         private List<string> _debugLogs = new List<string>();
@@ -258,19 +264,16 @@ namespace SBGLeagueAutomation
 
             Log($"<color=cyan>[PDS] Claiming host role for session {_currentSession.id}...</color>");
 
-            string json = "{\"host_player_id\":\"" + _userProfile.id + "\"}";
-            yield return CallAPI($"/MatchmakingSession/{_currentSession.id}", "PUT", json, (res) => {
-                JObject response = ParseApiSingleObject(res);
-                if (response != null)
-                {
-                    _currentSession.host_player_id = _userProfile.id;
-                    _isHost = true;
-                    Log("<color=green>[PDS] ✓ Host role claimed — session host_player_id set to our player ID.</color>");
-                }
-                else
-                {
-                    Log("<color=red>[PDS] Failed to claim host role — API response was null.</color>");
-                }
+            var payload = new JObject {
+                ["matchmaking_session_id"] = _currentSession.id,
+                ["host_player_id"] = _userProfile.id
+            };
+            yield return CallGateway("session.update", payload, (res) => {
+                _currentSession.host_player_id = _userProfile.id;
+                _isHost = true;
+                Log("<color=green>[PDS] ✓ Host role claimed — session host_player_id set to our player ID.</color>");
+            }, (err) => {
+                Log("<color=red>[PDS] Failed to claim host role — gateway rejected the update.</color>");
             });
         }
 
@@ -306,7 +309,7 @@ namespace SBGLeagueAutomation
         private static bool IsCasualMatchType(string matchType)
         {
             return !string.IsNullOrWhiteSpace(matchType)
-                && matchType.IndexOf(Season1RuleSet.MATCH_TYPE_CASUAL, StringComparison.OrdinalIgnoreCase) >= 0;
+                && matchType.IndexOf(Season2RuleSet.MATCH_TYPE_CASUAL, StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private bool IsCurrentMatchCasual()
@@ -319,114 +322,21 @@ namespace SBGLeagueAutomation
             return IsCasualMatchType(PlayerPrefs.GetString("MatchType", ""));
         }
 
-        private string GetQueueMatchTypePayload()
+        /// <summary>
+        /// True for team-ranked matches. These have no Match record until finalization — the whole
+        /// match is submitted in one call once final team scores are known — so finalization must
+        /// still run for them even though _currentMatchId is null.
+        /// </summary>
+        private bool IsCurrentMatchTeamRanked()
         {
-            string storedMatchType = PlayerPrefs.GetString("MatchType", Season1RuleSet.MATCH_TYPE_RANKED);
-            return IsCasualMatchType(storedMatchType) ? "casual" : "ranked";
+            return Season2RuleSet.IsTeamMatchType(_currentSession?.match_type)
+                || Season2RuleSet.IsTeamMatchType(PlayerPrefs.GetString("MatchType", ""));
         }
 
-        private IEnumerator IncrementCasualMatchesPlayedForActivePlayers(List<SBGLLiveLeaderboard.LiveLeaderboardPlugin.SBGLPlayer> leaderboardPlayers)
+        private string GetQueueMatchTypePayload()
         {
-            List<string> leaderboardNames = leaderboardPlayers?
-                .Where(player => player != null && !string.IsNullOrWhiteSpace(player.Name))
-                .Select(player => player.Name.Trim())
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList() ?? new List<string>();
-
-            if (leaderboardNames.Count == 0)
-            {
-                Log("<color=yellow>[Casual] No active leaderboard names found - skipping casual stat increment</color>");
-                yield break;
-            }
-
-            var testOverrides = GetTestPlayerOverrides(leaderboardNames);
-            int updatedPlayers = 0;
-
-            foreach (string leaderboardName in leaderboardNames)
-            {
-                string lookupName = ApplyTestPlayerOverride(leaderboardName, testOverrides);
-                string playerId = null;
-
-                if (!string.IsNullOrWhiteSpace(_userProfile?.id)
-                    && string.Equals(leaderboardName, _userProfile.display_name, StringComparison.OrdinalIgnoreCase))
-                {
-                    playerId = _userProfile.id;
-                }
-
-                if (string.IsNullOrWhiteSpace(playerId))
-                {
-                    TryGetPlayerIdForName(leaderboardName, out playerId);
-                }
-
-                if (string.IsNullOrWhiteSpace(playerId)
-                    && !string.Equals(lookupName, leaderboardName, StringComparison.OrdinalIgnoreCase))
-                {
-                    TryGetPlayerIdForName(lookupName, out playerId);
-                }
-
-                if (string.IsNullOrWhiteSpace(playerId))
-                {
-                    yield return ResolvePlayerIdByNameFromApi(lookupName, (id) => playerId = id);
-                }
-
-                if (string.IsNullOrWhiteSpace(playerId))
-                {
-                    Log($"<color=yellow>[Casual] Could not resolve player ID for '{leaderboardName}' - skipping casual stat update</color>");
-                    continue;
-                }
-
-                int casualMatchesPlayed = 0;
-                string resolvedDisplayName = leaderboardName;
-
-                yield return CallAPI($"/Player/{playerId}", "GET", "", (res) => {
-                    JObject profile = ParseApiSingleObject(res);
-                    if (profile != null)
-                    {
-                        resolvedDisplayName = (string)profile["display_name"] ?? resolvedDisplayName;
-                        int.TryParse(profile["casual_matches_played"]?.ToString() ?? "0", out casualMatchesPlayed);
-                    }
-                });
-
-                int updatedCount = casualMatchesPlayed + 1;
-                string json = "{" + $"\"casual_matches_played\":{updatedCount}" + "}";
-                bool updated = false;
-
-                yield return CallAPI($"/Player/{playerId}", "PUT", json, (res) => {
-                    if (ParseApiSingleObject(res) != null)
-                    {
-                        updated = true;
-                    }
-                });
-
-                if (!updated)
-                {
-                    Log($"<color=yellow>[Casual] Failed to update casual_matches_played for {leaderboardName}</color>");
-                    continue;
-                }
-
-                updatedPlayers++;
-                _playerIdsByName[leaderboardName] = playerId;
-                if (!string.IsNullOrWhiteSpace(resolvedDisplayName))
-                {
-                    _playerIdsByName[resolvedDisplayName.Trim()] = playerId;
-                }
-
-                Log($"<color=green>[Casual] ✓ Updated {resolvedDisplayName} ({playerId}) casual_matches_played: {casualMatchesPlayed} -> {updatedCount}</color>");
-            }
-
-            _matchEntriesCreated = true;
-            _matchStatsSubmitted = true;
-
-            if (updatedPlayers > 0)
-            {
-                ShowUploadNotification($"Casual stats updated for {updatedPlayers} player(s).", "success");
-            }
-            else
-            {
-                ShowUploadNotification("Casual match detected, but no player stats were updated.", "warning");
-            }
-
-            Log($"<color=cyan>[Casual] Casual match handling complete - updated {updatedPlayers}/{leaderboardNames.Count} players</color>");
+            string storedMatchType = PlayerPrefs.GetString("MatchType", Season2RuleSet.MATCH_TYPE_RANKED);
+            return Season2RuleSet.ToQueueMatchType(storedMatchType);
         }
 
         private void Awake() {
@@ -446,6 +356,7 @@ namespace SBGLeagueAutomation
                 getBaseApiUrl: GetBaseApiUrl,
                 logger: Log,
                 callApi: CallAPI,
+                callGateway: CallGateway,
                 parseApiSingleObject: ParseApiSingleObject,
                 startCoroutine: (coro) => StartCoroutine(coro)
             );
@@ -516,6 +427,7 @@ namespace SBGLeagueAutomation
 
         private void OnSceneLoaded(Scene scene, LoadSceneMode mode) {
             string sceneName = scene.name.ToLower();
+            _cachedIsMenuScene = sceneName.Contains("menu");
             Log($"<color=cyan>[Scene] Loaded: {scene.name}</color>");
 
             string currentLobbyName = ResolveCurrentLobbyName();
@@ -613,13 +525,89 @@ namespace SBGLeagueAutomation
             if (!_isInGameplay || !CourseManager.ForceDisplayScoreboard) {
                 return;
             }
-            // ForceDisplayScoreboard fires after each hole — capture a per-hole screenshot
-            // and keep it as the pending screenshot (do not upload here). The authoritative
-            // course-end upload will be driven by CourseManager.RpcInformEndingCourse (patched).
-            Log("<color=cyan>[Match Signal] CourseManager forced the scoreboard (capture-only)</color>");
+            Log("<color=cyan>[Match Signal] CourseManager forced the scoreboard — hole complete</color>");
 
             if (_matchScreenshotSignalCoroutine == null && !_matchScreenshotUploadCompleted) {
                 _matchScreenshotSignalCoroutine = StartCoroutine(CaptureAndStorePerHoleScreenshot("CourseManager.ForceDisplayScoreboardChanged"));
+            }
+
+            // Push current scores to the API immediately when each hole ends.
+            if (!string.IsNullOrEmpty(_currentMatchId)) {
+                StartCoroutine(PushPerHoleScoreUpdate());
+            }
+        }
+
+        private IEnumerator PushPerHoleScoreUpdate() {
+            var liveLeaderboard = UnityEngine.Object.FindAnyObjectByType<SBGLLiveLeaderboard.LiveLeaderboardPlugin>(FindObjectsInactive.Include);
+            if (liveLeaderboard == null) yield break;
+
+            var players = liveLeaderboard.GetCurrentLeaderboard();
+            if (players == null || players.Count == 0) yield break;
+
+            List<string> names = players.Where(p => p != null && !string.IsNullOrWhiteSpace(p.Name)).Select(p => p.Name).ToList();
+            var testOverrides = GetTestPlayerOverrides(names);
+
+            foreach (var player in players) {
+                if (player == null || string.IsNullOrWhiteSpace(player.Name) || player.BaseScore == 0) continue;
+
+                int gamePoints = player.BaseScore;
+                int scoreVsPar = 0;
+                if (!string.IsNullOrEmpty(player.RawStrokes)) {
+                    string s = player.RawStrokes.Replace("±", "").Trim();
+                    int.TryParse(s, out scoreVsPar);
+                }
+
+                string playerId = null;
+                if (!TryGetPlayerIdForName(player.Name, out playerId)) {
+                    string overrideName = ApplyTestPlayerOverride(player.Name, testOverrides);
+                    yield return ResolvePlayerIdByNameFromApi(overrideName, (id) => playerId = id);
+                    if (!string.IsNullOrEmpty(playerId))
+                        _playerIdsByName[player.Name.Trim()] = playerId;
+                }
+                if (string.IsNullOrEmpty(playerId)) continue;
+
+                string entryId = null;
+                _playerMatchEntryIds.TryGetValue(playerId, out entryId);
+
+                // Resolve pre-match MMR: prefer profile for local player, fall back to leaderboard cache
+                string preHoleMmr = null;
+                if (_userProfile != null && string.Equals(player.Name, _userProfile.display_name, System.StringComparison.OrdinalIgnoreCase)) {
+                    preHoleMmr = _userProfile.current_mmr > 0 ? _userProfile.current_mmr.ToString(System.Globalization.CultureInfo.InvariantCulture) : null;
+                }
+                if (string.IsNullOrEmpty(preHoleMmr) && !string.IsNullOrEmpty(playerId)) {
+                    string lbMmr = player.MMR;
+                    if (!string.IsNullOrEmpty(lbMmr) && lbMmr != "..." && lbMmr != "--"
+                        && float.TryParse(lbMmr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out _)) {
+                        preHoleMmr = lbMmr;
+                    } else {
+                        yield return CallAPI($"/player?id=eq.{playerId}&select=current_mmr&limit=1", "GET", "", (res) => {
+                            JObject p2 = ParseApiSingleObject(res);
+                            object mmrObj = p2?["current_mmr"];
+                            if (mmrObj != null) preHoleMmr = mmrObj.ToString();
+                        });
+                    }
+                }
+
+                // post_match_mmr = pre + projected Elo delta from leaderboard calculation
+                string postHoleMmr = null;
+                if (!string.IsNullOrEmpty(preHoleMmr)
+                    && float.TryParse(preHoleMmr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float preHoleMmrF)) {
+                    int delta = ParseProjectedMmrDelta(player.ProjectedDisplay);
+                    postHoleMmr = (preHoleMmrF + delta).ToString(System.Globalization.CultureInfo.InvariantCulture);
+                }
+
+                if (string.IsNullOrEmpty(entryId)) {
+                    yield return ResolveMatchEntryForPlayer(
+                        "Per-Hole Push",
+                        playerId, player.Name,
+                        (id) => entryId = id);
+                }
+
+                if (!string.IsNullOrEmpty(entryId)) {
+                    yield return UpdateMatchEntry(entryId, playerId, player.Name, gamePoints, scoreVsPar, 0, postHoleMmr, preHoleMmr);
+                    _lastSubmittedScores[player.Name] = gamePoints;
+                    _lastSubmittedScoresVsPar[player.Name] = scoreVsPar;
+                }
             }
         }
 
@@ -697,7 +685,7 @@ namespace SBGLeagueAutomation
                 yield break;
             }
 
-            if (!_matchStatsSubmitted && !string.IsNullOrWhiteSpace(_currentMatchId)) {
+            if (!_matchStatsSubmitted && (!string.IsNullOrWhiteSpace(_currentMatchId) || IsCurrentMatchTeamRanked())) {
                 yield return FinalizeMatchStats();
 
                 if (IsRankedTriggered && _currentSession != null) {
@@ -829,7 +817,7 @@ namespace SBGLeagueAutomation
 
                 string existingScreenshotUrl = null;
                 bool readSucceeded = false;
-                yield return CallAPI($"/Match/{_currentMatchId}", "GET", "", (res) => {
+                yield return CallAPI($"/match?id=eq.{_currentMatchId}&select=*", "GET", "", (res) => {
                     readSucceeded = true;
                     JObject match = ParseApiSingleObject(res);
                     existingScreenshotUrl = (string)match?["screenshot_url"];
@@ -855,13 +843,13 @@ namespace SBGLeagueAutomation
                 }
 
                 var payload = new JObject {
+                    ["match_id"] = _currentMatchId,
                     ["screenshot_url"] = _pendingUploadedScreenshotUrl
                 };
 
                 bool uploadSucceeded = false;
-                yield return CallAPI($"/Match/{_currentMatchId}", "PUT", payload.ToString(Newtonsoft.Json.Formatting.None), (res) => {
-                    JObject response = ParseApiSingleObject(res);
-                    uploadSucceeded = response != null;
+                yield return CallGateway("match.update", payload, (res) => {
+                    uploadSucceeded = true;
                 });
 
                 if (uploadSucceeded) {
@@ -878,6 +866,11 @@ namespace SBGLeagueAutomation
         }
 
         private IEnumerator UploadMatchScreenshotFile(Action<string> onUploaded) {
+            // Storage bucket not yet configured — skip upload until one is created.
+            onUploaded?.Invoke(null);
+            yield break;
+
+#pragma warning disable CS0162
             if (_pendingMatchScreenshotBytes == null || _pendingMatchScreenshotBytes.Length == 0) {
                 onUploaded?.Invoke(null);
                 yield break;
@@ -917,6 +910,7 @@ namespace SBGLeagueAutomation
                     onUploaded?.Invoke(null);
                 }
             }
+#pragma warning restore CS0162
         }
 
         private string BuildMatchScreenshotFileName() {
@@ -933,13 +927,11 @@ namespace SBGLeagueAutomation
 
         private void ApplyIntegrationHeaders(UnityWebRequest req) {
             if (req == null) return;
-
             string authToken = GetAuthToken();
             if (!string.IsNullOrWhiteSpace(authToken)) {
-                req.SetRequestHeader("api_key", authToken);
+                req.SetRequestHeader("apikey", authToken);
+                req.SetRequestHeader("Authorization", $"Bearer {authToken}");
             }
-
-            req.SetRequestHeader("X-App-Id", GetAppId());
         }
 
         private void ClearPendingMatchScreenshot() {
@@ -1106,8 +1098,7 @@ namespace SBGLeagueAutomation
             yield return new WaitForSeconds(1.5f);
 
             // Query Match endpoint to check if entry already exists for this session
-            string query = $"{{\"matchmaking_session_id\":\"{_currentSession.id}\"}}";
-            string fullUrl = $"{GetBaseApiUrl()}/Match?q={UnityWebRequest.EscapeURL(query)}";
+            string fullUrl = $"{GetBaseApiUrl()}/match?matchmaking_session_id=eq.{_currentSession.id}";
             
             Log($"<color=cyan>[Match Stats] Checking for existing match entry...</color>");
             Log($"<color=cyan>[Match Stats] Query URL: {fullUrl.Substring(0, Math.Min(150, fullUrl.Length))}...</color>");
@@ -1158,8 +1149,7 @@ namespace SBGLeagueAutomation
                 }
             }
 
-            string query = $"{{\"matchmaking_session_id\":\"{activeSessionId}\"}}";
-            string fullUrl = $"{GetBaseApiUrl()}/Match?q={UnityWebRequest.EscapeURL(query)}&sort_by=created_date";
+            string fullUrl = $"{GetBaseApiUrl()}/match?matchmaking_session_id=eq.{activeSessionId}&order=created_at.asc";
 
             using (UnityWebRequest req = UnityWebRequest.Get(fullUrl)) {
                 ApplyApiHeaders(req);
@@ -1193,7 +1183,7 @@ namespace SBGLeagueAutomation
                     string id = (string)match["id"];
                     return !string.IsNullOrWhiteSpace(id) && !_finalizedMatchIds.Contains(id);
                 })
-                .OrderByDescending(match => ParseApiTimestamp((string)match["created_date"]))
+                .OrderByDescending(match => ParseApiTimestamp((string)match["created_at"]))
                 .FirstOrDefault();
         }
 
@@ -1279,8 +1269,7 @@ namespace SBGLeagueAutomation
                 yield break;
             }
 
-            string query = $"{{\"match_id\":\"{matchId}\",\"player_id\":\"{playerId}\"}}";
-            yield return CallAPI($"/MatchEntry?q={UnityWebRequest.EscapeURL(query)}&limit=1&sort_by=created_date", "GET", "", (res) => {
+            yield return CallAPI($"/match_entry?match_id=eq.{matchId}&player_id=eq.{playerId}&limit=1&order=created_at.asc", "GET", "", (res) => {
                 JObject existingEntry = ParseApiObjectList(res).FirstOrDefault();
                 if (existingEntry != null) {
                     resolvedId = (string)existingEntry["id"];
@@ -1314,16 +1303,18 @@ namespace SBGLeagueAutomation
             }
         }
 
-        private IEnumerator EnsureMatchEntryForPlayer(
+        /// <summary>
+        /// Resolves the MatchEntry ID for a player, from cache first and then from the database.
+        ///
+        /// This no longer creates entries. Under the mod gateway there is no entry-create action —
+        /// every MatchEntry originates from the single match.submit call that also creates the Match,
+        /// so the full roster must be known at submit time. A player who is not part of that roster
+        /// (e.g. joined after submission) cannot get an entry, and their scores will not be recorded.
+        /// </summary>
+        private IEnumerator ResolveMatchEntryForPlayer(
             string sourceTag,
             string playerId,
             string playerName,
-            string preMatchMmr,
-            string postMatchMmr, // <-- new param
-            int gamePoints,
-            int scoreVsPar,
-            int finishPosition,
-            string notes,
             Action<string> onResolved)
         {
             if (string.IsNullOrWhiteSpace(_currentMatchId) || string.IsNullOrWhiteSpace(playerId)) {
@@ -1360,63 +1351,8 @@ namespace SBGLeagueAutomation
                     yield break;
                 }
 
-                int adjustedScore = gamePoints + (scoreVsPar * -10);
-
-                // Don't create a row for a player who hasn't scored anything yet.
-                // The monitor will create the entry once their score becomes non-zero.
-                if (gamePoints == 0) {
-                    Log($"<color=yellow>[{sourceTag}] Skipping MatchEntry POST for {resolvedPlayerName} — score is 0</color>");
-                    onResolved?.Invoke(null);
-                    yield break;
-                }
-
-                var payload = new JObject {
-                    ["match_id"] = _currentMatchId,
-                    ["player_id"] = playerId,
-                    ["player_name"] = resolvedPlayerName,
-                    ["game_points"] = gamePoints,
-                    ["over_under"] = scoreVsPar,
-                    ["score_vs_par"] = scoreVsPar,
-                    ["adjusted_match_score"] = adjustedScore,
-                    ["notes"] = notes ?? string.Empty
-                };
-                float preMmr = 0, postMmr = 0;
-                if (!string.IsNullOrWhiteSpace(preMatchMmr)
-                    && float.TryParse(preMatchMmr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out preMmr)) {
-                    payload["pre_match_mmr"] = preMmr;
-                }
-                if (!string.IsNullOrWhiteSpace(postMatchMmr)
-                    && float.TryParse(postMatchMmr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out postMmr)) {
-                    payload["post_match_mmr"] = postMmr;
-                    payload["mmr_change"] = postMmr - preMmr;
-                }
-
-                if (finishPosition > 0) {
-                    payload["finish_position"] = finishPosition;
-                }
-
-                string createdEntryId = null;
-                yield return CallAPI("/MatchEntry", "POST", payload.ToString(Newtonsoft.Json.Formatting.None), (res) => {
-                    try {
-                        JObject response = ParseApiSingleObject(res);
-                        if (response != null) {
-                            createdEntryId = (string)response["id"];
-                        }
-                    } catch (System.Exception ex) {
-                        Log($"<color=yellow>[{sourceTag}] Could not parse MatchEntry response: {ex.Message}</color>");
-                    }
-                });
-
-                if (!string.IsNullOrWhiteSpace(createdEntryId)) {
-                    _playerMatchEntryIds[playerId] = createdEntryId;
-                    if (!string.IsNullOrWhiteSpace(resolvedPlayerName)) {
-                        _playerIdsByName[resolvedPlayerName] = playerId;
-                    }
-
-                    Log($"<color=green>[{sourceTag}] ✓ MatchEntry created for {resolvedPlayerName}: {createdEntryId}</color>");
-                }
-
-                onResolved?.Invoke(createdEntryId);
+                Log($"<color=yellow>[{sourceTag}] No MatchEntry exists for {resolvedPlayerName} — they were not part of the submitted roster, so their scores cannot be recorded.</color>");
+                onResolved?.Invoke(null);
             }
             finally {
                 _matchEntryCreationInProgress.Remove(playerId);
@@ -1424,7 +1360,7 @@ namespace SBGLeagueAutomation
         }
 
         private IEnumerator FinalizeAndResetAfterDrivingRange() {
-            if (!_matchStatsSubmitted && !string.IsNullOrEmpty(_currentMatchId)) {
+            if (!_matchStatsSubmitted && (!string.IsNullOrEmpty(_currentMatchId) || IsCurrentMatchTeamRanked())) {
                 yield return FinalizeMatchStats();
             }
 
@@ -1461,6 +1397,7 @@ namespace SBGLeagueAutomation
             _playerIdsByName.Clear();
             _lastSubmittedScores.Clear();
             _lastSubmittedScoresVsPar.Clear();
+            _cachedTeamAssignments.Clear();
             _matchEntriesCreated = false;
             _matchStatsSubmitted = false;
             _proSeriesSkipLogged = false;
@@ -1732,9 +1669,8 @@ namespace SBGLeagueAutomation
         }
 
         private IEnumerator RefreshPlayerList() {
-            string query = "{\"$or\":[{\"status\":\"queued\"},{\"status\":\"matched\"}]}";
-            string fullUrl = $"{GetBaseApiUrl()}/MatchmakingQueue?q={UnityWebRequest.EscapeURL(query)}";
-            Log($"<color=cyan>[Sync] GET /MatchmakingQueue (fetching queued players)</color>");
+            string fullUrl = $"{GetBaseApiUrl()}/matchmaking_queue?status=in.(queued,matched)";
+            Log($"<color=cyan>[Sync] GET /matchmaking_queue (fetching queued players)</color>");
             Log($"<color=cyan>[Sync] Full URL: {fullUrl.Substring(0, Math.Min(150, fullUrl.Length))}...</color>");
             using (UnityWebRequest req = UnityWebRequest.Get(fullUrl)) {
                 ApplyApiHeaders(req);
@@ -1804,8 +1740,8 @@ namespace SBGLeagueAutomation
         }
 
         private IEnumerator CheckExistingQueueEntry() {
-            string checkQuery = $"{{\"player_id\":\"{_userProfile.id}\",\"status\":\"queued\"}}";
-            string checkUrl = $"{GetBaseApiUrl()}/MatchmakingQueue?q={UnityWebRequest.EscapeURL(checkQuery)}";
+            if (_userProfile == null) yield break;
+            string checkUrl = $"{GetBaseApiUrl()}/matchmaking_queue?player_id=eq.{_userProfile.id}&status=eq.queued";
             using (UnityWebRequest req = UnityWebRequest.Get(checkUrl)) {
                 ApplyApiHeaders(req);
                 yield return req.SendWebRequest();
@@ -1818,14 +1754,14 @@ namespace SBGLeagueAutomation
                         _queueStartTime = DateTime.Now;
                         Log($"<color=yellow>[Queue] Detected existing queue entry {_currentQueueId} from website — rejoining.</color>");
                         // Patch has_mod:true onto the web entry
-                        string patchJson = "{" +
-                            $"\"has_mod\":true," +
-                            $"\"created_by\":\"SBGL_UnifiedMod\"," +
-                            $"\"match_type\":\"{GetQueueMatchTypePayload()}\"" +
-                        "}";
-                        yield return CallAPI($"/MatchmakingQueue/{_currentQueueId}", "PUT", patchJson, (res) => {
-                            if (ParseApiSingleObject(res) != null)
-                                Log($"<color=green>[Queue] ✓ Patched has_mod:true onto existing entry {_currentQueueId}.</color>");
+                        var patchPayload = new JObject {
+                            ["queue_id"] = _currentQueueId,
+                            ["has_mod"] = true,
+                            ["created_by"] = "SBGL_UnifiedMod",
+                            ["match_type"] = GetQueueMatchTypePayload()
+                        };
+                        yield return CallGateway("queue.update", patchPayload, (res) => {
+                            Log($"<color=green>[Queue] ✓ Patched has_mod:true onto existing entry {_currentQueueId}.</color>");
                         });
                     }
                 }
@@ -1841,9 +1777,10 @@ namespace SBGLeagueAutomation
 
             // Check if a queue entry already exists for this player (e.g. created via website).
             // If so, PATCH has_mod onto it rather than creating a duplicate.
+            // Also cache the real Supabase auth user_id if we see it in an existing entry.
             string existingId = null;
-            string checkQuery = $"{{\"player_id\":\"{_userProfile.id}\",\"status\":\"queued\"}}";
-            string checkUrl = $"{GetBaseApiUrl()}/MatchmakingQueue?q={UnityWebRequest.EscapeURL(checkQuery)}";
+
+            string checkUrl = $"{GetBaseApiUrl()}/matchmaking_queue?player_id=eq.{_userProfile.id}&status=eq.queued";
             Log($"<color=cyan>[Queue] Checking for existing entry for player {_userProfile.id}...</color>");
             using (UnityWebRequest checkReq = UnityWebRequest.Get(checkUrl)) {
                 ApplyApiHeaders(checkReq);
@@ -1852,6 +1789,11 @@ namespace SBGLeagueAutomation
                     List<JObject> existing = ParseApiObjectList(checkReq.downloadHandler.text);
                     if (existing != null && existing.Count > 0) {
                         existingId = (string)existing[0]["id"];
+                        string foundUserId = (string)existing[0]["user_id"];
+                        if (!string.IsNullOrEmpty(foundUserId)) {
+                            PlayerPrefs.SetString("SBGLUserAuthUUID", foundUserId);
+                            PlayerPrefs.Save();
+                        }
                         Log($"<color=yellow>[Queue] Found existing entry {existingId} — patching has_mod:true</color>");
                     } else {
                         Log("<color=cyan>[Queue] No existing entry found — will create new.</color>");
@@ -1863,40 +1805,36 @@ namespace SBGLeagueAutomation
 
             if (existingId != null) {
                 // Update the existing entry to mark has_mod:true and refresh queued_at
-                string patchJson = "{" +
-                    $"\"has_mod\":true," +
-                    $"\"created_by\":\"SBGL_UnifiedMod\"," +
-                    $"\"match_type\":\"{GetQueueMatchTypePayload()}\"," +
-                    $"\"queued_at\":\"{DateTime.UtcNow:yyyy-MM-ddTHH:mm:ss.fffZ}\"" +
-                "}";
-                yield return CallAPI($"/MatchmakingQueue/{existingId}", "PUT", patchJson, (res) => {
-                    JObject updated = ParseApiSingleObject(res);
-                    if (updated != null) {
-                        _currentQueueId = existingId;
-                        _webStatus = "QUEUED";
-                        Log($"<color=green>[Queue] ✓ Updated existing entry {existingId} with has_mod:true.</color>");
-                    } else {
-                        Log($"<color=red>[Queue] Failed to update existing entry {existingId}.</color>");
-                    }
+                var patchPayload = new JObject {
+                    ["queue_id"] = existingId,
+                    ["has_mod"] = true,
+                    ["created_by"] = "SBGL_UnifiedMod",
+                    ["match_type"] = GetQueueMatchTypePayload(),
+                    ["queued_at"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+                };
+                yield return CallGateway("queue.update", patchPayload, (res) => {
+                    _currentQueueId = existingId;
+                    _webStatus = "QUEUED";
+                    Log($"<color=green>[Queue] ✓ Updated existing entry {existingId} with has_mod:true.</color>");
+                }, (err) => {
+                    Log($"<color=red>[Queue] Failed to update existing entry {existingId}.</color>");
                 });
             } else {
                 // No existing entry — create a fresh one with has_mod:true
-                string json = "{" +
-                    $"\"player_id\":\"{_userProfile.id}\"," +
-                    $"\"user_id\":\"{_userProfile.id}\"," +
-                    $"\"display_name\":\"{_userProfile.display_name}\"," +
-                    $"\"mmr_snapshot\":{_userProfile.current_mmr}," +
-                    $"\"region\":\"{_userProfile.region}\"," +
-                    $"\"state_province\":\"{_userProfile.state_province ?? ""}\"," +
-                    $"\"match_type\":\"{GetQueueMatchTypePayload()}\"," +
-                    $"\"has_mod\":true," +
-                    $"\"created_by\":\"SBGL_UnifiedMod\"," +
-                    $"\"status\":\"queued\"," +
-                    $"\"queued_at\":\"{DateTime.UtcNow:yyyy-MM-ddTHH:mm:ss.fffZ}\"" +
-                "}";
-                yield return CallAPI("/MatchmakingQueue", "POST", json, (res) => {
-                    JObject queueResponse = ParseApiSingleObject(res);
-                    _currentQueueId = (string)queueResponse?["id"] ?? _currentQueueId;
+                var joinPayload = new JObject {
+                    ["user_id"] = GetOrDeriveUserUUID(),
+                    ["player_id"] = _userProfile.id,
+                    ["mmr_snapshot"] = _userProfile.current_mmr,
+                    ["region"] = _userProfile.region,
+                    ["state_province"] = _userProfile.state_province ?? "",
+                    ["match_type"] = GetQueueMatchTypePayload(),
+                    ["has_mod"] = true,
+                    ["created_by"] = "SBGL_UnifiedMod",
+                    ["status"] = "queued",
+                    ["queued_at"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+                };
+                yield return CallGateway("queue.join", joinPayload, (res) => {
+                    _currentQueueId = (string)res?["id"] ?? (string)res?["queue_id"] ?? _currentQueueId;
                     _webStatus = "QUEUED";
                     Log($"<color=green>[Queue] ✓ Created new entry {_currentQueueId} with has_mod:true.</color>");
                 });
@@ -1906,15 +1844,17 @@ namespace SBGLeagueAutomation
         private IEnumerator LeaveQueue() {
             if (string.IsNullOrEmpty(_currentQueueId)) { ResetPluginState(); yield break; }
             _webStatus = "LEAVING...";
-            string json = "{" + $"\"player_id\":\"{_userProfile.id}\",\"status\":\"cancelled\"" + "}";
+            var payload = new JObject {
+                ["queue_id"] = _currentQueueId,
+                ["player_id"] = _userProfile.id,
+                ["status"] = "cancelled"
+            };
 
             bool leaveSuccess = false;
-            yield return CallAPI($"/MatchmakingQueue/{_currentQueueId}", "PUT", json, (res) => {
-                if (ParseApiSingleObject(res) != null) {
-                    ResetPluginState();
-                    Log("✓ Left Queue.");
-                    leaveSuccess = true;
-                }
+            yield return CallGateway("queue.leave", payload, (res) => {
+                ResetPluginState();
+                Log("✓ Left Queue.");
+                leaveSuccess = true;
             });
             
             if (!leaveSuccess) {
@@ -1924,33 +1864,55 @@ namespace SBGLeagueAutomation
         }
 
         private IEnumerator CheckForMatch() {
-            string query = "{\"$or\":[{\"host_player_id\":\"" + _userProfile.id + "\"},{\"player_ids\":{\"$in\":[\"" + _userProfile.id + "\"]}}],\"status\":\"pending_accept\"}";
-            string fullUrl = $"{GetBaseApiUrl()}/MatchmakingSession?q={UnityWebRequest.EscapeURL(query)}";
-            Log($"<color=cyan>[Sync] GET /MatchmakingSession (checking for pending matches)</color>");
-            Log($"<color=cyan>[Sync] Full URL: {fullUrl.Substring(0, Math.Min(150, fullUrl.Length))}...</color>");
-            using (UnityWebRequest req = UnityWebRequest.Get(fullUrl)) {
+            // PostgREST doesn't support ::text casting inside or(), so we make two requests:
+            // one for host_player_id match, one for player_ids jsonb array containment.
+            Log($"<color=cyan>[Sync] GET /matchmaking_session (checking for pending matches)</color>");
+
+            JObject activeSession = null;
+
+            string urlHost = $"{GetBaseApiUrl()}/matchmaking_session?host_player_id=eq.{_userProfile.id}&status=eq.pending_accept";
+            Log($"<color=cyan>[Sync] Full URL: {urlHost.Substring(0, Math.Min(150, urlHost.Length))}...</color>");
+            using (UnityWebRequest req = UnityWebRequest.Get(urlHost)) {
                 ApplyApiHeaders(req);
                 yield return req.SendWebRequest();
-
                 if (req.result == UnityWebRequest.Result.Success) {
                     List<JObject> sessions = ParseApiObjectList(req.downloadHandler.text);
-                    JObject activeSession = sessions.FirstOrDefault(session => !string.IsNullOrEmpty((string)session["lobby_name"]));
-
-                    if (activeSession != null) {
-                        // Session parsing logic is now handled elsewhere
-                        _webStatus = "MATCH FOUND: PENDING";
-                        Log("Match Found! Accept needed.");
-                    }
+                    activeSession = sessions.FirstOrDefault(s => !string.IsNullOrEmpty((string)s["lobby_name"]));
                 } else {
-                    Log($"<color=red>[Sync] CheckForMatch failed: {req.result} - {req.error}</color>");
+                    Log($"<color=red>[Sync] CheckForMatch (host) failed: {req.result} - {req.error} | body: {req.downloadHandler?.text}</color>");
                 }
+            }
+
+            if (activeSession == null) {
+                // player_ids is jsonb — use containment operator @> via PostgREST "cs"
+                // URL-encode the jsonb array literal ["id"] so the request is well-formed
+                string encodedId = $"%5B%22{_userProfile.id}%22%5D"; // ["<id>"]
+                string urlPlayer = $"{GetBaseApiUrl()}/matchmaking_session?player_ids=cs.{encodedId}&status=eq.pending_accept";
+                Log($"<color=cyan>[Sync] Full URL: {urlPlayer.Substring(0, Math.Min(150, urlPlayer.Length))}...</color>");
+                using (UnityWebRequest req = UnityWebRequest.Get(urlPlayer)) {
+                    ApplyApiHeaders(req);
+                    yield return req.SendWebRequest();
+                    if (req.result == UnityWebRequest.Result.Success) {
+                        List<JObject> sessions = ParseApiObjectList(req.downloadHandler.text);
+                        activeSession = sessions.FirstOrDefault(s => !string.IsNullOrEmpty((string)s["lobby_name"]));
+                    } else {
+                        Log($"<color=red>[Sync] CheckForMatch (player) failed: {req.result} - {req.error} | body: {req.downloadHandler?.text}</color>");
+                    }
+                }
+            }
+
+            if (activeSession != null) {
+                _currentSession = ParseSessionFromJson(activeSession);
+                _isHost = string.Equals(_currentSession?.host_player_id, _userProfile?.id, StringComparison.Ordinal);
+                _webStatus = "MATCH FOUND: PENDING";
+                Log($"<color=yellow>[CheckForMatch] Session {_currentSession?.id} found. Host: {_isHost}</color>");
             }
         }
 
         private IEnumerator PollSessionStatus() {
                 // (removed misplaced closing brace)
-            string fullUrl = $"{GetBaseApiUrl()}/MatchmakingSession/{_currentSession.id}";
-            Log($"<color=cyan>[Sync] GET /MatchmakingSession/{_currentSession.id} (polling status)</color>");
+            string fullUrl = $"{GetBaseApiUrl()}/matchmaking_session?id=eq.{_currentSession.id}&select=*";
+            Log($"<color=cyan>[Sync] GET /matchmaking_session/{_currentSession.id} (polling status)</color>");
             Log($"<color=cyan>[Sync] Full URL: {fullUrl}</color>");
             using (UnityWebRequest req = UnityWebRequest.Get(fullUrl)) {
                 ApplyApiHeaders(req);
@@ -1967,22 +1929,27 @@ namespace SBGLeagueAutomation
                     _currentSession.status = statusFromApi ?? _currentSession.status;
                     Log($"<color=cyan>[Sync] Status from API: {statusFromApi}</color>");
                     
-                    // Update accepted_player_ids from API response
-                    var acceptedIds = session["accepted_player_ids"]?.ToObject<List<string>>();
-                    if (acceptedIds != null) {
+                    // Update accepted_player_ids from API response (stored as TEXT-encoded JSON string)
+                    string acceptedIdsRaw = session["accepted_player_ids"]?.ToString();
+                    if (!string.IsNullOrEmpty(acceptedIdsRaw)) {
+                        var acceptedIds = ParseTextJsonArray(acceptedIdsRaw);
                         _currentSession.accepted_player_ids = acceptedIds;
                         Log($"<color=cyan>[Sync] Updated accepted_player_ids: {acceptedIds.Count} players have accepted</color>");
-                        
+
                         // Check if all players have accepted and transition to ready if needed
-                        if (_currentSession.status == "pending_accept" && 
+                        if (_currentSession.status == "pending_accept" &&
+                            _currentSession.player_ids != null &&
                             _currentSession.accepted_player_ids.Count == _currentSession.player_ids.Count) {
                             Log($"<color=green>[Sync] All {_currentSession.player_ids.Count} players have accepted! Transitioning to ready...</color>");
                             _currentSession.status = "ready";
                             _webStatus = _isHost ? "READY: HOST" : "READY: JOIN";
                             
                             // Notify server of ready state
-                            string readyJson = "{\"status\":\"ready\"}";
-                            yield return CallAPI($"/MatchmakingSession/{_currentSession.id}", "PUT", readyJson, (res) => {
+                            var readyPayload = new JObject {
+                                ["matchmaking_session_id"] = _currentSession.id,
+                                ["status"] = "ready"
+                            };
+                            yield return CallGateway("session.update", readyPayload, (res) => {
                                 Log("<color=green>[Sync] ✓ Session transitioned to READY</color>");
                             });
                         }
@@ -2035,17 +2002,20 @@ namespace SBGLeagueAutomation
                 acceptedIds.Add(_userProfile.id);
             }
             
-            string acceptedIdsList = string.Join("\",\"", acceptedIds);
-            string acceptJson = "{\"accepted_player_ids\":[\"" + acceptedIdsList + "\"]}";
-            
+            // Column is TEXT storing a JSON-encoded string, not a native array
+            string innerArray = JArray.FromObject(acceptedIds).ToString(Newtonsoft.Json.Formatting.None);
+            var acceptPayload = new JObject {
+                ["matchmaking_session_id"] = _currentSession.id,
+                ["accepted_player_ids"] = innerArray
+            };
+
             Log($"<color=cyan>[Accept] Current player accepting: {_userProfile.id}</color>");
             Log($"<color=cyan>[Accept] Total accepted players: {acceptedIds.Count}</color>");
-            Log($"<color=cyan>[Accept] JSON payload: {acceptJson}</color>");
-            
+
             // Update local session object immediately to maintain state
             _currentSession.accepted_player_ids = new List<string>(acceptedIds);
-            
-            yield return CallAPI($"/MatchmakingSession/{_currentSession.id}", "PUT", acceptJson, (res) => {
+
+            yield return CallGateway("session.update", acceptPayload, (res) => {
                 Log("<color=green>✓ Match Accepted. Waiting for all players to accept before transitioning to ready...</color>");
                 // Do NOT call TransitionToReady() here - the server will handle transitioning to 'ready'
                 // when all players have accepted. The mod will poll and detect the status change.
@@ -2103,10 +2073,15 @@ namespace SBGLeagueAutomation
                 string rawMatchType = session.match_type ?? string.Empty;
                 bool isCasual = IsCasualMatchType(rawMatchType);
                 bool isProSeries = IsProSeriesMatchType(rawMatchType);
-                string matchTypeToStore = isCasual
-                    ? Season1RuleSet.MATCH_TYPE_CASUAL
-                    : isProSeries ? Season1RuleSet.MATCH_TYPE_PRO_SERIES : Season1RuleSet.MATCH_TYPE_RANKED;
-                int seasonToStore = isCasual ? 0 : session.season > 0 ? session.season : Season1RuleSet.SEASON;
+                // Team formats created on the website arrive as team_2v2_ranked / team_3v3_ranked /
+                // team_4v4_ranked and are stored verbatim so the submission path can size the rosters.
+                bool isTeam = Season2RuleSet.IsTeamMatchType(rawMatchType);
+                string matchTypeToStore = isTeam
+                    ? rawMatchType.Trim().ToLowerInvariant()
+                    : isCasual
+                        ? Season2RuleSet.MATCH_TYPE_CASUAL
+                        : isProSeries ? Season2RuleSet.MATCH_TYPE_PRO_SERIES : Season2RuleSet.MATCH_TYPE_RANKED;
+                int seasonToStore = isCasual ? 0 : session.season > 0 ? session.season : Season2RuleSet.SEASON;
                 string hostRulesetToStore = isCasual ? "casual" : isProSeries ? "pro_series" : "ranked";
 
                 if (isCasual)
@@ -2231,25 +2206,20 @@ namespace SBGLeagueAutomation
 
             _hostCancelSent = true;
             string sessionId = _currentSession.id;
-            string json = "{\"status\":\"completed\"}";
+            var payload = new JObject {
+                ["matchmaking_session_id"] = sessionId,
+                ["status"] = "completed"
+            };
 
-            using (UnityWebRequest req = new UnityWebRequest(GetBaseApiUrl() + $"/MatchmakingSession/{sessionId}", "PUT")) {
-                req.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(json));
-                req.downloadHandler = new DownloadHandlerBuffer();
-                ApplyApiHeaders(req);
-
-                yield return req.SendWebRequest();
-
-                if (req.result == UnityWebRequest.Result.Success) {
-                    if (_currentSession != null && _currentSession.id == sessionId) {
-                        _currentSession.status = "completed";
-                    }
-                    Log($"Host leave update sent ({reason}): session marked completed.");
-                } else {
-                    _hostCancelSent = false;
-                    Log($"<color=red>Host cancel failed ({reason}): {req.result} {req.error}</color>");
+            yield return CallGateway("session.update", payload, (res) => {
+                if (_currentSession != null && _currentSession.id == sessionId) {
+                    _currentSession.status = "completed";
                 }
-            }
+                Log($"Host leave update sent ({reason}): session marked completed.");
+            }, (err) => {
+                _hostCancelSent = false;
+                Log($"<color=red>Host cancel failed ({reason}): {err}</color>");
+            });
         }
 
         private IEnumerator UploadSteamLobbyLink(string steamLink) {
@@ -2263,28 +2233,23 @@ namespace SBGLeagueAutomation
             _lastUploadAttemptAt = DateTime.Now;
             _lastGeneratedSteamLink = steamLink;
             Log($"Uploading Steam Lobby Link to API...");
-            string json = "{" + $"\"steam_lobby_link\":\"{steamLink}\"" + "}";
+            var payload = new JObject {
+                ["matchmaking_session_id"] = _currentSession.id,
+                ["steam_lobby_link"] = steamLink
+            };
 
-            using (UnityWebRequest req = new UnityWebRequest(GetBaseApiUrl() + $"/MatchmakingSession/{_currentSession.id}", "PUT")) {
-                req.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(json));
-                req.downloadHandler = new DownloadHandlerBuffer();
-                ApplyApiHeaders(req);
-
-                yield return req.SendWebRequest();
-
-                if (req.result == UnityWebRequest.Result.Success) {
-                    _steamLinkUploadSuccesses++;
-                    _lastUploadSuccessAt = DateTime.Now;
-                    _lastUploadedSteamLink = steamLink;
-                    _currentSession.steam_lobby_link = steamLink;
-                    _lastUploadError = "-";
-                    Log("<color=green>Steam Lobby Link uploaded successfully.</color>");
-                } else {
-                    _steamLinkUploadFailures++;
-                    _lastUploadError = $"{req.result}: {req.error}";
-                    Log($"<color=red>Steam Lobby Link upload failed: {_lastUploadError}</color>");
-                }
-            }
+            yield return CallGateway("session.update", payload, (res) => {
+                _steamLinkUploadSuccesses++;
+                _lastUploadSuccessAt = DateTime.Now;
+                _lastUploadedSteamLink = steamLink;
+                _currentSession.steam_lobby_link = steamLink;
+                _lastUploadError = "-";
+                Log("<color=green>Steam Lobby Link uploaded successfully.</color>");
+            }, (err) => {
+                _steamLinkUploadFailures++;
+                _lastUploadError = err;
+                Log($"<color=red>Steam Lobby Link upload failed: {_lastUploadError}</color>");
+            });
         }
 
         private IEnumerator CreateMatchAndEntries() {
@@ -2366,19 +2331,22 @@ namespace SBGLeagueAutomation
                 : new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
             if (isCasualMatch) {
-                if (startingLeaderboard == null || startingLeaderboard.Count == 0) {
-                    Log("<color=yellow>[Casual] Leaderboard is empty - deferring casual stat update until players appear</color>");
-                    if (_monitorCoroutine == null) {
-                        _monitorCoroutine = StartCoroutine(MonitorAndUpdateScores());
-                    }
-                    yield break;
-                }
+                Log("<color=cyan>[Casual] Casual match detected - submitting match record for website to process</color>");
+                // Fall through to normal match+match_entry submission below.
+                // The website reads match_type="casual" and handles casual_matches_played itself.
+            }
 
-                Log("<color=cyan>[Casual] Casual match detected - skipping Match/MatchEntry upload and incrementing player stats instead</color>");
-                yield return IncrementCasualMatchesPlayedForActivePlayers(startingLeaderboard);
-                if (_monitorCoroutine != null) {
-                    StopCoroutine(_monitorCoroutine);
-                    _monitorCoroutine = null;
+            // Team matches are submitted once, at the end, with final team scores. match.submit is
+            // idempotent per session and carries red_team_score/blue_team_score, so submitting now
+            // would permanently record 0–0. Capture the team assignment while we are still in the
+            // match — CourseManager.PlayerStates is cleared once we return to the driving range.
+            if (Season2RuleSet.IsTeamMatchType(currentMatchType)
+                || Season2RuleSet.IsTeamMatchType(PlayerPrefs.GetString("MatchType", ""))) {
+                _cachedTeamAssignments = ReadInGameTeamAssignments();
+                Log("<color=cyan>[Teams] Team match detected — deferring submission until final scores are known</color>");
+                _matchEntriesCreated = true;
+                if (_monitorCoroutine == null) {
+                    _monitorCoroutine = StartCoroutine(MonitorAndUpdateScores());
                 }
                 yield break;
             }
@@ -2391,152 +2359,63 @@ namespace SBGLeagueAutomation
             // -----------------------------------------------------------------------
             bool isEffectiveHost = _isHost || NetworkServer.active;
 
-            if (isEffectiveHost) {
-                // HOST PATH — one dedup check then post immediately.
-                Log("<color=cyan>[Match Creation] We are the host — creating Match record with priority</color>");
-
-                if (_currentSession != null) {
-                    string existingMatchId = null;
-                    yield return ResolveExistingMatchIdForCurrentSession((id) => existingMatchId = id);
-                    if (!string.IsNullOrEmpty(existingMatchId)) {
-                        _currentMatchId = existingMatchId;
-                        ShowUploadNotification("Match record already exists; reusing existing upload.", "info");
-                        goto createEntries;
-                    }
-                }
-                // No existing match — fall through to the POST block below.
-            }
-            else {
-                // NON-HOST PATH — wait for the host to upload and adopt their Match ID.
-                MatchResultSubmissionService.ReceivedP2PMatchId = null; // clear any stale value
-                Log("<color=cyan>[Match Creation] We are a client — waiting up to 12s for host to upload the match...</color>");
-
-                float waitElapsed = 0f;
-                float nextApiCheckAt = 2f; // first API poll after 2 s
-                while (waitElapsed < 12f) {
-                    // P2P check is cheap (just reads a static field)
-                    string p2pId = MatchResultSubmissionService.ReceivedP2PMatchId;
-                    if (!string.IsNullOrEmpty(p2pId)) {
-                        Log($"<color=green>[Match Creation] ✓ Received P2P Match ID from host: {p2pId}</color>");
-                        _currentMatchId = p2pId;
-                        if (_currentSession != null) _currentSession.match_id = p2pId;
-                        ShowUploadNotification("Match record adopted from host via P2P.", "info");
-                        goto createEntries;
-                    }
-
-                    // API poll every 2 s (works for both matchmaking sessions and manual lobbies via _localManualSessionId)
-                    if (waitElapsed >= nextApiCheckAt && (!string.IsNullOrWhiteSpace(_currentSession?.id) || !string.IsNullOrWhiteSpace(_localManualSessionId))) {
-                        nextApiCheckAt += 2f;
-                        string apiMatchId = null;
-                        yield return ResolveExistingMatchIdForCurrentSession((id) => apiMatchId = id, false);
-                        if (!string.IsNullOrEmpty(apiMatchId)) {
-                            Log($"<color=green>[Match Creation] ✓ Found host match via API at {waitElapsed:0.#}s: {apiMatchId}</color>");
-                            _currentMatchId = apiMatchId;
-                            ShowUploadNotification("Match record adopted from host.", "info");
-                            goto createEntries;
-                        }
-                    }
-
-                    yield return new WaitForSeconds(0.5f);
-                    waitElapsed += 0.5f;
-                }
-
-                // Host did not upload within 12 s.
-                // Enter non-host fallback: sorted player-id slot order so exactly one
-                // non-host client posts, the rest keep polling and adopt it.
-                Log("<color=yellow>[Match Creation] Host did not upload within 12s — non-host fallback slot ordering...</color>");
-
-                {
-                    float fallbackDelay = GetCurrentPlayerMatchUploadDelaySeconds();
-                    string fallbackFoundId = null;
-                    if (fallbackDelay > 0f) {
-                        yield return WaitForExistingMatchBeforeFallback(fallbackDelay, (id) => fallbackFoundId = id);
-                    } else {
-                        // Slot-0 non-host does a single quick check before posting.
-                        yield return ResolveExistingMatchIdForCurrentSession((id) => fallbackFoundId = id, false);
-                    }
-                    if (!string.IsNullOrEmpty(fallbackFoundId)) {
-                        Log($"<color=green>[Match Creation] ✓ Match adopted in non-host fallback: {fallbackFoundId}</color>");
-                        _currentMatchId = fallbackFoundId;
-                        ShowUploadNotification("Match record adopted from another player.", "info");
-                        goto createEntries;
-                    }
-                }
-
-                Log("<color=cyan>[Match Creation] No match found in non-host fallback — posting as fallback creator</color>");
+            if (!isEffectiveHost) {
+                // NON-HOST PATH — host creates all Match and MatchEntry records on behalf of all players.
+                // Match ID arrives via P2P broadcast (HandleIncomingMatchIdBroadcast sets SBGLPlugin.CurrentMatchId)
+                // and is shown in the leaderboard display automatically. Nothing to upload here.
+                Log("<color=cyan>[Match Creation] Not host — host will handle all uploads</color>");
+                _matchEntriesCreated = true;
+                yield break;
             }
 
-            Log("<color=cyan>[Match Creation] No existing Match found — proceeding with POST</color>");
+            Log("<color=cyan>[Match Creation] We are the host — creating Match record with priority</color>");
 
-            // Final dedup check right before POST — catches same-time submissions when both clients
-            // exit the P2P/stagger window simultaneously (e.g. empty player_ids, P2P not yet established).
-            {
+            // Determine whether a Match already exists for this session. If so we reuse it and
+            // resolve its entries by read, rather than submitting again.
+            string reusableMatchId = null;
+
+            // Covers local-lobby double-trigger where the surrogate ID is not a real UUID
+            // and therefore can't be found via the API.
+            if (!string.IsNullOrEmpty(_currentMatchId)) {
+                reusableMatchId = _currentMatchId;
+                Log($"<color=cyan>[Match Creation] Match already exists for this session: {reusableMatchId} — skipping duplicate submit</color>");
+            }
+
+            if (string.IsNullOrEmpty(reusableMatchId) && _currentSession != null) {
+                yield return ResolveExistingMatchIdForCurrentSession((id) => reusableMatchId = id);
+                if (!string.IsNullOrEmpty(reusableMatchId)) {
+                    ShowUploadNotification("Match record already exists; reusing existing upload.", "info");
+                }
+            }
+
+            // Final dedup check — catches same-time submissions when both clients exit the
+            // P2P/stagger window simultaneously (e.g. empty player_ids, P2P not yet established).
+            if (string.IsNullOrEmpty(reusableMatchId)) {
                 string prePostSessionId = _currentSession != null ? _currentSession.id : _localManualSessionId;
                 if (!string.IsNullOrWhiteSpace(prePostSessionId)) {
-                    string finalCheckId = null;
-                    string finalCheckQuery = UnityWebRequest.EscapeURL("{\"matchmaking_session_id\":\"" + prePostSessionId + "\"}");
-                    yield return CallAPI($"/Match?q={finalCheckQuery}&sort_by=created_date", "GET", "", (res) => {
-                        finalCheckId = (string)SelectNewestReusableMatch(ParseApiObjectList(res))?["id"];
+                    yield return CallAPI($"/match?matchmaking_session_id=eq.{prePostSessionId}&order=created_at.asc", "GET", "", (res) => {
+                        reusableMatchId = (string)SelectNewestReusableMatch(ParseApiObjectList(res))?["id"];
                     });
-                    if (!string.IsNullOrWhiteSpace(finalCheckId)) {
-                        Log($"<color=green>[Match Creation] ✓ Final pre-POST check found existing active match: {finalCheckId} — skipping duplicate POST</color>");
-                        _currentMatchId = finalCheckId;
-                        if (_currentSession != null) _currentSession.match_id = finalCheckId;
+                    if (!string.IsNullOrWhiteSpace(reusableMatchId)) {
+                        Log($"<color=green>[Match Creation] ✓ Final pre-submit check found existing active match: {reusableMatchId} — skipping duplicate submit</color>");
+                        if (_currentSession != null) _currentSession.match_id = reusableMatchId;
                         ShowUploadNotification("Match record already exists; reusing existing upload.", "info");
-                        goto createEntries;
                     }
                 }
             }
 
-            // Step 1b: Create Match record (we are the first / only mod user)
-            {
-                string newMatchId = null;
-                yield return SubmitMatchEntry(CollectMatchStats(0f), (id) => newMatchId = id);
-
-                if (string.IsNullOrEmpty(newMatchId)) {
-                    Log("<color=red>[Match Creation] Failed to create Match record</color>");
-                    ShowUploadNotification("Upload failed: could not create match record.", "failure");
-                    yield break;
-                }
-
-                _currentMatchId = newMatchId;
-                Log($"<color=green>[Match Creation] ✓ Match created: {newMatchId}</color>");
-                ShowUploadNotification("Upload success: match record created.", "success");
-
-                // Broadcast Match ID to other players with the mod so they skip creating duplicates
-                var peers = SBGL.UnifiedMod.Features.CompetitivePluginCheck.CompetitivePluginCheck.GetKnownPeers();
-                MatchResultSubmissionService.BroadcastMatchId(newMatchId, peers);
-            }
-
-            createEntries:
-
-            // Link Match ID back to the MatchmakingSession so the website can detect mod-submitted matches
-            if (_currentSession != null) {
-                string linkMatchId = _currentMatchId;
-                yield return CallAPI($"/MatchmakingSession/{_currentSession.id}", "PUT", $"{{\"match_id\":\"{linkMatchId}\"}}", (res) => {
-                    JObject response = ParseApiSingleObject(res);
-                    if (response != null) {
-                        _currentSession.match_id = linkMatchId;
-                        Log($"<color=green>[Match Creation] ✓ MatchmakingSession {_currentSession.id} linked to match: {linkMatchId}</color>");
-                    }
-                    else
-                        Log($"<color=yellow>[Match Creation] Could not confirm MatchmakingSession update</color>");
-                });
-            } else {
-                Log("<color=cyan>[Match Creation] Local lobby mode: skipping MatchmakingSession link</color>");
-            }
-
-            // Step 2: Create initial MatchEntry records for all players
             _playerMatchEntryIds.Clear();
             _playerIdsByName.Clear();
             _lastSubmittedScores.Clear();
             _lastSubmittedScoresVsPar.Clear();
 
-            // If the leaderboard is empty we can't distinguish players from spectators yet.
-            // Leave _matchEntriesCreated false so the gameplay monitor retries once the
-            // scoreboard has populated, instead of waiting until finalization.
-            if (startingLeaderboard == null || startingLeaderboard.Count == 0) {
-                Log("<color=yellow>[Match Creation] Leaderboard empty at round start — deferring MatchEntry creation until the gameplay monitor sees players</color>");
+            // The gateway creates the Match and every MatchEntry in a single idempotent
+            // match.submit call, so the roster has to be known before we submit — there is no
+            // way to add an entry afterwards. If the leaderboard is empty we can't yet tell
+            // players from spectators, so defer the whole submission (leaving
+            // _matchEntriesCreated false) until the gameplay monitor sees players.
+            if (string.IsNullOrEmpty(reusableMatchId) && (startingLeaderboard == null || startingLeaderboard.Count == 0)) {
+                Log("<color=yellow>[Match Creation] Leaderboard empty at round start — deferring match submission until the gameplay monitor sees players</color>");
                 if (_monitorCoroutine == null) {
                     _monitorCoroutine = StartCoroutine(MonitorAndUpdateScores());
                 }
@@ -2547,8 +2426,134 @@ namespace SBGLeagueAutomation
                 ? _currentSession.player_ids
                 : new List<string> { _userProfile.id };
 
-            yield return EnrichPlayerIdsFromLeaderboard(startingLeaderboard, playerIds);
+            if (startingLeaderboard != null && startingLeaderboard.Count > 0) {
+                yield return EnrichPlayerIdsFromLeaderboard(startingLeaderboard, playerIds);
+            }
             _matchExpectedPlayerCount = playerIds.Count;
+
+            List<RosterPlayer> roster = null;
+            yield return BuildMatchRoster("Match Creation", playerIds, startingPositionMap, (built) => roster = built);
+
+            if (string.IsNullOrEmpty(reusableMatchId)) {
+                // Submit the Match and all of its entries in one call.
+                string newMatchId = null;
+                yield return SubmitMatchWithRoster(CollectMatchStats(0f), roster, (id) => newMatchId = id);
+
+                if (string.IsNullOrEmpty(newMatchId)) {
+                    string apiErr = !string.IsNullOrEmpty(_lastCallApiError) ? $" ({_lastCallApiError})" : "";
+                    Log($"<color=red>[Match Creation] Failed to create Match record{apiErr}</color>");
+                    ShowUploadNotification($"Upload failed: could not create match record.{apiErr}", "failure");
+                    yield break;
+                }
+
+                _currentMatchId = newMatchId;
+                Log($"<color=green>[Match Creation] ✓ Match created: {newMatchId}</color>");
+                ShowUploadNotification("Upload success: match record created.", "success");
+
+                // Broadcast Match ID to other players with the mod so they skip creating duplicates
+                var peers = SBGL.UnifiedMod.Features.CompetitivePluginCheck.CompetitivePluginCheck.GetKnownPeers();
+                MatchResultSubmissionService.BroadcastMatchId(newMatchId, peers);
+            } else {
+                _currentMatchId = reusableMatchId;
+            }
+
+            // Link Match ID back to the MatchmakingSession so the website can detect mod-submitted matches
+            if (_currentSession != null) {
+                string linkMatchId = _currentMatchId;
+                var linkPayload = new JObject {
+                    ["matchmaking_session_id"] = _currentSession.id,
+                    ["match_id"] = linkMatchId
+                };
+                yield return CallGateway("session.update", linkPayload, (res) => {
+                    _currentSession.match_id = linkMatchId;
+                    Log($"<color=green>[Match Creation] ✓ MatchmakingSession {_currentSession.id} linked to match: {linkMatchId}</color>");
+                }, (err) => {
+                    Log($"<color=yellow>[Match Creation] Could not confirm MatchmakingSession update</color>");
+                });
+            } else {
+                Log("<color=cyan>[Match Creation] Local lobby mode: skipping MatchmakingSession link</color>");
+            }
+
+            // Resolve entry IDs for every roster player. For a freshly submitted match these are
+            // already cached from the submit response; for a reused match they come from a read.
+            foreach (var rosterPlayer in roster) {
+                string entryId = null;
+                yield return ResolveMatchEntryForPlayer("Match Creation", rosterPlayer.PlayerId, rosterPlayer.PlayerName, (id) => entryId = id);
+
+                if (string.IsNullOrWhiteSpace(entryId)) {
+                    Log($"<color=yellow>[Match Creation] MatchEntry not ready yet for {rosterPlayer.PlayerName ?? rosterPlayer.PlayerId}; gameplay monitor will retry if needed</color>");
+                }
+            }
+
+            _matchEntriesCreated = true;
+            Log($"<color=green>[Match Creation] ✓ Match and entries initialized. Starting score monitoring...</color>");
+
+            // Start monitoring for score changes during gameplay
+            if (_monitorCoroutine == null) {
+                _monitorCoroutine = StartCoroutine(MonitorAndUpdateScores());
+            }
+        }
+
+        /// <summary>
+        /// A player as submitted to the gateway in match.submit's players array.
+        /// </summary>
+        private class RosterPlayer {
+            public string PlayerId;
+            public string PlayerName;
+            public string PreMatchMmr;
+            public int GamePoints;
+            public int ScoreVsPar;
+            public int FinishPosition;
+            public Team Team = Team.None;
+        }
+
+        /// <summary>
+        /// Reads Red/Blue team assignment straight out of the game's own networked player list.
+        /// CourseManager.PlayerStates carries each player's display name alongside the team the
+        /// host put them on, which is the authoritative in-game source. Spectators and
+        /// disconnected players are excluded.
+        /// </summary>
+        /// <returns>Display name → team, case-insensitive. Empty when teams aren't in play.</returns>
+        private Dictionary<string, Team> ReadInGameTeamAssignments() {
+            var teamsByName = new Dictionary<string, Team>(StringComparer.OrdinalIgnoreCase);
+
+            try {
+                var states = CourseManager.PlayerStates;
+                if (states == null) {
+                    Log("<color=yellow>[Teams] CourseManager.PlayerStates unavailable — cannot read team assignments</color>");
+                    return teamsByName;
+                }
+
+                foreach (var state in states) {
+                    if (!state.isConnected || state.isInSpectatorMode) continue;
+
+                    string name = state.name?.Trim();
+                    if (string.IsNullOrWhiteSpace(name)) continue;
+
+                    teamsByName[name] = state.team;
+                }
+
+                int red = teamsByName.Count(kvp => kvp.Value == Team.Red);
+                int blue = teamsByName.Count(kvp => kvp.Value == Team.Blue);
+                Log($"<color=cyan>[Teams] Read in-game team assignments: {red} Red, {blue} Blue, {teamsByName.Count - red - blue} unassigned</color>");
+            } catch (System.Exception ex) {
+                Log($"<color=yellow>[Teams] Failed to read in-game team assignments: {ex.Message}</color>");
+            }
+
+            return teamsByName;
+        }
+
+        /// <summary>
+        /// Resolves display name, pre-match MMR and current scores for each player so the whole
+        /// roster can be submitted in a single match.submit call.
+        /// </summary>
+        private IEnumerator BuildMatchRoster(
+            string sourceTag,
+            List<string> playerIds,
+            Dictionary<string, int> startingPositionMap,
+            Action<List<RosterPlayer>> onBuilt)
+        {
+            var roster = new List<RosterPlayer>();
 
             foreach (string playerId in playerIds) {
                 string playerName = null;
@@ -2556,32 +2561,31 @@ namespace SBGLeagueAutomation
                 int gamePoints = 0;
                 int scoreVsPar = 0;
 
-                // Get player name, MMR and initial scores
                 if (playerId == _userProfile.id) {
                     playerName = _userProfile.display_name;
                     preMatchMmr = _userProfile.current_mmr.ToString();
-                    Log($"<color=cyan>[Match Creation] Current player: {playerName} (MMR: {preMatchMmr})</color>");
+                    Log($"<color=cyan>[{sourceTag}] Current player: {playerName} (MMR: {preMatchMmr})</color>");
                 } else {
-                    yield return CallAPI($"/Player/{playerId}", "GET", "", (res) => {
+                    yield return CallAPI($"/player?id=eq.{playerId}&limit=1", "GET", "", (res) => {
                         try {
                             JObject profile = ParseApiSingleObject(res);
                             if (profile != null) {
                                 playerName = (string)profile["display_name"];
                                 if (string.IsNullOrEmpty(playerName)) {
-                                    Log($"<color=yellow>[Match Creation] Player {playerId} has no display_name, using ID</color>");
+                                    Log($"<color=yellow>[{sourceTag}] Player {playerId} has no display_name, using ID</color>");
                                     playerName = playerId;
                                 }
                                 object mmrObj = profile["current_mmr"];
                                 if (mmrObj != null) {
                                     preMatchMmr = mmrObj.ToString();
                                 }
-                                Log($"<color=cyan>[Match Creation] Fetched player: {playerName} (MMR: {preMatchMmr})</color>");
+                                Log($"<color=cyan>[{sourceTag}] Fetched player: {playerName} (MMR: {preMatchMmr})</color>");
                             } else {
-                                Log($"<color=yellow>[Match Creation] Failed to fetch Player {playerId} - response null</color>");
+                                Log($"<color=yellow>[{sourceTag}] Failed to fetch Player {playerId} - response null</color>");
                                 playerName = playerId; // Fallback to ID
                             }
                         } catch (System.Exception ex) {
-                            Log($"<color=yellow>[Match Creation] Error fetching Player {playerId}: {ex.Message}</color>");
+                            Log($"<color=yellow>[{sourceTag}] Error fetching Player {playerId}: {ex.Message}</color>");
                             playerName = playerId; // Fallback to ID
                         }
                     });
@@ -2594,42 +2598,27 @@ namespace SBGLeagueAutomation
                         gamePoints = score;
                         _cachedLeaderboardScoresVsPar.TryGetValue(playerName, out scoreVsPar);
                     }
-                    
+
                     _lastSubmittedScores[playerName] = gamePoints;
                     _lastSubmittedScoresVsPar[playerName] = scoreVsPar;
                 }
 
-                // Get starting position from leaderboard
                 int startingPosition = 0;
-                if (!string.IsNullOrWhiteSpace(playerName)) startingPositionMap.TryGetValue(playerName, out startingPosition);
-
-                string entryId = null;
-                // postMatchMmr is not known at round start; it will be set during FinalizeMatchStats
-                // using the live leaderboard's Elo projection from the final snapshot.
-                yield return EnsureMatchEntryForPlayer(
-                    "Match Creation",
-                    playerId,
-                    playerName,
-                    preMatchMmr,
-                    null, // postMatchMmr will be written at finalization
-                    gamePoints,
-                    scoreVsPar,
-                    startingPosition,
-                    "Progressive match tracking - created at round start",
-                    (id) => entryId = id);
-
-                if (string.IsNullOrWhiteSpace(entryId)) {
-                    Log($"<color=yellow>[Match Creation] MatchEntry not ready yet for {playerName ?? playerId}; gameplay monitor will retry if needed</color>");
+                if (!string.IsNullOrWhiteSpace(playerName) && startingPositionMap != null) {
+                    startingPositionMap.TryGetValue(playerName, out startingPosition);
                 }
+
+                roster.Add(new RosterPlayer {
+                    PlayerId = playerId,
+                    PlayerName = string.IsNullOrWhiteSpace(playerName) ? playerId : playerName,
+                    PreMatchMmr = preMatchMmr,
+                    GamePoints = gamePoints,
+                    ScoreVsPar = scoreVsPar,
+                    FinishPosition = startingPosition
+                });
             }
 
-            _matchEntriesCreated = true;
-            Log($"<color=green>[Match Creation] ✓ Match and entries initialized. Starting score monitoring...</color>");
-
-            // Start monitoring for score changes during gameplay
-            if (_monitorCoroutine == null) {
-                _monitorCoroutine = StartCoroutine(MonitorAndUpdateScores());
-            }
+            onBuilt?.Invoke(roster);
         }
 
         private IEnumerator MonitorLobbyNameForUpload() {
@@ -2677,8 +2666,6 @@ namespace SBGLeagueAutomation
                     }
                 }
 
-                if (_currentMatchId == null) continue;
-
                 // Refresh leaderboard data
                 var liveLeaderboard = UnityEngine.Object.FindAnyObjectByType<SBGLLiveLeaderboard.LiveLeaderboardPlugin>(FindObjectsInactive.Include);
                 if (liveLeaderboard == null) continue;
@@ -2686,7 +2673,17 @@ namespace SBGLeagueAutomation
                 var allLeaderboardPlayers = liveLeaderboard.GetCurrentLeaderboard();
                 if (allLeaderboardPlayers == null || allLeaderboardPlayers.Count == 0) continue;
 
+                // Cache regardless of whether a Match record exists yet — team matches are not
+                // submitted until finalization, and this snapshot is what they are built from.
                 CacheLeaderboardSnapshot(allLeaderboardPlayers, "live gameplay");
+
+                // Keep the team assignment fresh while we are still in the match
+                if (IsCurrentMatchTeamRanked()) {
+                    var liveTeams = ReadInGameTeamAssignments();
+                    if (liveTeams.Count > 0) _cachedTeamAssignments = liveTeams;
+                }
+
+                if (_currentMatchId == null) continue;
 
                 // Build a one-shot mapping of player name -> unique finish position for this live snapshot
                 var livePositionMap = BuildFinishPositionMap(allLeaderboardPlayers);
@@ -2745,7 +2742,7 @@ namespace SBGLeagueAutomation
                         // If we have no entry yet for this leaderboard player, create it mid-round.
                         if (!string.IsNullOrEmpty(playerId) && string.IsNullOrEmpty(entryId)) {
                             string preMatchMmr = null;
-                            yield return CallAPI($"/Player/{playerId}", "GET", "", (res) => {
+                            yield return CallAPI($"/player?id=eq.{playerId}&limit=1", "GET", "", (res) => {
                                 JObject profile = ParseApiSingleObject(res);
                                 object mmrObj = profile?["current_mmr"];
                                 if (mmrObj != null) preMatchMmr = mmrObj.ToString();
@@ -2753,16 +2750,10 @@ namespace SBGLeagueAutomation
 
                             int finishPosition = 0;
                             if (!string.IsNullOrWhiteSpace(player.Name)) livePositionMap.TryGetValue(player.Name, out finishPosition);
-                            yield return EnsureMatchEntryForPlayer(
+                            yield return ResolveMatchEntryForPlayer(
                                 "Match Monitor",
                                 playerId,
                                 player.Name,
-                                preMatchMmr,
-                                null, // postMatchMmr
-                                newGamePoints,
-                                newScoreVsPar,
-                                finishPosition,
-                                "Live leaderboard backfill during round",
                                 (id) => entryId = id);
                         }
 
@@ -2810,26 +2801,26 @@ namespace SBGLeagueAutomation
             // doesn't change on the hole where someone else passes them.
             if (finishPosition > 0) payload["finish_position"] = finishPosition;
 
-            // Write MMR fields when provided (set at finalization using live leaderboard Elo projection)
+            // Write pre_match_mmr whenever we have it — even without a post value
+            if (!string.IsNullOrWhiteSpace(preMatchMmr)
+                && float.TryParse(preMatchMmr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float preMmrF)) {
+                payload["pre_match_mmr"] = preMmrF;
+            }
+
             if (!string.IsNullOrWhiteSpace(postMatchMmr)
                 && float.TryParse(postMatchMmr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float postMmrF)) {
                 payload["post_match_mmr"] = postMmrF;
                 if (!string.IsNullOrWhiteSpace(preMatchMmr)
-                    && float.TryParse(preMatchMmr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float preMmrF)) {
-                    payload["mmr_change"] = postMmrF - preMmrF;
+                    && float.TryParse(preMatchMmr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float preMmrF2)) {
+                    payload["mmr_change"] = postMmrF - preMmrF2;
                 }
             }
 
-            string json = payload.ToString(Newtonsoft.Json.Formatting.None);
-            yield return CallAPI($"/MatchEntry/{entryId}", "PUT", json, (res) => {
-                try {
-                    JObject response = ParseApiSingleObject(res);
-                    if (response != null) {
-                        Log($"<color=green>[Score Update] ✓ MatchEntry updated for {playerName}</color>");
-                    }
-                } catch (System.Exception ex) {
-                    Log($"<color=yellow>[Score Update] Could not update MatchEntry: {ex.Message}</color>");
-                }
+            payload["match_entry_id"] = entryId;
+            yield return CallGateway("entry.update", payload, (res) => {
+                Log($"<color=green>[Score Update] ✓ MatchEntry updated for {playerName}</color>");
+            }, (err) => {
+                Log($"<color=yellow>[Score Update] Could not update MatchEntry: {err}</color>");
             });
         }
 
@@ -2891,39 +2882,20 @@ namespace SBGLeagueAutomation
             string normalizedName = playerName.Trim();
             string resolvedId = null;
 
-            string escapedExactName = normalizedName.Replace("\\", "\\\\").Replace("\"", "\\\"");
-            string exactQuery = "{\"$or\":[{\"display_name\":\"" + escapedExactName + "\"},{\"ign\":\"" + escapedExactName + "\"}]}";
-            yield return CallAPI($"/Player?q={UnityWebRequest.EscapeURL(exactQuery)}&limit=1", "GET", "", (res) => {
+            // Exact case-insensitive match via PostgREST ilike (no wildcards = exact)
+            yield return CallAPI($"/player?display_name=ilike.{UnityWebRequest.EscapeURL(normalizedName)}&limit=1", "GET", "", (res) => {
                 JObject first = ParseApiObjectList(res)?.FirstOrDefault();
-                if (first != null) {
-                    resolvedId = (string)first["id"];
-                }
+                if (first != null) resolvedId = (string)first["id"];
             });
 
+            // Fuzzy fallback: substring wildcard search, prefer exact match from results
             if (string.IsNullOrWhiteSpace(resolvedId)) {
-                string escapedRegexName = Regex.Escape(normalizedName).Replace("\\ ", " ");
-                string anchoredRegexQuery = "{\"$or\":[{\"display_name\":{\"$regex\":\"^" + escapedRegexName + "$\",\"$options\":\"i\"}},{\"ign\":{\"$regex\":\"^" + escapedRegexName + "$\",\"$options\":\"i\"}}]}";
-                yield return CallAPI($"/Player?q={UnityWebRequest.EscapeURL(anchoredRegexQuery)}&limit=1", "GET", "", (res) => {
-                    JObject first = ParseApiObjectList(res)?.FirstOrDefault();
-                    if (first != null) {
-                        resolvedId = (string)first["id"];
-                    }
-                });
-            }
-
-            if (string.IsNullOrWhiteSpace(resolvedId)) {
-                string fuzzyName = normalizedName.Replace("\\", "\\\\").Replace("\"", "\\\"");
-                string fuzzyQuery = "{\"$or\":[{\"display_name\":{\"$regex\":\"" + fuzzyName + "\",\"$options\":\"i\"}},{\"ign\":{\"$regex\":\"" + fuzzyName + "\",\"$options\":\"i\"}}]}";
-                yield return CallAPI($"/Player?q={UnityWebRequest.EscapeURL(fuzzyQuery)}", "GET", "", (res) => {
+                yield return CallAPI($"/player?display_name=ilike.*{UnityWebRequest.EscapeURL(normalizedName)}*&limit=5", "GET", "", (res) => {
                     var rows = ParseApiObjectList(res);
                     if (rows == null || rows.Count == 0) return;
-
-                    JObject exact = rows.FirstOrDefault(r => string.Equals((string)r?["display_name"], normalizedName, StringComparison.OrdinalIgnoreCase)
-                        || string.Equals((string)r?["ign"], normalizedName, StringComparison.OrdinalIgnoreCase));
+                    JObject exact = rows.FirstOrDefault(r => string.Equals((string)r?["display_name"], normalizedName, StringComparison.OrdinalIgnoreCase));
                     JObject pick = exact ?? rows.FirstOrDefault();
-                    if (pick != null) {
-                        resolvedId = (string)pick["id"];
-                    }
+                    if (pick != null) resolvedId = (string)pick["id"];
                 });
             }
 
@@ -2939,15 +2911,15 @@ namespace SBGLeagueAutomation
                 yield break;
             }
 
-            string json = "{" + $"\"player_count\":{actualPlayerCount}" + "}";
-            yield return CallAPI($"/Match/{_currentMatchId}", "PUT", json, (res) => {
-                JObject response = ParseApiSingleObject(res);
-                if (response != null) {
-                    _lastUploadedPlayerCount = actualPlayerCount;
-                    Log($"<color=green>[Match Count] ✓ Updated match player_count to {actualPlayerCount} ({source})</color>");
-                } else {
-                    Log($"<color=yellow>[Match Count] Could not confirm player_count update to {actualPlayerCount} ({source})</color>");
-                }
+            var payload = new JObject {
+                ["match_id"] = _currentMatchId,
+                ["player_count"] = actualPlayerCount
+            };
+            yield return CallGateway("match.update", payload, (res) => {
+                _lastUploadedPlayerCount = actualPlayerCount;
+                Log($"<color=green>[Match Count] ✓ Updated match player_count to {actualPlayerCount} ({source})</color>");
+            }, (err) => {
+                Log($"<color=yellow>[Match Count] Could not confirm player_count update to {actualPlayerCount} ({source})</color>");
             });
         }
 
@@ -3019,8 +2991,8 @@ namespace SBGLeagueAutomation
 
         /// <summary>
         /// Build a deterministic mapping of player name -> unique finish position (1-based)
-        /// based on the provided leaderboard snapshot. Tie-breakers: AdjustedPoints (desc),
-        /// BaseScore (desc), stroke vs par (asc), then name (ordinal, case-insensitive).
+        /// based on the provided leaderboard snapshot. Tie-breakers: BaseScore (desc),
+        /// stroke vs par (asc), then name (ordinal, case-insensitive).
         /// </summary>
         private Dictionary<string, int> BuildFinishPositionMap(List<SBGLLiveLeaderboard.LiveLeaderboardPlugin.SBGLPlayer> leaderboard) {
             var map = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -3029,8 +3001,7 @@ namespace SBGLeagueAutomation
             var ordered = leaderboard
                 .Where(p => p != null && !string.IsNullOrWhiteSpace(p.Name))
                 .Select(p => new { Player = p, Stroke = ParseScoreVsPar(p.RawStrokes) })
-                .OrderByDescending(x => x.Player.AdjustedPoints)
-                .ThenByDescending(x => x.Player.BaseScore)
+                .OrderByDescending(x => x.Player.BaseScore)
                 .ThenBy(x => x.Stroke)
                 .ThenBy(x => x.Player.Name, StringComparer.OrdinalIgnoreCase)
                 .ToList();
@@ -3051,9 +3022,8 @@ namespace SBGLeagueAutomation
 
             var ordered = leaderboard
                 .Where(p => p != null && !string.IsNullOrWhiteSpace(p.Name))
-                .Select(p => new { Player = p, Stroke = ParseScoreVsPar(p.RawStrokes), Adjusted = p.BaseScore + (ParseScoreVsPar(p.RawStrokes) * -10) })
-                .OrderByDescending(x => x.Adjusted)
-                .ThenByDescending(x => x.Player.BaseScore)
+                .Select(p => new { Player = p, Stroke = ParseScoreVsPar(p.RawStrokes) })
+                .OrderByDescending(x => x.Player.BaseScore)
                 .ThenBy(x => x.Stroke)
                 .ThenBy(x => x.Player.Name, StringComparer.OrdinalIgnoreCase)
                 .ToList();
@@ -3090,7 +3060,7 @@ namespace SBGLeagueAutomation
             foreach (string existingId in knownIds.ToList()) {
                 if (_userProfile != null && string.Equals(existingId, _userProfile.id, StringComparison.OrdinalIgnoreCase)) continue;
 
-                yield return CallAPI($"/Player/{existingId}", "GET", "", (res) => {
+                yield return CallAPI($"/player?id=eq.{existingId}&limit=1", "GET", "", (res) => {
                     JObject profile = ParseApiSingleObject(res);
                     string existingName = (string)profile?["display_name"];
                     if (!string.IsNullOrWhiteSpace(existingName)) {
@@ -3139,6 +3109,15 @@ namespace SBGLeagueAutomation
                 yield break;
             }
 
+            // Team matches were deferred at round start — submit the whole thing now, once,
+            // with the final per-player scores and team totals.
+            if (Season2RuleSet.IsTeamMatchType(PlayerPrefs.GetString("MatchType", ""))
+                || Season2RuleSet.IsTeamMatchType(_currentSession?.match_type)) {
+                yield return SubmitTeamMatchFinal();
+                _matchStatsSubmitted = true;
+                yield break;
+            }
+
             int finalPlayerCount = _finalLeaderboardSnapshot.Count(p => p != null && !string.IsNullOrWhiteSpace(p.Name) && p.BaseScore != 0);
             if (finalPlayerCount > 0) {
                 _matchExpectedPlayerCount = finalPlayerCount;
@@ -3179,7 +3158,7 @@ namespace SBGLeagueAutomation
                 // Fallback: fetch from API by player ID
                 TryGetPlayerIdForName(p.Name, out string resolveId);
                 if (!string.IsNullOrWhiteSpace(resolveId)) {
-                    yield return CallAPI($"/Player/{resolveId}", "GET", "", (res) => {
+                    yield return CallAPI($"/player?id=eq.{resolveId}&limit=1", "GET", "", (res) => {
                         JObject profile = ParseApiSingleObject(res);
                         object mmrObj = profile?["current_mmr"];
                         if (mmrObj != null && float.TryParse(mmrObj.ToString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float fetchedMmr)) {
@@ -3239,23 +3218,17 @@ namespace SBGLeagueAutomation
                     // Use resolved pre-match MMR (already fetched in pre-resolve pass above)
                     string preMatchMmr = cachedPreMmr;
                     if (string.IsNullOrWhiteSpace(preMatchMmr)) {
-                        yield return CallAPI($"/Player/{playerId}", "GET", "", (res) => {
+                        yield return CallAPI($"/player?id=eq.{playerId}&limit=1", "GET", "", (res) => {
                             JObject profile = ParseApiSingleObject(res);
                             object mmrObj = profile?["current_mmr"];
                             if (mmrObj != null) preMatchMmr = mmrObj.ToString();
                         });
                     }
 
-                    yield return EnsureMatchEntryForPlayer(
+                    yield return ResolveMatchEntryForPlayer(
                         "Match Finalize",
                         playerId,
                         player.Name,
-                        preMatchMmr,
-                        cachedPostMmr, // postMatchMmr from cached live leaderboard projection
-                        finalGamePoints,
-                        finalScoreVsPar,
-                        finishPosition,
-                        "Late entry - joined after match start",
                         (id) => entryId = id);
 
                     if (!string.IsNullOrEmpty(entryId)) {
@@ -3284,6 +3257,99 @@ namespace SBGLeagueAutomation
             Log($"<color=green>[Match Finalize] ✓ Match stats finalized</color>");
         }
 
+        /// <summary>
+        /// Submits a completed team-ranked match in a single match.submit call, carrying final
+        /// per-player scores plus the Red/Blue rosters and team totals.
+        /// </summary>
+        private IEnumerator SubmitTeamMatchFinal() {
+            // Mirrors the solo flow: the host uploads on behalf of the lobby. match.submit is
+            // idempotent per session, so a stray duplicate would be rejected harmlessly, but
+            // keeping this host-only avoids one redundant write per player.
+            if (!_isHost && !NetworkServer.active) {
+                Log("<color=cyan>[Teams] Not host — host submits the team match result</color>");
+                yield break;
+            }
+
+            string matchType = Season2RuleSet.IsTeamMatchType(_currentSession?.match_type)
+                ? _currentSession.match_type
+                : PlayerPrefs.GetString("MatchType", "");
+
+            Log($"<color=cyan>[Teams] Finalizing {matchType} match with {_finalLeaderboardSnapshot.Count} leaderboard entries</color>");
+
+            var finalPositionMap = BuildFinishPositionMap(_finalLeaderboardSnapshot);
+            var testOverrides = GetTestPlayerOverrides(
+                _finalLeaderboardSnapshot.Where(p => p != null && !string.IsNullOrWhiteSpace(p.Name)).Select(p => p.Name).ToList());
+
+            var roster = new List<RosterPlayer>();
+
+            foreach (var player in _finalLeaderboardSnapshot) {
+                if (player == null || string.IsNullOrWhiteSpace(player.Name)) continue;
+
+                // Spectators never score and are not part of either team roster
+                if (player.BaseScore == 0) {
+                    Log($"<color=yellow>[Teams] Skipping {player.Name} — game points is 0 (spectator/no score)</color>");
+                    continue;
+                }
+
+                TryGetPlayerIdForName(player.Name, out string playerId);
+                if (string.IsNullOrEmpty(playerId)) {
+                    string lookupName = ApplyTestPlayerOverride(player.Name, testOverrides);
+                    yield return ResolvePlayerIdByNameFromApi(lookupName, (id) => playerId = id);
+                }
+
+                if (string.IsNullOrEmpty(playerId)) {
+                    Log($"<color=red>[Teams] Cannot resolve player ID for {player.Name} — team match cannot be submitted with an incomplete roster</color>");
+                    ShowUploadNotification($"Upload failed: could not resolve player {player.Name}.", "failure");
+                    yield break;
+                }
+
+                int finishPosition = 0;
+                finalPositionMap.TryGetValue(player.Name, out finishPosition);
+
+                roster.Add(new RosterPlayer {
+                    PlayerId = playerId,
+                    PlayerName = player.Name,
+                    PreMatchMmr = player.MMR,
+                    GamePoints = player.BaseScore,
+                    ScoreVsPar = ParseScoreVsPar(player.RawStrokes),
+                    FinishPosition = finishPosition
+                });
+            }
+
+            if (roster.Count == 0) {
+                Log("<color=red>[Teams] No scoring players found — nothing to submit</color>");
+                yield break;
+            }
+
+            _matchExpectedPlayerCount = roster.Count;
+
+            string matchId = null;
+            yield return SubmitMatchWithRoster(CollectMatchStats(0f), roster, (id) => matchId = id);
+
+            if (string.IsNullOrEmpty(matchId)) {
+                Log("<color=red>[Teams] Team match submission failed</color>");
+                yield break;
+            }
+
+            _currentMatchId = matchId;
+            SBGLPlugin.CurrentMatchId = matchId;
+
+            if (_currentSession != null) {
+                var linkPayload = new JObject {
+                    ["matchmaking_session_id"] = _currentSession.id,
+                    ["match_id"] = matchId
+                };
+                yield return CallGateway("session.update", linkPayload, (res) => {
+                    _currentSession.match_id = matchId;
+                    Log($"<color=green>[Teams] ✓ MatchmakingSession {_currentSession.id} linked to match: {matchId}</color>");
+                }, (err) => {
+                    Log($"<color=yellow>[Teams] Could not confirm MatchmakingSession update</color>");
+                });
+            }
+
+            Log($"<color=green>[Teams] ✓ Team match submitted: {matchId}</color>");
+        }
+
         private IEnumerator CreatePlaceholderMatchEntryForMissingSessionPlayer(string playerId) {
             if (string.IsNullOrWhiteSpace(playerId) || string.IsNullOrWhiteSpace(_currentMatchId)) {
                 yield break;
@@ -3296,7 +3362,7 @@ namespace SBGLeagueAutomation
                 playerName = _userProfile.display_name;
                 preMatchMmr = _userProfile.current_mmr.ToString();
             } else {
-                yield return CallAPI($"/Player/{playerId}", "GET", "", (res) => {
+                yield return CallAPI($"/player?id=eq.{playerId}&limit=1", "GET", "", (res) => {
                     JObject profile = ParseApiSingleObject(res);
                     if (profile != null) {
                         playerName = (string)profile["display_name"];
@@ -3334,25 +3400,16 @@ namespace SBGLeagueAutomation
             }
 
             string entryId = null;
-            yield return EnsureMatchEntryForPlayer(
-                "Match Finalize",
-                playerId,
-                playerName,
-                preMatchMmr,
-                null, // postMatchMmr
-                gamePoints,
-                scoreVsPar,
-                0,
-                "Placeholder entry created because player was in the session but missing from the final leaderboard snapshot",
-                (id) => entryId = id);
+            yield return ResolveMatchEntryForPlayer("Match Finalize", playerId, playerName, (id) => entryId = id);
 
             if (!string.IsNullOrEmpty(entryId)) {
                 _playerMatchEntryIds[playerId] = entryId;
                 _playerIdsByName[playerName.Trim()] = playerId;
                 _lastSubmittedScores[playerName] = gamePoints;
                 _lastSubmittedScoresVsPar[playerName] = scoreVsPar;
+                yield return UpdateMatchEntry(entryId, playerId, playerName, gamePoints, scoreVsPar, 0, null, preMatchMmr);
             } else {
-                Log($"<color=yellow>[Match Finalize] Could not create placeholder MatchEntry for missing session player {playerName}</color>");
+                Log($"<color=yellow>[Match Finalize] No MatchEntry exists for session player {playerName} — they were not in the submitted roster</color>");
             }
         }
 
@@ -3385,48 +3442,30 @@ namespace SBGLeagueAutomation
 
             Log($"<color=cyan>[Match Stats] Duration: {matchDuration}s | Host: {stats.is_host} | Player: {stats.player_name}</color>");
 
-            // Step 1: Submit Match entry
-            string matchId = null;
-            yield return SubmitMatchEntry(stats, (id) => matchId = id);
-
-            if (string.IsNullOrEmpty(matchId)) {
-                Log("<color=red>[Match Stats] Failed to get Match ID from submission</color>");
-                yield break;
-            }
-
-            // Link Match ID back to the MatchmakingSession so the website can detect mod-submitted matches
-            yield return CallAPI($"/MatchmakingSession/{_currentSession.id}", "PUT", $"{{\"match_id\":\"{matchId}\"}}", (res) => {
-                JObject response = ParseApiSingleObject(res);
-                if (response != null) {
-                    _currentSession.match_id = matchId;
-                    Log($"<color=green>[Match Stats] ✓ MatchmakingSession {_currentSession.id} linked to match: {matchId}</color>");
-                }
-                else
-                    Log($"<color=yellow>[Match Stats] Could not confirm MatchmakingSession update</color>");
-            });
-
-            // Pre-fetch leaderboard data for ALL players to avoid missing scores
+            // Step 1: Pre-fetch leaderboard data for ALL players to avoid missing scores.
+            // This must happen before submission — the gateway creates the Match and all of its
+            // entries in a single call, so the full roster has to be resolved up front.
             Dictionary<string, int> playerScores = new Dictionary<string, int>();
             Dictionary<string, int> playerScoresVsPar = new Dictionary<string, int>();
-            
+
             try {
                 var liveLeaderboard = UnityEngine.Object.FindAnyObjectByType<SBGLLiveLeaderboard.LiveLeaderboardPlugin>(FindObjectsInactive.Include);
                 if (liveLeaderboard != null) {
                     var allLeaderboardPlayers = liveLeaderboard.GetCurrentLeaderboard();
                     Log($"<color=cyan>[Match Stats] Leaderboard has {allLeaderboardPlayers.Count} visible players</color>");
-                    
+
                     foreach (var leaderboardPlayer in allLeaderboardPlayers) {
                         if (leaderboardPlayer == null) continue;
-                        
+
                         int gamePoints = leaderboardPlayer.BaseScore;
                         int scoreVsPar = 0;
-                        
+
                         // Extract stroke offset from RawStrokes (e.g., "+5" or "-2")
                         if (!string.IsNullOrEmpty(leaderboardPlayer.RawStrokes)) {
                             string strokeStr = leaderboardPlayer.RawStrokes.Replace("±", "").Trim();
                             int.TryParse(strokeStr, out scoreVsPar);
                         }
-                        
+
                         playerScores[leaderboardPlayer.Name] = gamePoints;
                         playerScoresVsPar[leaderboardPlayer.Name] = scoreVsPar;
                         Log($"<color=cyan>[Match Stats] Cached: {leaderboardPlayer.Name} = {gamePoints} pts, {scoreVsPar} vs par</color>");
@@ -3437,18 +3476,44 @@ namespace SBGLeagueAutomation
             } catch (System.Exception ex) {
                 Log($"<color=yellow>[Match Stats] Error fetching leaderboard data: {ex.Message}</color>");
             }
-            
-            // Store cached scores for retrieval by SubmitMatchEntryForPlayer
+
+            // Store cached scores for retrieval by BuildRosterPlayerForSubmission
             _cachedLeaderboardScores = playerScores;
             _cachedLeaderboardScoresVsPar = playerScoresVsPar;
 
-            // Step 2: Submit MatchEntry for each player in the session
+            // Step 2: Build the roster for every player in the session
+            var roster = new List<RosterPlayer>();
             if (_currentSession.player_ids != null && _currentSession.player_ids.Count > 0) {
-                Log($"<color=cyan>[Match Stats] Creating MatchEntry records for {_currentSession.player_ids.Count} players</color>");
+                Log($"<color=cyan>[Match Stats] Building roster for {_currentSession.player_ids.Count} players</color>");
                 foreach (string playerId in _currentSession.player_ids) {
-                    yield return SubmitMatchEntryForPlayer(matchId, playerId);
+                    RosterPlayer rosterPlayer = null;
+                    yield return BuildRosterPlayerForSubmission(playerId, (built) => rosterPlayer = built);
+                    if (rosterPlayer != null) roster.Add(rosterPlayer);
                 }
             }
+
+            _matchExpectedPlayerCount = Mathf.Max(_matchExpectedPlayerCount, roster.Count);
+
+            // Step 3: Submit the match and all of its entries in one call
+            string matchId = null;
+            yield return SubmitMatchWithRoster(stats, roster, (id) => matchId = id);
+
+            if (string.IsNullOrEmpty(matchId)) {
+                Log("<color=red>[Match Stats] Failed to get Match ID from submission</color>");
+                yield break;
+            }
+
+            // Link Match ID back to the MatchmakingSession so the website can detect mod-submitted matches
+            var sessionLinkPayload = new JObject {
+                ["matchmaking_session_id"] = _currentSession.id,
+                ["match_id"] = matchId
+            };
+            yield return CallGateway("session.update", sessionLinkPayload, (res) => {
+                _currentSession.match_id = matchId;
+                Log($"<color=green>[Match Stats] ✓ MatchmakingSession {_currentSession.id} linked to match: {matchId}</color>");
+            }, (err) => {
+                Log($"<color=yellow>[Match Stats] Could not confirm MatchmakingSession update</color>");
+            });
 
             // Only mark as submitted AFTER successful completion
             _matchStatsSubmitted = true;
@@ -3486,52 +3551,119 @@ namespace SBGLeagueAutomation
         }
 
         private IEnumerator FetchActiveSeasonId() {
-            _activeSeasonFetched = true; // Mark as attempted so we don't retry every loop tick
-            string query = UnityWebRequest.EscapeURL("{\"status\":\"Active\"}");
-            yield return CallAPI($"/Season?q={query}&limit=1", "GET", "", (res) => {
-                if (string.IsNullOrEmpty(res)) return;
-                try {
-                    JToken token = JToken.Parse(res);
-                    JObject season = (token is JArray arr)
-                        ? arr.OfType<JObject>().FirstOrDefault()
-                        : token as JObject;
-                    string id = season?["id"]?.ToString();
-                    if (!string.IsNullOrEmpty(id)) {
-                        _activeSeasonId = id;
-                        Log($"<color=cyan>[Season] Active season resolved: {id}</color>");
-                    } else {
-                        Log($"<color=yellow>[Season] No active season found in API — falling back to hardcoded ID</color>");
+            _activeSeasonFetched = true;
+
+            // Try status variants the website might use
+            string[] statusQueries = { "/season?status=eq.Active&limit=1", "/season?status=eq.active&limit=1", "/season?order=created_at.desc&limit=1" };
+            foreach (string query in statusQueries) {
+                if (!string.IsNullOrEmpty(_activeSeasonId)) break;
+                yield return CallAPI(query, "GET", "", (res) => {
+                    if (string.IsNullOrEmpty(res)) return;
+                    try {
+                        JToken token = JToken.Parse(res);
+                        JObject season = (token is JArray arr)
+                            ? arr.OfType<JObject>().FirstOrDefault()
+                            : token as JObject;
+                        string id   = season?["id"]?.ToString();
+                        string name = season?["name"]?.ToString();
+                        if (!string.IsNullOrEmpty(id)) {
+                            _activeSeasonId   = id;
+                            _activeSeasonName = !string.IsNullOrEmpty(name) ? name : "Active Season";
+                            Log($"<color=cyan>[Season] Active season: {_activeSeasonName} ({id})</color>");
+                        }
+                    } catch (System.Exception ex) {
+                        Log($"<color=orange>[Season] Error parsing season response: {ex.Message}</color>");
                     }
-                } catch (System.Exception ex) {
-                    Log($"<color=orange>[Season] Error parsing season response: {ex.Message}</color>");
-                }
-            });
+                });
+            }
+
+            // Last resort: infer the active season ID from a recent verified match.
+            // This works even when the season table has RLS blocking anon reads.
+            if (string.IsNullOrEmpty(_activeSeasonId)) {
+                yield return CallAPI("/match?status=eq.Verified&order=created_at.desc&limit=1&select=season_id,match_date", "GET", "", (res) => {
+                    try {
+                        JToken token = JToken.Parse(res);
+                        JObject recent = (token is JArray arr) ? arr.OfType<JObject>().FirstOrDefault() : token as JObject;
+                        string inferredId = recent?["season_id"]?.ToString();
+                        if (!string.IsNullOrEmpty(inferredId)) {
+                            _activeSeasonId   = inferredId;
+                            _activeSeasonName = "Active Season";
+                            Log($"<color=cyan>[Season] Inferred season ID from recent verified match: {_activeSeasonId}</color>");
+                        }
+                    } catch (System.Exception ex) {
+                        Log($"<color=orange>[Season] Error inferring season from match: {ex.Message}</color>");
+                    }
+                });
+            }
+
+            if (string.IsNullOrEmpty(_activeSeasonId)) {
+                Log("<color=red>[Season] Could not determine active season ID — match will be submitted without season_id</color>");
+            }
         }
 
-        private IEnumerator SubmitMatchEntry(MatchStats stats, System.Action<string> onMatchIdReceived) {
+        /// <summary>
+        /// Submits the Match and every MatchEntry in one idempotent match.submit call.
+        /// Resubmitting the same matchmaking session returns the existing match rather than
+        /// creating a second one, so this is safe to retry.
+        ///
+        /// Match status, rating route, team size and match type are all derived server-side and
+        /// ignored if sent — we supply the mode and the roster only.
+        /// </summary>
+        private IEnumerator SubmitMatchWithRoster(MatchStats stats, List<RosterPlayer> roster, System.Action<string> onMatchIdReceived) {
             if (stats == null) yield break;
 
-            // Map to Match schema - these are the fields the API expects
-            string seasonId = _activeSeasonId ?? Season1RuleSet.SEASON_ID;
-            string rawMatchType = PlayerPrefs.GetString("MatchType", Season1RuleSet.MATCH_TYPE_RANKED);
-            string apiMatchType = IsProSeriesMatchType(rawMatchType) ? "pro_series" : "mmr";
-            bool isProSeries = apiMatchType == "pro_series";
+            if (roster == null || roster.Count == 0) {
+                Log("<color=red>[Match Stats] Refusing to submit a match with an empty roster — entries cannot be added after submission.</color>");
+                ShowUploadNotification("Upload failed: no players resolved for the match.", "failure");
+                yield break;
+            }
+
+            string rawMatchType = PlayerPrefs.GetString("MatchType", Season2RuleSet.MATCH_TYPE_RANKED);
+            bool isProSeries = Season2RuleSet.ToDbMatchType(rawMatchType) == "pro_series";
+
+            // UUID columns must be null rather than empty string — Supabase rejects "" for uuid type
+            bool sessionIsRealUuid = Guid.TryParse(stats.matchmaking_session_id, out _);
+            JToken sessionIdToken = sessionIsRealUuid ? (JToken)stats.matchmaking_session_id : JValue.CreateNull();
+            JToken seasonIdToken  = !string.IsNullOrEmpty(_activeSeasonId) ? (JToken)_activeSeasonId : JValue.CreateNull();
+
+            var players = new JArray();
+            foreach (var rosterPlayer in roster) {
+                var entry = new JObject {
+                    ["player_id"] = rosterPlayer.PlayerId,
+                    ["player_name"] = rosterPlayer.PlayerName,
+                    ["game_points"] = rosterPlayer.GamePoints,
+                    ["over_under"] = rosterPlayer.ScoreVsPar
+                };
+                if (rosterPlayer.FinishPosition > 0) {
+                    entry["finish_position"] = rosterPlayer.FinishPosition;
+                }
+                if (!string.IsNullOrWhiteSpace(rosterPlayer.PreMatchMmr)
+                    && float.TryParse(rosterPlayer.PreMatchMmr, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float preMmr)) {
+                    entry["pre_match_mmr"] = preMmr;
+                }
+                players.Add(entry);
+            }
 
             var payload = new JObject {
-                ["matchmaking_session_id"] = stats.matchmaking_session_id,
-                ["season_id"] = seasonId,
-                ["match_date"] = stats.match_date,
-                ["match_type"] = apiMatchType,
-                ["player_count"] = Mathf.Max(0, _matchExpectedPlayerCount),
-                ["status"] = "Pending",
+                ["matchmaking_session_id"] = sessionIdToken,
+                ["season_id"] = seasonIdToken,
+                ["match_datetime_utc"] = stats.match_date,
+                ["mode"] = Season2RuleSet.ToGatewayMode(rawMatchType),
                 ["submitted_by_name"] = stats.player_name,
-                ["mode"] = "",
+                ["players"] = players,
                 ["notes"] = $"Auto-submitted via SBGL Unified Mod v{SBGL.UnifiedMod.MyPluginInfo.PLUGIN_VERSION}"
             };
 
-            if (isProSeries) {
-                payload["pro_series_season_id"] = Season1RuleSet.PRO_SERIES_SEASON_ID;
+            // Team-ranked matches additionally carry the Red/Blue rosters and team scores.
+            // The server derives team membership from these lists, not from the players array.
+            if (Season2RuleSet.IsTeamMatchType(rawMatchType)) {
+                if (!TryAddTeamRosters(payload, roster, rawMatchType)) {
+                    ShowUploadNotification("Upload failed: could not determine Red/Blue teams.", "failure");
+                    yield break;
+                }
+            }
 
+            if (isProSeries) {
                 int proSeriesWeek = PlayerPrefs.GetInt("ProSeriesWeek", 0);
                 if (proSeriesWeek > 0)
                     payload["pro_series_week"] = proSeriesWeek;
@@ -3541,28 +3673,116 @@ namespace SBGLeagueAutomation
                     payload["pro_series_event_name"] = proSeriesEventName;
             }
 
-            string json = payload.ToString(Newtonsoft.Json.Formatting.None);
+            Log($"<color=cyan>[Match Stats] Submitting match with {roster.Count} players via gateway</color>");
 
-            Log($"<color=cyan>[Match Stats] Submitting Match entry to API</color>");
-            Log($"<color=cyan>[Match Stats] Full URL: {GetBaseApiUrl()}/Match</color>");
-            Log($"<color=cyan>[Match Stats] Payload: {json}</color>");
-
-            yield return CallAPI("/Match", "POST", json, (res) => {
-                JObject response = ParseApiSingleObject(res);
-                if (response != null) {
-                    string entryId = (string)response["id"] ?? "unknown";
-                    _lastUploadedPlayerCount = Mathf.Max(0, _matchExpectedPlayerCount);
-                    Log($"<color=green>[Match Stats] ✓ Match entry created (ID: {entryId})</color>");
-                    ShowUploadNotification($"Upload success: match ID {entryId}.", "success");
-                    onMatchIdReceived?.Invoke(entryId);
-                } else {
+            yield return CallGateway("match.submit", payload, (response) => {
+                if (response == null) {
                     Log("<color=yellow>[Match Stats] Response received but could not parse ID</color>");
                     ShowUploadNotification("Upload failed: invalid API response.", "failure");
+                    return;
                 }
+
+                string matchId = (string)response["match_id"] ?? (string)response["id"];
+                if (string.IsNullOrWhiteSpace(matchId)) {
+                    Log("<color=yellow>[Match Stats] Response received but could not parse ID</color>");
+                    ShowUploadNotification("Upload failed: invalid API response.", "failure");
+                    return;
+                }
+
+                _lastUploadedPlayerCount = Mathf.Max(0, _matchExpectedPlayerCount);
+                CacheEntryIdsFromSubmitResponse(response);
+
+                Log($"<color=green>[Match Stats] ✓ Match submitted (ID: {matchId})</color>");
+                ShowUploadNotification($"Upload success: match ID {matchId}.", "success");
+                onMatchIdReceived?.Invoke(matchId);
+            }, (err) => {
+                ShowUploadNotification($"Upload failed: {err}", "failure");
             });
         }
 
-        private IEnumerator SubmitMatchEntryForPlayer(string matchId, string playerId) {
+        /// <summary>
+        /// Adds red_players / blue_players / red_team_score / blue_team_score to a team-ranked
+        /// match.submit payload, using the team each player was assigned to in-game.
+        /// </summary>
+        /// <returns>False when the rosters don't form a valid match, in which case nothing is submitted.</returns>
+        private bool TryAddTeamRosters(JObject payload, List<RosterPlayer> roster, string matchType) {
+            // Prefer the assignment captured at round start — by finalization the game may already
+            // have torn down CourseManager.PlayerStates.
+            var teamsByName = _cachedTeamAssignments != null && _cachedTeamAssignments.Count > 0
+                ? _cachedTeamAssignments
+                : ReadInGameTeamAssignments();
+
+            foreach (var rosterPlayer in roster) {
+                if (!string.IsNullOrWhiteSpace(rosterPlayer.PlayerName)
+                    && teamsByName.TryGetValue(rosterPlayer.PlayerName.Trim(), out Team team)) {
+                    rosterPlayer.Team = team;
+                }
+            }
+
+            var red = roster.Where(p => p.Team == Team.Red).ToList();
+            var blue = roster.Where(p => p.Team == Team.Blue).ToList();
+            var unassigned = roster.Where(p => p.Team != Team.Red && p.Team != Team.Blue).ToList();
+
+            if (unassigned.Count > 0) {
+                Log($"<color=red>[Teams] {unassigned.Count} player(s) have no team assignment: {string.Join(", ", unassigned.Select(p => p.PlayerName))}</color>");
+                Log("<color=red>[Teams] Refusing to submit a team match with unassigned players.</color>");
+                return false;
+            }
+
+            int expectedPerSide = Season2RuleSet.GetTeamSize(matchType);
+            if (red.Count != expectedPerSide || blue.Count != expectedPerSide) {
+                Log($"<color=red>[Teams] Roster does not match {matchType}: {red.Count} Red vs {blue.Count} Blue, expected {expectedPerSide} per side.</color>");
+                return false;
+            }
+
+            payload["red_players"] = new JArray(red.Select(p => new JObject { ["player_id"] = p.PlayerId }));
+            payload["blue_players"] = new JArray(blue.Select(p => new JObject { ["player_id"] = p.PlayerId }));
+            payload["red_team_score"] = red.Sum(p => p.GamePoints);
+            payload["blue_team_score"] = blue.Sum(p => p.GamePoints);
+
+            Log($"<color=cyan>[Teams] Red {red.Sum(p => p.GamePoints)} ({string.Join(", ", red.Select(p => p.PlayerName))}) vs Blue {blue.Sum(p => p.GamePoints)} ({string.Join(", ", blue.Select(p => p.PlayerName))})</color>");
+            return true;
+        }
+
+        /// <summary>
+        /// Caches the per-player MatchEntry IDs returned by match.submit so live score updates
+        /// can address them via entry.update.
+        ///
+        /// The gateway's exact response shape for entries is not documented, so several
+        /// plausible shapes are accepted. When none match, the IDs are left unresolved and
+        /// ResolveMatchEntryForPlayer falls back to reading them from the database.
+        /// </summary>
+        private void CacheEntryIdsFromSubmitResponse(JObject response) {
+            if (response == null) return;
+
+            JArray entries = response["entries"] as JArray
+                ?? response["match_entries"] as JArray
+                ?? response["players"] as JArray;
+
+            if (entries == null) {
+                Log("<color=cyan>[Match Stats] Submit response carried no entry IDs — they will be resolved by read.</color>");
+                return;
+            }
+
+            int cached = 0;
+            foreach (var token in entries.OfType<JObject>()) {
+                string playerId = (string)token["player_id"];
+                string entryId = (string)token["id"] ?? (string)token["entry_id"] ?? (string)token["match_entry_id"];
+
+                if (!string.IsNullOrWhiteSpace(playerId) && !string.IsNullOrWhiteSpace(entryId)) {
+                    _playerMatchEntryIds[playerId] = entryId;
+                    cached++;
+                }
+            }
+
+            Log($"<color=cyan>[Match Stats] Cached {cached} MatchEntry ID(s) from submit response.</color>");
+        }
+
+        /// <summary>
+        /// Resolves a single player's display name and final scores for inclusion in match.submit's
+        /// players array. Invokes onResolved with null for spectators / players who never scored.
+        /// </summary>
+        private IEnumerator BuildRosterPlayerForSubmission(string playerId, Action<RosterPlayer> onResolved) {
             // Try to get leaderboard data for this player using cached scores
             int gamePoints = 0;
             int scoreVsPar = 0;
@@ -3592,7 +3812,7 @@ namespace SBGLeagueAutomation
             // If we still don't have a display name, fetch from the API as a fallback
             if (string.IsNullOrEmpty(playerDisplayName)) {
                 Log($"<color=cyan>[Match Stats] Fetching profile for opponent {playerId} (fallback)</color>");
-                yield return CallAPI($"/Player/{playerId}", "GET", "", (res) => {
+                yield return CallAPI($"/player?id=eq.{playerId}&select=*", "GET", "", (res) => {
                     try {
                         JObject profile = ParseApiSingleObject(res);
                         if (profile != null) {
@@ -3645,29 +3865,18 @@ namespace SBGLeagueAutomation
             // Skip spectators / players who never scored
             if (gamePoints == 0) {
                 Log($"<color=yellow>[Match Stats] Skipping MatchEntry for {playerDisplayName ?? playerId} — game points is 0</color>");
+                onResolved?.Invoke(null);
                 yield break;
             }
-            
-            // Build JSON with player_name field included
-            string json = "{" +
-                $"\"match_id\":\"{matchId}\"," +
-                $"\"player_id\":\"{playerId}\"," +
-                $"\"player_name\":\"{playerDisplayName ?? "Unknown"}\"," +
-                $"\"game_points\":{gamePoints}," +
-                $"\"score_vs_par\":{scoreVsPar}," +
-                $"\"notes\":\"Auto-submitted player entry via SBGL Unified Mod v{SBGL.UnifiedMod.MyPluginInfo.PLUGIN_VERSION}\"" +
-            "}";
 
-            Log($"<color=cyan>[Match Stats] Submitting MatchEntry for {playerDisplayName ?? playerId}: {gamePoints} pts, {scoreVsPar} vs par</color>");
-            
-            yield return CallAPI("/MatchEntry", "POST", json, (res) => {
-                JObject response = ParseApiSingleObject(res);
-                if (response != null) {
-                    string entryId = (string)response["id"] ?? "unknown";
-                    Log($"<color=green>[Match Stats] ✓ MatchEntry created (ID: {entryId}) for player {playerDisplayName ?? playerId}</color>");
-                } else {
-                    Log($"<color=yellow>[Match Stats] Could not parse MatchEntry response for player {playerDisplayName ?? playerId}</color>");
-                }
+            Log($"<color=cyan>[Match Stats] Roster entry for {playerDisplayName ?? playerId}: {gamePoints} pts, {scoreVsPar} vs par</color>");
+
+            onResolved?.Invoke(new RosterPlayer {
+                PlayerId = playerId,
+                PlayerName = playerDisplayName ?? "Unknown",
+                GamePoints = gamePoints,
+                ScoreVsPar = scoreVsPar,
+                FinishPosition = 0
             });
         }
 
@@ -3678,7 +3887,12 @@ namespace SBGLeagueAutomation
         private void OnGUI() {
             try
             {
-                bool isMenuScene = SceneManager.GetActiveScene().name.ToLower().Contains("menu");
+                bool isMenuScene = _cachedIsMenuScene;
+                bool hasNotification = !string.IsNullOrEmpty(_uploadNotification);
+                bool showDebug = _showFlowDebugConfig?.Value ?? false;
+
+                // Skip the GUI pipeline entirely when there is nothing to draw
+                if (!isMenuScene && !hasNotification && !showDebug) return;
 
                 // Upload notification is relevant in gameplay too; draw it regardless of scene.
                 DrawUploadNotification();
@@ -3706,8 +3920,12 @@ namespace SBGLeagueAutomation
 
                 float uiWidth = 350f;
                 float rightX = Screen.width - uiWidth - 30;
-                float uiHeight = (_showLogsConfig?.Value ?? false) ? 340f : 230f; 
+                float uiHeight = (_showLogsConfig?.Value ?? false) ? 340f : 230f;
                 if ((_showFlowDebugConfig?.Value ?? false)) uiHeight += 145f;
+
+                // Extra vertical space taken by the team-format row when it is shown
+                float panelOffset = 0f;
+                if (_currentSession == null && !_isQueueing) uiHeight += 25f;
 
                 GUI.DrawTexture(new Rect(rightX, 20, uiWidth, uiHeight), _solidBgTex);
                 GUI.Box(new Rect(rightX, 20, uiWidth, uiHeight), "<b>SBGL MATCH MAKING ASSISTANT</b>");
@@ -3751,6 +3969,10 @@ namespace SBGLeagueAutomation
                 // Prevent interaction until the profile and queue state are synced
                 bool canInteract = !_isInitializing && _userProfile != null;
 
+                // The queue panel gains a team-format row when not queueing, so everything
+                // below it shifts down to avoid overlapping the join button.
+                if (!_isQueueing) panelOffset = 25f;
+
                 if (_isQueueing) {
                     // Already queuing: just show LEAVE QUEUE
                     GUI.enabled = canInteract;
@@ -3761,47 +3983,53 @@ namespace SBGLeagueAutomation
                     GUI.enabled = true;
                 } else {
                     // --- QUEUE TYPE TOGGLE (RANKED | CASUAL) ---
-                    bool isPreProd = UnifiedPlugin.Instance != null &&
-                        string.Equals(UnifiedPlugin.Instance.API_Environment?.Value, "PreProd", StringComparison.OrdinalIgnoreCase);
-                    // Casual mode is only available in PreProd; force ranked in Production
-                    if (!isPreProd) _queueTypeSelection = "ranked";
-
                     float halfW = (uiWidth - 22f) / 2f;
-                    bool isRankedSelected = _queueTypeSelection != "casual";
+                    bool isTeamSelected = Season2RuleSet.IsTeamMatchType(_queueTypeSelection);
+                    bool isRankedSelected = _queueTypeSelection != "casual" && !isTeamSelected;
                     GUI.enabled = canInteract;
-                    if (isPreProd)
-                    {
-                        GUI.backgroundColor = isRankedSelected ? new Color(0.1f, 0.4f, 0.9f, 1f) : Color.gray;
-                        if (GUI.Button(new Rect(rightX + 10, 50, halfW, 23), "RANKED")) {
-                            _queueTypeSelection = "ranked";
-                        }
-                        GUI.backgroundColor = !isRankedSelected ? new Color(0.6f, 0.3f, 0.8f, 1f) : Color.gray;
-                        if (GUI.Button(new Rect(rightX + 12 + halfW, 50, halfW, 23), "CASUAL")) {
-                            _queueTypeSelection = "casual";
-                        }
+                    GUI.backgroundColor = isRankedSelected ? new Color(0.15f, 0.22f, 0.65f, 1f) : new Color(0.22f, 0.22f, 0.22f, 1f);
+                    if (GUI.Button(new Rect(rightX + 10, 50, halfW, 23), "Ranked")) {
+                        _queueTypeSelection = "ranked";
                     }
-                    else
-                    {
-                        GUI.backgroundColor = new Color(0.1f, 0.4f, 0.9f, 1f);
-                        if (GUI.Button(new Rect(rightX + 10, 50, uiWidth - 20, 23), "RANKED")) {
-                            _queueTypeSelection = "ranked";
+                    GUI.backgroundColor = _queueTypeSelection == "casual" ? new Color(0.72f, 0.47f, 0.10f, 1f) : new Color(0.22f, 0.22f, 0.22f, 1f);
+                    if (GUI.Button(new Rect(rightX + 12 + halfW, 50, halfW, 23), "Casual")) {
+                        _queueTypeSelection = "casual";
+                    }
+
+                    // --- TEAM FORMAT TOGGLE (2v2 | 3v3 | 4v4) ---
+                    float thirdW = (uiWidth - 24f) / 3f;
+                    for (int i = 0; i < Season2RuleSet.TEAM_MATCH_TYPES.Length; i++) {
+                        string teamType = Season2RuleSet.TEAM_MATCH_TYPES[i];
+                        bool selected = _queueTypeSelection == teamType;
+                        GUI.backgroundColor = selected ? new Color(0.55f, 0.15f, 0.55f, 1f) : new Color(0.22f, 0.22f, 0.22f, 1f);
+                        string label = $"{Season2RuleSet.GetTeamSize(teamType)}v{Season2RuleSet.GetTeamSize(teamType)}";
+                        if (GUI.Button(new Rect(rightX + 10 + i * (thirdW + 2f), 75, thirdW, 21), label)) {
+                            _queueTypeSelection = teamType;
                         }
                     }
 
                     // --- JOIN QUEUE BUTTON ---
-                    string btnText;
-                    if (_isInitializing) btnText = "SYNCING WITH SERVER...";
-                    else if (_userProfile == null) btnText = "RESOLVING PROFILE...";
-                    else btnText = "JOIN QUEUE";
+                    bool rankedBlocked = (_queueTypeSelection != "casual") && _activeSeasonFetched && !IsActiveSeason;
 
-                    GUI.backgroundColor = new Color(0.1f, 0.6f, 0.1f, 1.0f);
-                    if (GUI.Button(new Rect(rightX + 10, 76, uiWidth - 20, 32), btnText)) {
-                        // Stamp chosen queue type into PlayerPrefs right before entering the loop
+                    string btnText;
+                    if (_isInitializing)        btnText = "SYNCING WITH SERVER...";
+                    else if (_userProfile == null) btnText = "RESOLVING PROFILE...";
+                    else if (rankedBlocked)     btnText = "OFFSEASON — RANKED UNAVAILABLE";
+                    else                        btnText = "JOIN QUEUE";
+
+                    GUI.enabled = !rankedBlocked;
+                    GUI.backgroundColor = rankedBlocked
+                        ? new Color(0.35f, 0.35f, 0.35f, 1f)
+                        : new Color(0.1f, 0.6f, 0.1f, 1.0f);
+                    if (GUI.Button(new Rect(rightX + 10, 99, uiWidth - 20, 32), btnText)) {
                         if (_queueTypeSelection == "casual") {
-                            PlayerPrefs.SetString("MatchType", Season1RuleSet.MATCH_TYPE_CASUAL);
+                            PlayerPrefs.SetString("MatchType", Season2RuleSet.MATCH_TYPE_CASUAL);
                             PlayerPrefs.SetString("HostRuleset", "casual");
+                        } else if (Season2RuleSet.IsTeamMatchType(_queueTypeSelection)) {
+                            PlayerPrefs.SetString("MatchType", _queueTypeSelection);
+                            PlayerPrefs.SetString("HostRuleset", "ranked");
                         } else {
-                            PlayerPrefs.SetString("MatchType", Season1RuleSet.MATCH_TYPE_RANKED);
+                            PlayerPrefs.SetString("MatchType", Season2RuleSet.MATCH_TYPE_RANKED);
                             PlayerPrefs.SetString("HostRuleset", "ranked");
                         }
                         StartCoroutine(MatchmakingLoop());
@@ -3810,13 +4038,19 @@ namespace SBGLeagueAutomation
                 }
             }
 
-            float offset = 0f;
-            GUI.Box(new Rect(rightX + 10, 110 + offset, uiWidth - 20, 100), ""); 
+            float offset = panelOffset;
+            GUI.Box(new Rect(rightX + 10, 110 + offset, uiWidth - 20, 100), "");
 
             if (_userProfile != null) {
                 if (_profileTexture) GUI.DrawTexture(new Rect(rightX + 20, 120 + offset, 40, 40), _profileTexture);
                 GUI.Label(new Rect(rightX + 70, 120 + offset, 240, 20), $"User: <b>{_userProfile.display_name}</b>");
                 GUI.Label(new Rect(rightX + 70, 135 + offset, 240, 20), $"<color=#FFA500><size=10>{_webStatus}</size></color>");
+                if (_activeSeasonFetched) {
+                    string seasonLabel = IsActiveSeason
+                        ? $"<color=#00FF88><size=9>{_activeSeasonName ?? "Active Season"}</size></color>"
+                        : "<color=#888888><size=9>OFFSEASON</size></color>";
+                    GUI.Label(new Rect(rightX + 70, 148 + offset, 240, 14), seasonLabel);
+                }
 
                 // --- STATS ROW (Mimicking Website) ---
                 float statsY = 160 + offset;
@@ -3841,9 +4075,12 @@ namespace SBGLeagueAutomation
                 GUI.Label(new Rect(rightX + 20 + (statWidth * 2), statsY, statWidth, 20), "<color=#FFFFFF><size=10><b>MATCHED</b></size></color>", _centerLabelStyle);
                 GUI.Label(new Rect(rightX + 20 + (statWidth * 2), statsY + 15, statWidth, 25), $"<color=#FFD700><size=16><b>{_matchedCount}</b></size></color>", _centerLabelStyle);
 
-                // Column 4: YOUR MMR
+                // Column 4: YOUR MMR + RANK
+                string rankName  = SBGL.UnifiedMod.Core.Season2RuleSet.GetRankName(_userProfile.current_mmr);
+                string rankColor = SBGL.UnifiedMod.Core.Season2RuleSet.GetRankColor(_userProfile.current_mmr);
                 GUI.Label(new Rect(rightX + 20 + (statWidth * 3), statsY, statWidth, 20), "<color=#FFFFFF><size=10><b>YOUR MMR</b></size></color>", _centerLabelStyle);
-                GUI.Label(new Rect(rightX + 20 + (statWidth * 3), statsY + 15, statWidth, 25), $"<color=#FFFFFF><size=16><b>{_userProfile.current_mmr}</b></size></color>", _centerLabelStyle);
+                GUI.Label(new Rect(rightX + 20 + (statWidth * 3), statsY + 15, statWidth, 18), $"<color=#FFFFFF><size=14><b>{_userProfile.current_mmr}</b></size></color>", _centerLabelStyle);
+                GUI.Label(new Rect(rightX + 20 + (statWidth * 3), statsY + 31, statWidth, 16), $"<color={rankColor}><size=11><b>{rankName}</b></size></color>", _centerLabelStyle);
             }
 
             float contentY = 215 + offset;
@@ -4001,36 +4238,43 @@ namespace SBGLeagueAutomation
         // ==========================================
         private IEnumerator UpdateSessionStatus(string status) {
             if (_currentSession == null || _currentSession.id == "DEBUG") yield break;
-            string json = "{" + $"\"status\":\"{status}\"" + "}";
-            yield return CallAPI($"/MatchmakingSession/{_currentSession.id}", "PUT", json, null);
+            var payload = new JObject {
+                ["matchmaking_session_id"] = _currentSession.id,
+                ["status"] = status
+            };
+            yield return CallGateway("session.update", payload, null);
         }
+
+        private string _lastCallApiError = "";
 
         private IEnumerator CallAPI(string endpoint, string method, string json, Action<string> onSuccess) {
             string fullUrl = GetBaseApiUrl() + endpoint;
             Log($"<color=cyan>[API] {method} {endpoint}</color>");
             Log($"<color=cyan>[API] Full URL: {fullUrl}</color>");
-            
+
             using (UnityWebRequest req = new UnityWebRequest(fullUrl, method)) {
                 if (!string.IsNullOrEmpty(json)) {
                     req.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(json));
                 }
                 req.downloadHandler = new DownloadHandlerBuffer();
                 ApplyApiHeaders(req);
-                
+
                 yield return req.SendWebRequest();
-                
+
                 if (req.result == UnityWebRequest.Result.Success) {
                     Log($"<color=green>[API] {method} {endpoint} - Success</color>");
+                    _lastCallApiError = "";
                     onSuccess?.Invoke(req.downloadHandler.text);
                 } else {
                     string errorMsg = $"[API] {method} {endpoint} failed: {req.result}";
                     if (!string.IsNullOrEmpty(req.error)) errorMsg += $" - {req.error}";
                     if (req.responseCode > 0) errorMsg += $" (HTTP {req.responseCode})";
-                    if (!string.IsNullOrEmpty(req.downloadHandler?.text)) {
-                        int length = Math.Min(200, req.downloadHandler.text.Length);
-                        errorMsg += $" - Response: {req.downloadHandler.text.Substring(0, length)}";
+                    string body = req.downloadHandler?.text ?? "";
+                    if (!string.IsNullOrEmpty(body)) {
+                        int length = Math.Min(200, body.Length);
+                        errorMsg += $" - Response: {body.Substring(0, length)}";
                     }
-                    
+                    _lastCallApiError = $"HTTP {req.responseCode}: {body.Substring(0, Math.Min(120, body.Length))}";
                     Log($"<color=red>{errorMsg}</color>");
                 }
             }
@@ -4038,18 +4282,80 @@ namespace SBGLeagueAutomation
 
         private void ApplyApiHeaders(UnityWebRequest req) {
             if (req == null) return;
-
-            // Use unified plugin's auth token
             req.SetRequestHeader("Content-Type", "application/json");
-            req.SetRequestHeader("api_key", GetAuthToken());
-            req.SetRequestHeader("X-App-Id", GetAppId());
+            req.SetRequestHeader("apikey", GetAuthToken());
+            req.SetRequestHeader("Authorization", $"Bearer {GetAuthToken()}");
+            req.SetRequestHeader("Prefer", "return=representation");
+        }
+
+        // ==========================================
+        // MOD GATEWAY TRANSPORT (ALL WRITES)
+        // ==========================================
+        // Direct database writes are no longer permitted — the baked-in key only authorizes
+        // reads. Every write is funnelled through the server-side gateway as
+        // { "action": ..., "payload": ... }, and the server performs it with a privileged key.
+        // Reads continue to use CallAPI/ApplyApiHeaders against the database directly.
+        internal IEnumerator CallGateway(string action, JObject payload, Action<JObject> onSuccess, Action<string> onError = null) {
+            if (!UnifiedPlugin.IsModGatewayConfigured()) {
+                string reason = "Mod gateway is not configured (missing URL or mod key) — write skipped.";
+                Log($"<color=red>[Gateway] {action} skipped: {reason}</color>");
+                _lastCallApiError = reason;
+                onError?.Invoke(reason);
+                yield break;
+            }
+
+            var body = new JObject {
+                ["action"] = action,
+                ["payload"] = payload ?? new JObject()
+            };
+            string json = body.ToString(Newtonsoft.Json.Formatting.None);
+            string url = UnifiedPlugin.GetCurrentModGatewayUrl();
+
+            Log($"<color=cyan>[Gateway] {action}</color>");
+
+            using (UnityWebRequest req = new UnityWebRequest(url, "POST")) {
+                req.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(json));
+                req.downloadHandler = new DownloadHandlerBuffer();
+                req.SetRequestHeader("Content-Type", "application/json");
+                req.SetRequestHeader("x-sbgl-mod-key", UnifiedPlugin.GetCurrentModGatewayKey());
+
+                yield return req.SendWebRequest();
+
+                string responseBody = req.downloadHandler?.text ?? "";
+
+                if (req.result == UnityWebRequest.Result.Success) {
+                    JObject response = ParseApiSingleObject(responseBody);
+
+                    // match.submit is idempotent per matchmaking session — a resubmit returns
+                    // the existing match rather than creating a second one. That is a success.
+                    if (response != null && (bool?)response["duplicate"] == true) {
+                        Log($"<color=green>[Gateway] {action} - already submitted (match_id: {(string)response["match_id"]})</color>");
+                    } else {
+                        Log($"<color=green>[Gateway] {action} - Success</color>");
+                    }
+
+                    _lastCallApiError = "";
+                    onSuccess?.Invoke(response);
+                } else {
+                    string errorMsg = $"[Gateway] {action} failed: {req.result}";
+                    if (!string.IsNullOrEmpty(req.error)) errorMsg += $" - {req.error}";
+                    if (req.responseCode > 0) errorMsg += $" (HTTP {req.responseCode})";
+                    if (!string.IsNullOrEmpty(responseBody)) {
+                        errorMsg += $" - Response: {responseBody.Substring(0, Math.Min(200, responseBody.Length))}";
+                    }
+                    _lastCallApiError = $"HTTP {req.responseCode}: {responseBody.Substring(0, Math.Min(120, responseBody.Length))}";
+                    Log($"<color=red>{errorMsg}</color>");
+                    onError?.Invoke(_lastCallApiError);
+                }
+            }
         }
 
         private IEnumerator ResolveProfile(string steamName) {
             // Note: Use 'ign' in the query if that's your primary identifier, 
             // but sticking to your current display_name logic:
-            string fullUrl = $"{GetBaseApiUrl()}/Player?q={UnityWebRequest.EscapeURL("{\"display_name\":\"" + steamName + "\"}")}"; 
-            Log($"<color=cyan>[Init] GET /Player (resolving profile for {steamName})</color>");
+            // ilike, not eq: Steam names routinely differ in case from the registered display_name
+            string fullUrl = $"{GetBaseApiUrl()}/player?display_name=ilike.{UnityWebRequest.EscapeURL(steamName)}";
+            Log($"<color=cyan>[Init] GET /player (resolving profile for {steamName})</color>");
             Log($"<color=cyan>[Init] Full URL: {fullUrl.Substring(0, Math.Min(150, fullUrl.Length))}...</color>");
             using (UnityWebRequest req = UnityWebRequest.Get(fullUrl)) {
                 ApplyApiHeaders(req);
@@ -4120,6 +4426,55 @@ namespace SBGLeagueAutomation
             }
 
             return null;
+        }
+
+        /// <summary>
+        /// Returns a stable UUID to use as user_id in matchmaking_queue.
+        /// Uses the real Supabase auth UUID if we've ever seen one for this player (cached in PlayerPrefs).
+        /// Falls back to a deterministic UUID derived from the player's own ID so it's consistent across sessions.
+        /// </summary>
+        private string GetOrDeriveUserUUID() {
+            string cached = PlayerPrefs.GetString("SBGLUserAuthUUID", "");
+            if (!string.IsNullOrEmpty(cached)) return cached;
+
+            string playerId = _userProfile?.id ?? "";
+
+            // UUID-format player IDs can be used directly
+            if (System.Guid.TryParse(playerId, out _)) return playerId;
+
+            // Derive a deterministic UUID from the player's hex ID by padding to 32 hex chars
+            if (playerId.Length > 0) {
+                string padded = playerId.PadRight(32, '0').Substring(0, 32);
+                return $"{padded.Substring(0,8)}-{padded.Substring(8,4)}-{padded.Substring(12,4)}-{padded.Substring(16,4)}-{padded.Substring(20,12)}";
+            }
+
+            return System.Guid.NewGuid().ToString();
+        }
+
+        private static List<string> ParseTextJsonArray(string raw) {
+            if (string.IsNullOrWhiteSpace(raw)) return new List<string>();
+            try {
+                var arr = JArray.Parse(raw);
+                return arr.Values<string>().Where(v => v != null).ToList();
+            } catch {
+                return new List<string>();
+            }
+        }
+
+        private MatchmakingSession ParseSessionFromJson(JObject s) {
+            if (s == null) return null;
+            return new MatchmakingSession {
+                id               = (string)s["id"],
+                lobby_name       = (string)s["lobby_name"],
+                lobby_password   = (string)s["lobby_password"],
+                host_player_id   = (string)s["host_player_id"],
+                status           = (string)s["status"],
+                match_id         = (string)s["match_id"],
+                steam_lobby_link = (string)s["steam_lobby_link"],
+                match_type       = (string)s["match_type"],
+                player_ids       = ParseTextJsonArray(s["player_ids"]?.ToString()),
+                accepted_player_ids = ParseTextJsonArray(s["accepted_player_ids"]?.ToString()),
+            };
         }
 
         private IEnumerator DownloadProfilePic(string url) {

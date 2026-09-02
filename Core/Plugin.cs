@@ -53,20 +53,45 @@ namespace SBGL.UnifiedMod.Core
         // API CONFIGURATION
         // ==========================================
         // Production API
-        private const string PROD_PLAYER_API = "https://sbgleague.com/api/apps/69b0f4aba3975f2440fbf070/entities/Player";
+        private const string PROD_PLAYER_API = "https://rirhcdkwgrjwyktqffby.supabase.co/rest/v1/player";
         private const string PROD_APP_ID = "69b0f4aba3975f2440fbf070";
-        private const string PROD_AUTH_TOKEN = "3f7c84bf7a734c6a86bbc34245a1e6e4";
+        private const string PROD_AUTH_TOKEN = "sb_publishable_IsCJ1AlHfOSg_hATkJ-4wg_IZoDkq_f";
         
         // PreProd API
         private const string PREPROD_PLAYER_API = "https://sbg-league-manager-preprod.base44.app/api/apps/69d5bc0bb18e58e435ff4e3f/entities/Player";
         private const string PREPROD_APP_ID = "69d5bc0bb18e58e435ff4e3f";
         private const string PREPROD_AUTH_TOKEN = "1ec5fe0220c041939070ac4690933ba3";
-        
+
+        // ==========================================
+        // MOD GATEWAY (SERVER-SIDE WRITES)
+        // ==========================================
+        // Anonymous write access to the database was revoked — the keys above now only
+        // authorize reads. All writes go through this server-side endpoint, which performs
+        // them with a privileged server key and validates that every submitted player
+        // belongs to the referenced matchmaking session.
+        // The mod key below is extractable from the DLL and is NOT a security boundary;
+        // the real protection is that server-side validation.
+        public const string MOD_GATEWAY_KEY_PLACEHOLDER = "REPLACE_WITH_UNIFIED_MOD_API_KEY";
+
+        private const string PROD_MOD_GATEWAY_URL = "https://sbgleague.com/api/modGateway";
+        // The gateway accepts the same key production already used (confirmed by the web team), so
+        // this is aliased rather than duplicated. If the gateway key is ever rotated independently
+        // of the database key, replace this with its own literal.
+        private const string PROD_MOD_GATEWAY_KEY = PROD_AUTH_TOKEN;
+
+        // TODO: PreProd gateway URL/key have not been provided yet. Until they are, staff
+        // running PreProd will see writes fail fast with a clear log line rather than
+        // silently hitting the production gateway with production credentials.
+        private const string PREPROD_MOD_GATEWAY_URL = "";
+        private const string PREPROD_MOD_GATEWAY_KEY = MOD_GATEWAY_KEY_PLACEHOLDER;
+
         // Dynamic API properties
         private string _currentPlayerApi;
         private string _currentAppId;
         private string _currentAuthToken;
-        private bool _isStaffUser = false;       
+        private string _currentModGatewayUrl;
+        private string _currentModGatewayKey;
+        private bool _isStaffUser = false;
 
 
         // ==========================================
@@ -80,6 +105,23 @@ namespace SBGL.UnifiedMod.Core
         public static string GetCurrentPlayerApi() => Instance != null ? Instance._currentPlayerApi : PROD_PLAYER_API;
         public static string GetCurrentAppId() => Instance != null ? Instance._currentAppId : PROD_APP_ID;
         public static string GetCurrentAuthToken() => Instance != null ? Instance._currentAuthToken : PROD_AUTH_TOKEN;
+        public static string GetCurrentBaseApi() { string p = GetCurrentPlayerApi(); int i = p.LastIndexOf('/'); return i > 0 ? p.Substring(0, i) : p; }
+        public static string GetCurrentModGatewayUrl() => Instance != null ? Instance._currentModGatewayUrl : PROD_MOD_GATEWAY_URL;
+        public static string GetCurrentModGatewayKey() => Instance != null ? Instance._currentModGatewayKey : PROD_MOD_GATEWAY_KEY;
+
+        /// <summary>
+        /// True when the gateway is usable — a URL is configured and the mod key has been
+        /// filled in. Callers should log and skip the write rather than firing a request
+        /// that is guaranteed to be rejected.
+        /// </summary>
+        public static bool IsModGatewayConfigured()
+        {
+            string url = GetCurrentModGatewayUrl();
+            string key = GetCurrentModGatewayKey();
+            return !string.IsNullOrWhiteSpace(url)
+                && !string.IsNullOrWhiteSpace(key)
+                && key != MOD_GATEWAY_KEY_PLACEHOLDER;
+        }
         public static bool IsStaffUser() => Instance != null && Instance._isStaffUser;
         public static SharedPlayerProfile GetPlayerProfile() => _sharedProfile;
         public static bool IsPlayerProfileResolved() => _sharedProfile.IsResolved;
@@ -127,12 +169,8 @@ namespace SBGL.UnifiedMod.Core
         // ==========================================
         // LIVE LEADERBOARD CONFIG
         // ==========================================
-        public ConfigEntry<float> LL_Width;
-        public ConfigEntry<float> LL_MaxHeight;
-        public ConfigEntry<float> LL_PosX;
-        public ConfigEntry<float> LL_PosY;
-        public ConfigEntry<float> LL_Opacity;
         public ConfigEntry<int> LL_MaxPlayers;
+        public ConfigEntry<UnityEngine.InputSystem.Key> LL_ViewToggleKey;
 
         // ==========================================
         // API ENVIRONMENT CONFIG (Staff Only)
@@ -158,10 +196,10 @@ namespace SBGL.UnifiedMod.Core
             Instance = this;
             
             // === COMPETITIVE PLUGIN CHECK CONFIG ===
-            CompCheck_X = Config.Bind("CompetitiveCheck.UI Position", "X Offset", 20f, 
-                new ConfigDescription("Horizontal position", new AcceptableValueRange<float>(0f, 4000f)));
-            CompCheck_Y = Config.Bind("CompetitiveCheck.UI Position", "Y Offset", 100f, 
-                new ConfigDescription("Vertical position", new AcceptableValueRange<float>(0f, 4000f)));
+            CompCheck_X = Config.Bind("CompetitiveCheck.UI Position", "X Offset", 0f,
+                new ConfigDescription("Horizontal offset from the center of the screen. Negative = left, Positive = right.", new AcceptableValueRange<float>(-2000f, 2000f)));
+            CompCheck_Y = Config.Bind("CompetitiveCheck.UI Position", "Y Offset", 12f,
+                new ConfigDescription("Vertical offset from the bottom of the screen. Higher values move the card up.", new AcceptableValueRange<float>(0f, 2000f)));
             CompCheck_Width = Config.Bind("CompetitiveCheck.UI Size", "Width", 200f, 
                 new ConfigDescription("Panel width", new AcceptableValueRange<float>(150f, 800f)));
             CompCheck_Alpha = Config.Bind("CompetitiveCheck.UI Appearance", "Opacity", 0.85f, 
@@ -209,18 +247,10 @@ namespace SBGL.UnifiedMod.Core
                 "When disabled, the mod will NOT enforce Season 1 rules or item weights on match start. Use this as a fallback if rules are being applied incorrectly.");
 
             // === LIVE LEADERBOARD CONFIG ===
-            LL_Width = Config.Bind("LiveLeaderboard.UI", "Width", 350f, 
-                new ConfigDescription("Total width of leaderboard panel", new AcceptableValueRange<float>(250f, 800f)));
-            LL_MaxHeight = Config.Bind("LiveLeaderboard.UI", "Max Height", 999f, 
-                new ConfigDescription("Maximum height of leaderboard panel", new AcceptableValueRange<float>(200f, 1440f)));
-            LL_PosX = Config.Bind("LiveLeaderboard.UI", "X Position", 5f, 
-                new ConfigDescription("Horizontal position", new AcceptableValueRange<float>(0f, 3000f)));
-            LL_PosY = Config.Bind("LiveLeaderboard.UI", "Y Position", 200f, 
-                new ConfigDescription("Vertical position", new AcceptableValueRange<float>(0f, 2160f)));
-            LL_Opacity = Config.Bind("LiveLeaderboard.UI", "Opacity", 0.85f, 
-                new ConfigDescription("Panel transparency", new AcceptableValueRange<float>(0f, 1f)));
-            LL_MaxPlayers = Config.Bind("LiveLeaderboard.UI", "Max Players", 16, 
+            LL_MaxPlayers = Config.Bind("LiveLeaderboard.UI", "Max Players", 16,
                 new ConfigDescription("Maximum rows to display", new AcceptableValueRange<int>(1, 50)));
+            LL_ViewToggleKey = Config.Bind("LiveLeaderboard.UI", "View Toggle Key", UnityEngine.InputSystem.Key.F8,
+                "Key that switches between the SBGL leaderboard and the native in-game scoreboard.");
 
             // === API ENVIRONMENT CONFIG (Staff Only) ===
             API_Environment = Config.Bind("API.Environment", "API Environment", "Production", 
@@ -514,8 +544,7 @@ namespace SBGL.UnifiedMod.Core
                 });
             }
 
-            var manifest = new JObject
-            {
+            var manifest = new JObject            {
                 ["version"] = 1,
                 ["generatedAtUtc"] = DateTime.UtcNow.ToString("o"),
                 ["generatedBy"] = GetSteamUsername(),
@@ -572,6 +601,8 @@ namespace SBGL.UnifiedMod.Core
                     _currentPlayerApi = PREPROD_PLAYER_API;
                     _currentAppId = PREPROD_APP_ID;
                     _currentAuthToken = PREPROD_AUTH_TOKEN;
+                    _currentModGatewayUrl = PREPROD_MOD_GATEWAY_URL;
+                    _currentModGatewayKey = PREPROD_MOD_GATEWAY_KEY;
                     Logger.LogInfo("[API Setup] ✓ Switched to PreProd configuration");
                 }
                 else
@@ -579,6 +610,8 @@ namespace SBGL.UnifiedMod.Core
                     _currentPlayerApi = PROD_PLAYER_API;
                     _currentAppId = PROD_APP_ID;
                     _currentAuthToken = PROD_AUTH_TOKEN;
+                    _currentModGatewayUrl = PROD_MOD_GATEWAY_URL;
+                    _currentModGatewayKey = PROD_MOD_GATEWAY_KEY;
                     Logger.LogInfo("[API Setup] ✓ Switched to Production configuration");
                 }
             }
@@ -587,6 +620,8 @@ namespace SBGL.UnifiedMod.Core
                 _currentPlayerApi = PROD_PLAYER_API;
                 _currentAppId = PROD_APP_ID;
                 _currentAuthToken = PROD_AUTH_TOKEN;
+                _currentModGatewayUrl = PROD_MOD_GATEWAY_URL;
+                _currentModGatewayKey = PROD_MOD_GATEWAY_KEY;
                 Logger.LogInfo("[API Setup] User is not staff - using Production only");
             }
 
@@ -603,6 +638,12 @@ namespace SBGL.UnifiedMod.Core
             Logger.LogInfo($"Endpoint:  {_currentPlayerApi}");
             Logger.LogInfo($"App ID:    {_currentAppId}");
             Logger.LogInfo($"Auth:      {maskedToken}");
+            Logger.LogInfo($"Gateway:   {(string.IsNullOrWhiteSpace(_currentModGatewayUrl) ? "(not configured)" : _currentModGatewayUrl)}");
+            if (!IsModGatewayConfigured())
+            {
+                Logger.LogWarning("[API Setup] ⚠ Mod gateway is NOT configured — all writes will be skipped.");
+                Logger.LogWarning($"[API Setup]   URL set: {!string.IsNullOrWhiteSpace(_currentModGatewayUrl)}, key set: {_currentModGatewayKey != MOD_GATEWAY_KEY_PLACEHOLDER}");
+            }
             Logger.LogInfo("==========================================");
             
             // Fire event to notify components of API change
@@ -618,6 +659,7 @@ namespace SBGL.UnifiedMod.Core
             {
                 var harmony = new Harmony("com.sbgl.unified.patches");
                 harmony.PatchAll(typeof(RulePatches));
+                harmony.PatchAll(typeof(LeaderboardPatches));
                 RulePatches.SetLogger(Logger);
                 RulePatches.SetApplyRulesetsConfig(RS_ApplyRulesets);
                 Logger.LogInfo("[Init] ✓ Harmony patches initialized successfully");
@@ -656,7 +698,7 @@ namespace SBGL.UnifiedMod.Core
             GameObject leaderboardObj = new GameObject("SBGL-LiveLeaderboard");
             UnityEngine.Object.DontDestroyOnLoad(leaderboardObj);
             LiveLeaderboardPlugin leaderboard = leaderboardObj.AddComponent<LiveLeaderboardPlugin>();
-            leaderboard.SetConfig(LL_Width, LL_MaxHeight, LL_PosX, LL_PosY, LL_Opacity, LL_MaxPlayers);
+            leaderboard.SetConfig(LL_MaxPlayers, LL_ViewToggleKey);
 
             // Initialize Pseudo Dedicated Server as a managed component
             GameObject pdsObj = new GameObject("SBGL-PseudoDedicatedServer");
@@ -668,6 +710,11 @@ namespace SBGL.UnifiedMod.Core
             GameObject hitTrackerObj = new GameObject("SBGL-HitTracker");
             UnityEngine.Object.DontDestroyOnLoad(hitTrackerObj);
             hitTrackerObj.AddComponent<HitTrackerPlugin>();
+
+            // Initialize Poll Manager as a managed component
+            GameObject pollObj = new GameObject("SBGL-PollManager");
+            UnityEngine.Object.DontDestroyOnLoad(pollObj);
+            pollObj.AddComponent<Features.Poll.PollManager>();
         }
 
         private IEnumerator ResolvePlayerProfile(string playerIdOrName)
@@ -786,11 +833,6 @@ namespace SBGL.UnifiedMod.Core
             PlayerPrefs.SetInt("MM_IgnoreSbglLobbyRequirement", MM_IgnoreSbglLobbyRequirement.Value ? 1 : 0);
 
             // === LEADERBOARD CONFIG SYNC ===
-            PlayerPrefs.SetFloat("LL_Width", LL_Width.Value);
-            PlayerPrefs.SetFloat("LL_MaxHeight", LL_MaxHeight.Value);
-            PlayerPrefs.SetFloat("LL_PosX", LL_PosX.Value);
-            PlayerPrefs.SetFloat("LL_PosY", LL_PosY.Value);
-            PlayerPrefs.SetFloat("LL_Opacity", LL_Opacity.Value);
             PlayerPrefs.SetInt("LL_MaxPlayers", LL_MaxPlayers.Value);
             
             PlayerPrefs.Save();

@@ -128,16 +128,14 @@ namespace SBGL.UnifiedMod.Utils
                 yield break;
             }
 
-            // Try exact match first
-            string query = playerIdOrName.All(char.IsDigit)
-                ? "{\"id\":\"" + playerIdOrName + "\"}"
-                : "{\"display_name\":{\"$regex\":\"^" + playerIdOrName + "$\",\"$options\":\"i\"}}";
-
-            string url = $"{playerApiUrl}?q={UnityWebRequest.EscapeURL(query)}";
+            // Try exact match first — PostgREST format
+            string url = playerIdOrName.All(char.IsDigit)
+                ? $"{playerApiUrl}?id=eq.{UnityWebRequest.EscapeURL(playerIdOrName)}"
+                : $"{playerApiUrl}?display_name=ilike.{UnityWebRequest.EscapeURL(playerIdOrName)}";
             var headers = new Dictionary<string, string>
             {
-                { "X-App-Id", appId },
-                { "api_key", authToken }
+                { "apikey", authToken },
+                { "Authorization", $"Bearer {authToken}" }
             };
 
             bool found = false;
@@ -193,12 +191,12 @@ namespace SBGL.UnifiedMod.Utils
             System.Action<bool, PlayerProfile> onComplete,
             ManualLogSource logger = null)
         {
-            string query = "{\"display_name\":{\"$regex\":\"" + playerName + "\",\"$options\":\"i\"}}";
-            string url = $"{playerApiUrl}?q={UnityWebRequest.EscapeURL(query)}";
+            // Fuzzy search via PostgREST ilike wildcard
+            string url = $"{playerApiUrl}?display_name=ilike.*{UnityWebRequest.EscapeURL(playerName)}*";
             var headers = new Dictionary<string, string>
             {
-                { "X-App-Id", appId },
-                { "api_key", authToken }
+                { "apikey", authToken },
+                { "Authorization", $"Bearer {authToken}" }
             };
 
             bool found = false;

@@ -1,0 +1,9 @@
+{
+    "name": "SBGL_UnifiedMod",
+    "version_number": "0.1.22",
+    "website_url": "",
+    "description": "Official Super Battle Golf League mod. Enforces ranked ruleset, checks player mod compliance via P2P, manages matchmaking queue, displays live leaderboard, and submits match results to the SBGL League API.",
+    "dependencies": [
+        "BepInEx-BepInExPack-5.4.2100"
+    ]
+}

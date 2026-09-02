@@ -60,7 +60,8 @@ namespace SBGL.UnifiedMod.Features.HitTracker
 
         void Update()
         {
-            if (Keyboard.current != null && Keyboard.current[ToggleKey].wasPressedThisFrame)
+            if (Keyboard.current != null && Keyboard.current[ToggleKey].wasPressedThisFrame
+                && string.Equals(Steamworks.SteamClient.Name, "KingCox22", StringComparison.OrdinalIgnoreCase))
                 _showWindow = !_showWindow;
 
             // Poll hole index – save outgoing hole data when it changes

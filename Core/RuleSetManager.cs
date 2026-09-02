@@ -34,18 +34,18 @@ namespace SBGL.UnifiedMod.Core
         }
 
         /// <summary>
-        /// Get the ruleset for a given season.
-        /// Currently only Season 1 is supported.
-        /// Returns a dictionary mapping Rule enum indices to float values.
+        /// Get the ranked ruleset for a given season.
         /// </summary>
         public static Dictionary<MatchSetupRules.Rule, float> GetRuleSetForSeason(int season)
         {
-            if (season != Season1RuleSet.SEASON)
-            {
-                LogWarning($"Season {season} not supported, defaulting to Season 1");
-            }
+            if (season == Season2RuleSet.SEASON)
+                return Season2RuleSet.GetRankedRulesSettings();
 
-            return Season1RuleSet.GetRulesSettings();
+            if (season == Season1RuleSet.SEASON)
+                return Season1RuleSet.GetRulesSettings();
+
+            LogWarning($"Season {season} not recognised, defaulting to Season 2");
+            return Season2RuleSet.GetRankedRulesSettings();
         }
 
         /// <summary>
@@ -88,9 +88,9 @@ namespace SBGL.UnifiedMod.Core
             }
 
             // Validate season
-            if (season != Season1RuleSet.SEASON)
+            if (season != Season2RuleSet.SEASON && season != Season1RuleSet.SEASON)
             {
-                LogWarning($"Season {season} not officially supported");
+                LogWarning($"Season {season} not recognised");
             }
 
             // Validate course
@@ -101,7 +101,7 @@ namespace SBGL.UnifiedMod.Core
             }
 
             // Validate match type
-            if (!matchType.Contains("ranked") && !matchType.Contains("pro_series"))
+            if (!matchType.Contains("ranked") && !matchType.Contains("pro_series") && !matchType.Contains("mmr"))
             {
                 LogWarning($"Match type '{matchType}' may not be a ranked/competitive type");
             }
@@ -147,7 +147,6 @@ namespace SBGL.UnifiedMod.Core
         {
             Log($"Match Configuration Applied - Type: {matchType}, Course: {courseName}, Season: {season}");
             Log($"Course Biome: {MapPoolConfig.FindCourseByName(courseName)?.Biome ?? "Unknown"}");
-            Log("Season 1 Ranked Rules Applied - Wind: Enabled, Comeback: Enabled, Knockouts: Disabled, OutOfBounds: 5s");
         }
 
         /// <summary>
@@ -158,7 +157,7 @@ namespace SBGL.UnifiedMod.Core
             if (string.IsNullOrEmpty(matchType))
                 return false;
 
-            return matchType.Contains("ranked") || matchType.Contains("pro_series") || matchType.Contains("competitive");
+            return matchType.Contains("ranked") || matchType.Contains("pro_series") || matchType.Contains("mmr") || matchType.Contains("competitive");
         }
     }
 }

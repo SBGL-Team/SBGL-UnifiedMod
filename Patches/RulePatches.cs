@@ -1,6 +1,7 @@
 using BepInEx.Logging;
 using HarmonyLib;
 using UnityEngine;
+using System.Collections.Generic;
 using SBGL.UnifiedMod.Core;
 
 namespace SBGL.UnifiedMod.Patches
@@ -45,16 +46,17 @@ namespace SBGL.UnifiedMod.Patches
             {
                 if (!__instance.isServer) return;
 
-                if (!(_applyRulesets?.Value ?? true))
+                if (!(_applyRulesets?.Value ?? false))
                 {
                     Log("ApplyRulesets is disabled in config — skipping rule enforcement");
                     return;
                 }
 
                 string matchType = PlayerPrefs.GetString("MatchType", "");
-                bool isSeasonMatch = !string.IsNullOrEmpty(matchType) && matchType.Contains("season");
-                bool isCasualMatch = string.Equals(matchType, Season1RuleSet.MATCH_TYPE_CASUAL, System.StringComparison.OrdinalIgnoreCase);
-                if (!isSeasonMatch && !isCasualMatch)
+                bool isManagedMatch = Season2RuleSet.IsManagedMatchType(matchType)
+                    || (!string.IsNullOrEmpty(matchType) && matchType.Contains("season_1"))
+                    || string.Equals(matchType, Season1RuleSet.MATCH_TYPE_CASUAL, System.StringComparison.OrdinalIgnoreCase);
+                if (!isManagedMatch)
                 {
                     Log($"Not a managed ruleset match (MatchType='{matchType}'), skipping");
                     return;
@@ -67,7 +69,7 @@ namespace SBGL.UnifiedMod.Patches
                     return;
                 }
 
-                Log($"=== APPLYING SEASON 1 RULES (OnStartClient) ===");
+                Log($"=== APPLYING SEASON 2 RULES (OnStartClient) ===");
                 Log($"  Match Type: {matchType}");
                 Log($"  Host Ruleset: {PlayerPrefs.GetString("HostRuleset", "ranked")}");
 
@@ -91,77 +93,37 @@ namespace SBGL.UnifiedMod.Patches
         {
             string hostRuleset = PlayerPrefs.GetString("HostRuleset", "ranked");
             bool isProSeries = hostRuleset == "pro_series";
-            bool isCasual = hostRuleset == "casual";
+            bool isCasual    = hostRuleset == "casual";
 
-            // Always reset to Classic first so our values override any previous state cleanly.
+            // Reset to Classic first so our values override any previous state cleanly.
             matchSetup.SetPreset(MatchSetupRules.Preset.Classic);
             Log("✓ Reset to Classic preset");
 
+            // Season 2: all formats use the same base settings (game defaults) with
+            // only Wind, Comeback, and WhiteFlag overridden.
+            Dictionary<MatchSetupRules.Rule, float> rulesDict;
             if (isCasual)
-            {
-                Log("✓ Casual selected - leaving Classic preset defaults intact");
-                return;
-            }
+                rulesDict = Season2RuleSet.GetCasualRulesSettings();
+            else if (isProSeries)
+                rulesDict = Season2RuleSet.GetProSeriesRulesSettings();
+            else
+                rulesDict = Season2RuleSet.GetRankedRulesSettings();
 
-            if (isProSeries)
-            {
-                // Pro Series: apply rule overrides only. Item weights stay at game defaults
-                // (already restored by SetPreset(Classic) above) — OrbitalLaser, RocketDriver
-                // etc. are NOT banned in Pro Series. Course/map selection is manual.
-                var proRules = Season1RuleSet.GetProSeriesRulesSettings();
-                int proAppliedCount = 0;
-                foreach (var kvp in proRules)
-                {
-                    try
-                    {
-                        matchSetup.SetValue(kvp.Key, kvp.Value);
-
-                        if (matchSetup.onOffDropdownLookup.TryGetValue(kvp.Key, out var dropdown))
-                            dropdown.SetValue((!matchSetup.GetValueAsBoolInternal(kvp.Key)) ? 1 : 0);
-                        else if (matchSetup.sliderLookup.TryGetValue(kvp.Key, out var slider))
-                            slider.SetValue(matchSetup.GetValueInternal(kvp.Key));
-
-                        matchSetup.UpdateRule(kvp.Key);
-                        Log($"  ✓ Set {kvp.Key} = {kvp.Value}");
-                        proAppliedCount++;
-                    }
-                    catch (System.Exception ex)
-                    {
-                        LogError($"  ✗ Failed to set {kvp.Key}: {ex.Message}");
-                    }
-                }
-                Log($"✓ Applied {proAppliedCount}/{proRules.Count} Pro Series rules (item weights at game defaults)");
-                matchSetup.SetPreset(MatchSetupRules.Preset.Custom);
-                Log($"✓ Set Preset to Custom");
-                return;
-            }
-
-            // Ranked: apply full Season 1 rule set
-            var rulesDict = Season1RuleSet.GetRulesSettings();
             int appliedCount = 0;
-
             foreach (var kvp in rulesDict)
             {
                 try
                 {
-                    // SetValue writes to the SyncDictionary (only runs on server, which is already gated above)
                     matchSetup.SetValue(kvp.Key, kvp.Value);
 
-                    // Update corresponding UI element so the rules panel reflects the new value
                     if (matchSetup.onOffDropdownLookup.TryGetValue(kvp.Key, out var dropdown))
-                    {
                         dropdown.SetValue((!matchSetup.GetValueAsBoolInternal(kvp.Key)) ? 1 : 0);
-                    }
                     else if (matchSetup.sliderLookup.TryGetValue(kvp.Key, out var slider))
-                    {
                         slider.SetValue(matchSetup.GetValueInternal(kvp.Key));
-                    }
+                    else if (matchSetup.dropdownLookup.TryGetValue(kvp.Key, out var multiDropdown))
+                        multiDropdown.SetValue((int)matchSetup.GetValueInternal(kvp.Key));
 
                     matchSetup.UpdateRule(kvp.Key);
-
-                    if (kvp.Key == MatchSetupRules.Rule.ConsoleCommands)
-                        matchSetup.CheckAndShowCheatsWarning();
-
                     Log($"  ✓ Set {kvp.Key} = {kvp.Value}");
                     appliedCount++;
                 }
@@ -171,23 +133,7 @@ namespace SBGL.UnifiedMod.Patches
                 }
             }
 
-            Log($"✓ Applied {appliedCount}/{rulesDict.Count} rules");
-
-            // Apply explicit Season 1 item spawn weights for all 6 pools
-            var rankedItemWeights = Season1RuleSet.GetItemSpawnWeights();
-            foreach (var kvp in rankedItemWeights)
-                matchSetup.SetSpawnChance(kvp.Key.itemPoolIndex, kvp.Key.itemType, kvp.Value);
-
-            var rankedSeenPools = new System.Collections.Generic.HashSet<int>();
-            foreach (var key in rankedItemWeights.Keys)
-            {
-                if (rankedSeenPools.Add(key.itemPoolIndex))
-                    matchSetup.ServerUpdateSpawnChanceValue(key);
-            }
-            Log($"✓ Applied Season 1 item weights for {rankedSeenPools.Count} pools ({rankedItemWeights.Count} entries)");
-
-            matchSetup.SetPreset(MatchSetupRules.Preset.Custom);
-            Log($"✓ Set Preset to Custom");
+            Log($"✓ Applied {appliedCount}/{rulesDict.Count} Season 2 rules (item weights at game defaults)");
         }
 
         public static void ApplyCourseSelection(MatchSetupMenu menu)
@@ -211,27 +157,26 @@ namespace SBGL.UnifiedMod.Patches
 
             var allHoles = GameManager.AllCourses.allHoles;
 
-            // Season 1 ranked: filter to approved courses only
-            var approvedNames = new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
-            foreach (var course in MapPoolConfig.GetApprovedCourses())
-                approvedNames.Add(course.Name);
+            // Season 2: every hole except the banned ones
+            var bannedNames = new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+            foreach (var course in MapPoolConfig.GetBannedCourses())
+                bannedNames.Add(course.Name);
 
             var eligibleHoles = new System.Collections.Generic.List<HoleData>();
             var matchedNames = new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
             foreach (var hole in allHoles)
             {
-                if (approvedNames.Contains(hole.name))
-                {
-                    eligibleHoles.Add(hole);
+                if (bannedNames.Contains(hole.name))
                     matchedNames.Add(hole.name);
-                }
+                else
+                    eligibleHoles.Add(hole);
             }
 
-            // Log any approved names that had no matching hole asset — helps fix MapPoolConfig mismatches
-            foreach (var name in approvedNames)
+            // A banned name that matches no hole asset silently bans nothing — surface it loudly.
+            foreach (var name in bannedNames)
             {
                 if (!matchedNames.Contains(name))
-                    LogError($"  [UNMATCHED] Approved name '{name}' not found in allHoles — check MapPoolConfig spelling");
+                    LogError($"  [UNMATCHED] Banned name '{name}' not found in allHoles — check MapPoolConfig spelling");
             }
 
             if (eligibleHoles.Count == 0)
@@ -240,17 +185,17 @@ namespace SBGL.UnifiedMod.Patches
                 return;
             }
 
-            // Inject eligible holes into CustomCourseData and switch to custom mode
+            // Inject all holes into CustomCourseData and switch to custom mode
             MatchSetupMenu.CustomCourseData.OverrideHoles(eligibleHoles.ToArray());
             menu.SetCourse(-1);
 
-            // Enable random order and set 18 holes
+            // Enable random order and set 9 holes
             menu.NetworkrandomEnabled = true;
             menu.courseRandomToggle.isOn = true;
-            menu.NetworkrandomCupNumHoles = 18;
-            menu.numberOfHolesSlider.value = 18;
+            menu.NetworkrandomCupNumHoles = 9;
+            menu.numberOfHolesSlider.value = 9;
 
-            Log($"  ✓ Set {eligibleHoles.Count} eligible holes, random order ON, 18 holes");
+            Log($"  ✓ Set {eligibleHoles.Count} eligible holes ({matchedNames.Count} banned excluded), random order ON, 9 holes");
         }
     }
 }

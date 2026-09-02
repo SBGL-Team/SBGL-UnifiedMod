@@ -5,7 +5,7 @@
         <AssemblyName>SBGL.UnifiedMod</AssemblyName>
         <RootNamespace>SBGL.UnifiedMod</RootNamespace>
         <Product>Super Battle Golf League Unified Mod</Product>
-        <Version>0.1.12</Version>
+        <Version>0.1.22</Version>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
         <LangVersion>latest</LangVersion>
         <RestoreAdditionalProjectSources>
@@ -107,6 +107,72 @@
             <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\UnityEngine.InputLegacyModule.dll</HintPath>
             <Private>False</Private>
         </Reference>
+        <Reference Include="Unity.Localization">
+            <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\Unity.Localization.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
+        <Reference Include="UnityEngine.UIElementsModule">
+            <HintPath>$(SUPER_BATTLE_GOLF_PATH)\Super Battle Golf_Data\Managed\UnityEngine.UIElementsModule.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
     </ItemGroup>
+
+    <Target Name="CopyToPlugins" AfterTargets="Build">
+        <PropertyGroup>
+            <!-- The game folder is what BepInEx actually loads, so a build takes effect on the next
+                 launch. Gale overwrites that folder whenever it deploys a profile, so the mod is
+                 also written into the Gale profile to survive a redeploy. -->
+            <GamePluginDir>$(SUPER_BATTLE_GOLF_PATH)\BepInEx\plugins\KingCox22-SBGL_UnifiedMod</GamePluginDir>
+            <GaleProfileDir>$(APPDATA)\com.kesomannen.gale\super-battle-golf\profiles\SBGLeague\BepInEx\plugins\KingCox22-SBGL_UnifiedMod</GaleProfileDir>
+        </PropertyGroup>
+
+        <ItemGroup>
+            <PluginPayload Include="$(OutputPath)$(AssemblyName).dll" />
+            <PluginPayload Include="$(MSBuildProjectDirectory)\manifest.json" />
+        </ItemGroup>
+
+        <Copy SourceFiles="@(PluginPayload)" DestinationFolder="$(GamePluginDir)" SkipUnchangedFiles="false"
+              Condition="'$(SUPER_BATTLE_GOLF_PATH)' != ''" />
+        <Warning Text="SUPER_BATTLE_GOLF_PATH is not set — skipped copying the plugin into the game folder."
+                 Condition="'$(SUPER_BATTLE_GOLF_PATH)' == ''" />
+
+        <Copy SourceFiles="@(PluginPayload)" DestinationFolder="$(GaleProfileDir)" SkipUnchangedFiles="false"
+              Condition="Exists('$(APPDATA)\com.kesomannen.gale\super-battle-golf\profiles\SBGLeague')" />
+    </Target>
+
+    <Target Name="CopyToThunderstore" AfterTargets="Build">
+        <PropertyGroup>
+            <!-- Staging folder holding exactly the files that go into the Thunderstore package.
+                 The zip is written alongside it rather than inside it, so it never packages itself. -->
+            <ThunderstoreRoot>C:\SBGL-Team</ThunderstoreRoot>
+            <ThunderstoreDir>$(ThunderstoreRoot)\KingCox22-SBGL_UnifiedMod</ThunderstoreDir>
+            <ThunderstoreZip>$(ThunderstoreRoot)\KingCox22-SBGL_UnifiedMod_$(Version).zip</ThunderstoreZip>
+        </PropertyGroup>
+
+        <MakeDir Directories="$(ThunderstoreDir)" />
+
+        <Copy SourceFiles="$(OutputPath)$(AssemblyName).dll" DestinationFolder="$(ThunderstoreDir)" SkipUnchangedFiles="true" />
+        <Copy SourceFiles="$(MSBuildProjectDirectory)\manifest.json" DestinationFolder="$(ThunderstoreDir)" SkipUnchangedFiles="false" />
+        <Copy SourceFiles="$(MSBuildProjectDirectory)\CHANGELOG.md" DestinationFolder="$(ThunderstoreDir)" SkipUnchangedFiles="false" />
+        <Copy SourceFiles="$(MSBuildProjectDirectory)\README.md" DestinationFolder="$(ThunderstoreDir)" SkipUnchangedFiles="false"
+              Condition="Exists('$(MSBuildProjectDirectory)\README.md')" />
+
+        <!-- Thunderstore requires icon.png to be exactly 256x256. The icon.png in the project root
+             is the high-resolution master, so the packaged copy comes from Thunderstore\icon.png. -->
+        <Copy SourceFiles="$(MSBuildProjectDirectory)\Thunderstore\icon.png" DestinationFolder="$(ThunderstoreDir)" SkipUnchangedFiles="false"
+              Condition="Exists('$(MSBuildProjectDirectory)\Thunderstore\icon.png')" />
+
+        <!-- Thunderstore rejects uploads missing either of these, so warn rather than fail the build. -->
+        <Warning Text="README.md is missing — Thunderstore will reject the package until one is added."
+                 Condition="!Exists('$(MSBuildProjectDirectory)\README.md')" />
+        <Warning Text="Thunderstore\icon.png (256x256) is missing — Thunderstore will reject the package until one is added."
+                 Condition="!Exists('$(MSBuildProjectDirectory)\Thunderstore\icon.png')" />
+
+        <!-- Built-in MSBuild zip: no Python or other external tooling required. -->
+        <Delete Files="$(ThunderstoreZip)" />
+        <ZipDirectory SourceDirectory="$(ThunderstoreDir)" DestinationFile="$(ThunderstoreZip)" />
+
+        <Message Importance="high" Text="Thunderstore package: $(ThunderstoreZip)" />
+    </Target>
 
 </Project>
