@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.1.24
+* Added Season 3. The mod now follows the season set on SBGLeague.com and applies that season's rules automatically, so the switch happens on the site rather than needing a mod update. If a season has no rules in the mod yet, the previous season's rules carry over.
+* Season 3 ranked and team matches are 12 holes, up from 9.
+* Season 3 map pool: Vertigo returns to the ranked rotation and Uptown is banned. Central Park and Showdown remain banned.
+* The Pro Series button has been removed from the Driving Range ruleset panel for Season 3.
+* Fixed matchmaking not working on Super Battle Golf 1.2.2. The game update changed a method the hit tracker hooks into, and the resulting error stopped the matchmaking background sync (queue checks, match polling, season lookup) from ever starting. Hit tracking now works with the new game version, and a hook that fails to attach can no longer stop matchmaking from starting.
+* The queue panel now shows the season's name, e.g. "Season 3", instead of "Active Season".
+* The staff list is now always read from its latest version, so staff changes take effect without a mod update.
+* Players in your lobby who fail the compliance check are now named on screen below the "ILLEGAL MODS DETECTED" banner, e.g. "PlayerName is non compliant!". Every player sees this, not only staff.
+* Players who never send a mod report are now marked as failed ("no report received - mod not installed?") instead of staying pending for the whole lobby.
+* If the approved mod list fails to download, other players now show as unverified. Previously every player in the lobby was flagged for illegal mods.
+* Your own row in the compliance panel now reflects your current scan. It could previously show green while the "ILLEGAL MODS DETECTED" banner was up.
+* Players who leave the lobby are removed from the non-compliance banner.
+* Players who appeared as a 17-digit Steam ID in the compliance panel now show their Steam name once Steam provides it.
+* Compliance warnings now sit above the stats card instead of overlapping it when the card has been moved.
+* Repeated compliance errors and timeout warnings are now logged once per change instead of every few seconds.
+* Only 0.1.24 is on the approved mod list, so players still on an older version will show as non-compliant until they update.
+
+## 0.1.23
+* Basic Fixes
+
 ## 0.1.22
 * Mod compliance is now verified independently by each player rather than taken on trust. Every client reports the identity and file fingerprint of the mods it has loaded, and the receiving player checks those against the approved mod list themselves. Previously a player's compliance status was accepted as reported, so a mod could present itself as something it was not.
 * The compliance panel now shows a verified result per mod instead of matching on the reported name. Players running an older version of this mod appear as "unverified" rather than passing silently, since their reports cannot be checked.

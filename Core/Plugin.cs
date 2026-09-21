@@ -44,7 +44,8 @@ namespace SBGL.UnifiedMod.Core
         // STAFF LIST
         // ==========================================
         // The raw link to your Gist (important: use the /raw/ path)
-        private const string GIST_URL = "https://gist.githubusercontent.com/Kingcox22/f1b51955d78305177533759cc4ae6024/raw/86f00f088db32e68e9cd5429b3695db22b435ba0/staff.txt";
+        // Unpinned so the latest gist revision is always used — staff edits take effect without a mod release.
+        private const string GIST_URL = "https://gist.githubusercontent.com/Kingcox22/f1b51955d78305177533759cc4ae6024/raw/staff.txt";
 
         // Change from static readonly to just private
         private HashSet<string> _dynamicStaffList = new HashSet<string>();

@@ -4,7 +4,9 @@ using System.Linq;
 namespace SBGL.UnifiedMod.Core
 {
     /// <summary>
-    /// Map pool configuration. Season 2: Central Park, Showdown, and Vertigo are banned for the rest of the season.
+    /// Map pool configuration, per season. The pool in play follows <see cref="SeasonRuleSets.Current"/>.
+    /// Season 2: Central Park, Showdown, and Vertigo are banned for the rest of the season.
+    /// Season 3: Vertigo returns; Central Park, Showdown, and Uptown are banned.
     /// Course names use readable identifiers matching the in-game names.
     /// </summary>
     public static class MapPoolConfig
@@ -23,8 +25,8 @@ namespace SBGL.UnifiedMod.Core
             }
         }
 
-        // Season 2 approved pool (Central Park, Showdown, Vertigo banned — see BannedCourses)
-        private static readonly Course[] ApprovedCourses = new[]
+        // Season 2 approved pool (Central Park, Showdown, Vertigo banned — see Season2BannedCourses)
+        internal static readonly Course[] Season2ApprovedCourses = new[]
         {
             // Snow
             new Course("Snow 1", "Snow", true),
@@ -79,24 +81,44 @@ namespace SBGL.UnifiedMod.Core
         };
 
         // Season 2: banned for the rest of the season
-        private static readonly Course[] BannedCourses = new[]
+        internal static readonly Course[] Season2BannedCourses = new[]
         {
             new Course("Central Park", "City", false),
             new Course("Showdown", "Desert", false),
             new Course("Vertigo", "Desert", false),
         };
 
+        // Season 3: Vertigo returns; the rest of the Season 2 pool carries over
+        internal static readonly Course[] Season3ApprovedCourses =
+            Season2ApprovedCourses.Concat(new[] { new Course("Vertigo", "Desert", true) }).ToArray();
+
+        // Season 3: Uptown joins the banned list
+        internal static readonly Course[] Season3BannedCourses = new[]
+        {
+            new Course("Central Park", "City", false),
+            new Course("Showdown", "Desert", false),
+            new Course("Uptown", "City", false),
+        };
+
+        // Every course from every season, first occurrence per name. Used for name/biome lookups only.
         private static readonly List<Course> AllCourses;
 
         static MapPoolConfig()
         {
-            AllCourses = new List<Course>();
-            AllCourses.AddRange(ApprovedCourses);
-            AllCourses.AddRange(BannedCourses);
+            AllCourses = Season2ApprovedCourses
+                .Concat(Season2BannedCourses)
+                .Concat(Season3ApprovedCourses)
+                .Concat(Season3BannedCourses)
+                .GroupBy(c => c.Name, System.StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.First())
+                .ToList();
         }
 
+        private static Course[] ApprovedCourses => SeasonRuleSets.Current.ApprovedCourses;
+        private static Course[] BannedCourses   => SeasonRuleSets.Current.BannedCourses;
+
         /// <summary>
-        /// Get all approved courses for Season 1.
+        /// Get all approved courses for the current season.
         /// </summary>
         public static List<Course> GetApprovedCourses()
         {
@@ -104,7 +126,7 @@ namespace SBGL.UnifiedMod.Core
         }
 
         /// <summary>
-        /// Get all banned courses for Season 1.
+        /// Get all banned courses for the current season.
         /// </summary>
         public static List<Course> GetBannedCourses()
         {
@@ -134,11 +156,12 @@ namespace SBGL.UnifiedMod.Core
         }
 
         /// <summary>
-        /// Get a random approved course for Season 1.
+        /// Get a random approved course for the current season.
         /// </summary>
         public static Course GetRandomApprovedCourse()
         {
-            return ApprovedCourses[UnityEngine.Random.Range(0, ApprovedCourses.Length)];
+            var approved = ApprovedCourses;
+            return approved[UnityEngine.Random.Range(0, approved.Length)];
         }
 
         /// <summary>

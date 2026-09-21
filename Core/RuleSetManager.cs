@@ -34,18 +34,15 @@ namespace SBGL.UnifiedMod.Core
         }
 
         /// <summary>
-        /// Get the ranked ruleset for a given season.
+        /// Get the ranked ruleset for a given season. Seasons without their own rules
+        /// use the most recent season before them (see SeasonRuleSets).
         /// </summary>
         public static Dictionary<MatchSetupRules.Rule, float> GetRuleSetForSeason(int season)
         {
-            if (season == Season2RuleSet.SEASON)
-                return Season2RuleSet.GetRankedRulesSettings();
-
             if (season == Season1RuleSet.SEASON)
                 return Season1RuleSet.GetRulesSettings();
 
-            LogWarning($"Season {season} not recognised, defaulting to Season 2");
-            return Season2RuleSet.GetRankedRulesSettings();
+            return SeasonRuleSets.For(season).GetRankedRules();
         }
 
         /// <summary>
@@ -88,7 +85,7 @@ namespace SBGL.UnifiedMod.Core
             }
 
             // Validate season
-            if (season != Season2RuleSet.SEASON && season != Season1RuleSet.SEASON)
+            if (season <= 0)
             {
                 LogWarning($"Season {season} not recognised");
             }

@@ -69,7 +69,8 @@ namespace SBGL.UnifiedMod.Patches
                     return;
                 }
 
-                Log($"=== APPLYING SEASON 2 RULES (OnStartClient) ===");
+                Log($"=== APPLYING SEASON {SeasonRuleSets.Current.Season} RULES (OnStartClient) ===");
+                Log($"  Website Season: {(SeasonRuleSets.WebsiteSeason > 0 ? SeasonRuleSets.WebsiteSeason.ToString() : "unknown")}");
                 Log($"  Match Type: {matchType}");
                 Log($"  Host Ruleset: {PlayerPrefs.GetString("HostRuleset", "ranked")}");
 
@@ -99,15 +100,16 @@ namespace SBGL.UnifiedMod.Patches
             matchSetup.SetPreset(MatchSetupRules.Preset.Classic);
             Log("✓ Reset to Classic preset");
 
-            // Season 2: all formats use the same base settings (game defaults) with
+            // All formats use the same base settings (game defaults) with
             // only Wind, Comeback, and WhiteFlag overridden.
+            var season = SeasonRuleSets.Current;
             Dictionary<MatchSetupRules.Rule, float> rulesDict;
             if (isCasual)
-                rulesDict = Season2RuleSet.GetCasualRulesSettings();
+                rulesDict = season.GetCasualRules();
             else if (isProSeries)
-                rulesDict = Season2RuleSet.GetProSeriesRulesSettings();
+                rulesDict = season.GetProSeriesRules();
             else
-                rulesDict = Season2RuleSet.GetRankedRulesSettings();
+                rulesDict = season.GetRankedRules();
 
             int appliedCount = 0;
             foreach (var kvp in rulesDict)
@@ -133,7 +135,7 @@ namespace SBGL.UnifiedMod.Patches
                 }
             }
 
-            Log($"✓ Applied {appliedCount}/{rulesDict.Count} Season 2 rules (item weights at game defaults)");
+            Log($"✓ Applied {appliedCount}/{rulesDict.Count} Season {season.Season} rules (item weights at game defaults)");
         }
 
         public static void ApplyCourseSelection(MatchSetupMenu menu)
@@ -156,10 +158,11 @@ namespace SBGL.UnifiedMod.Patches
             }
 
             var allHoles = GameManager.AllCourses.allHoles;
+            var season = SeasonRuleSets.Current;
 
-            // Season 2: every hole except the banned ones
+            // Every hole except the ones banned this season
             var bannedNames = new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
-            foreach (var course in MapPoolConfig.GetBannedCourses())
+            foreach (var course in season.BannedCourses)
                 bannedNames.Add(course.Name);
 
             var eligibleHoles = new System.Collections.Generic.List<HoleData>();
@@ -189,13 +192,14 @@ namespace SBGL.UnifiedMod.Patches
             MatchSetupMenu.CustomCourseData.OverrideHoles(eligibleHoles.ToArray());
             menu.SetCourse(-1);
 
-            // Enable random order and set 9 holes
+            // Enable random order and set the season's hole count (team matches come through here too)
+            int numHoles = season.RankedNumHoles;
             menu.NetworkrandomEnabled = true;
             menu.courseRandomToggle.isOn = true;
-            menu.NetworkrandomCupNumHoles = 9;
-            menu.numberOfHolesSlider.value = 9;
+            menu.NetworkrandomCupNumHoles = numHoles;
+            menu.numberOfHolesSlider.value = numHoles;
 
-            Log($"  ✓ Set {eligibleHoles.Count} eligible holes ({matchedNames.Count} banned excluded), random order ON, 9 holes");
+            Log($"  ✓ Season {season.Season}: set {eligibleHoles.Count} eligible holes ({matchedNames.Count} banned excluded), random order ON, {numHoles} holes");
         }
     }
 }

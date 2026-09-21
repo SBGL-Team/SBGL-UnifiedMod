@@ -376,24 +376,22 @@ namespace SBGL.UnifiedMod.Features.HitTracker
     [HarmonyPatch]
     public static class HitWithGolfSwingPatch
     {
-        [HarmonyTargetMethod]
-        public static System.Reflection.MethodBase TargetMethod()
+        // Looked up by name only: the method has a single overload, and game updates change its
+        // parameter list (1.2.2 replaced bool isRocketDriver with SwingType swingType).
+        private static System.Reflection.MethodBase FindTarget() =>
+            AccessTools.Method(AccessTools.TypeByName("Hittable"), "HitWithGolfSwingInternal");
+
+        // Skip the patch rather than throw if a game update removes the method. A throw here
+        // aborts the whole PatchAll call, which also stops the matchmaking component starting up.
+        public static bool Prepare()
         {
-            var t = AccessTools.TypeByName("Hittable");
-            return AccessTools.Method(t, "HitWithGolfSwingInternal",
-                new Type[]
-                {
-                    typeof(UnityEngine.Vector3),  // localHitPosition
-                    typeof(UnityEngine.Vector3),  // localOrigin
-                    typeof(UnityEngine.Vector3),  // worldDirection
-                    typeof(bool),                 // isPutt
-                    typeof(float),                // power
-                    typeof(float),                // sideSpin
-                    typeof(bool),                 // isRocketDriver
-                    AccessTools.TypeByName("PlayerGolfer"),
-                    AccessTools.TypeByName("Hittable")
-                });
+            if (FindTarget() != null) return true;
+            UnityEngine.Debug.LogWarning("[HitTracker] Hittable.HitWithGolfSwingInternal not found — hit tracking disabled for this game version");
+            return false;
         }
+
+        [HarmonyTargetMethod]
+        public static System.Reflection.MethodBase TargetMethod() => FindTarget();
 
         [HarmonyPostfix]
         public static void Postfix(object __instance, object hitter)

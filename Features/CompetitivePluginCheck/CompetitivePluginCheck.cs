@@ -76,6 +76,20 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
 
             /// <summary>The peer's own local scan verdict, as self-reported.</summary>
             public bool SelfReportedIllegal { get; set; }
+
+            /// <summary>
+            /// Set once this player has gone past the reporting window without sending
+            /// anything. Distinct from HasReportedMods:false, which also covers players
+            /// still inside the grace period - without this the UI cannot tell "still
+            /// waiting" from "never answered" and shows both as pending.
+            /// </summary>
+            public bool TimedOut { get; set; }
+
+            /// <summary>
+            /// Last verdict we logged for this player. Peers re-send their report every few
+            /// seconds, so logging on every receive buried the log in identical errors.
+            /// </summary>
+            public string LastLoggedVerdict { get; set; }
         }
 
         private class LocalPluginScanResult
@@ -246,10 +260,11 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
 #pragma warning disable CS0649, CS0169
         private GameObject _canvasObj, _profilePicContainer, _bgObj, _warnContainer, _debugWindowObj, _flagContainer;
         private TextMeshProUGUI _statsText, _illegalWarningText, _missingWarningText, _debugWindowText;
+        private TextMeshProUGUI _nonCompliantPlayersText;
         private TextMeshProUGUI _cardNameText, _cardMMRText, _cardRankText, _cardSecondaryText, _cardSyncText;
         private Image _bgImage, _debugWindowBg, _rankColorStripImage;
         private RawImage _profileIcon, _flagIcon;
-        private RectTransform _bgRect, _debugWindowRect;
+        private RectTransform _bgRect, _debugWindowRect, _warnRect;
 #pragma warning restore CS0649, CS0169
 
         private static readonly HashSet<string> IgnoredPluginGuids = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -411,6 +426,17 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             return GetCachedSha256(TryGetPluginAssemblyPath(plugin));
         }
 
+        /// <summary>SHA-256 of this mod's own assembly, as reported to peers.</summary>
+        private string GetOwnUnifiedModSha256()
+        {
+            foreach (var plugin in Chainloader.PluginInfos.Values)
+            {
+                if (string.Equals(plugin.Metadata.GUID, "com.sbgl.unified", StringComparison.OrdinalIgnoreCase))
+                    return GetPluginSha256(plugin);
+            }
+            return string.Empty;
+        }
+
         private KnownVisibleRuntimeAssemblies BuildKnownVisibleRuntimeAssemblies()
         {
             var knownAssemblies = new KnownVisibleRuntimeAssemblies();
@@ -455,11 +481,12 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         /// <summary>Outcome of checking one plugin (GUID + assembly hash) against the manifest.</summary>
         internal enum PluginVerdict
         {
-            Approved,      // GUID allow-listed and, where pinned, the hash matches
-            UnknownGuid,   // not in the manifest at all
-            HashMismatch,  // allow-listed GUID, but the assembly is not a pinned build
-            Unpinned,      // allow-listed GUID with no hash constraint - passes, but unverified
-            Unverifiable   // pinned GUID whose assembly hash could not be read/was not supplied
+            Approved,            // GUID allow-listed and, where pinned, the hash matches
+            UnknownGuid,         // not in the manifest at all
+            HashMismatch,        // allow-listed GUID, but the assembly is not a pinned build
+            Unpinned,            // allow-listed GUID with no hash constraint - passes, but unverified
+            Unverifiable,        // pinned GUID whose assembly hash could not be read/was not supplied
+            ManifestUnavailable  // we have no manifest, so no judgement is possible either way
         }
 
         /// <summary>
@@ -474,6 +501,13 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             // The loader itself is not a manifest entry.
             if (!string.IsNullOrWhiteSpace(guid) && guid.Equals("BepInEx", StringComparison.OrdinalIgnoreCase))
                 return PluginVerdict.Approved;
+
+            // No manifest means no basis for a verdict. Without this guard the empty
+            // snapshot makes every plugin look unknown, so a client whose manifest fetch
+            // failed - at startup, or on a network blip - would accuse every peer in the
+            // lobby of running illegal mods. Report "cannot judge" instead of "guilty".
+            if (_allowedModsSnapshot.Count == 0)
+                return PluginVerdict.ManifestUnavailable;
 
             if (!_allowedModsSnapshot.ContainsGuid(guid))
                 return PluginVerdict.UnknownGuid;
@@ -550,6 +584,29 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             return result;
         }
 
+        /// <summary>
+        /// Re-applies our own scan to our own row in the compliance panel.
+        /// The self entry used to be built once at first discovery and never updated, so
+        /// our row kept showing a stale verdict - reading all-green while the local
+        /// "ILLEGAL MODS DETECTED" banner said otherwise. We hold ourselves to exactly the
+        /// check we apply to peers.
+        /// </summary>
+        private void RefreshSelfComplianceEntry(LocalPluginScanResult scan)
+        {
+            if (!SteamClient.IsValid) return;
+            if (!_playerComplianceStatus.TryGetValue(SteamClient.SteamId, out var self) || self == null) return;
+
+            self.SelfReportedIllegal = scan.HasIllegalMods;
+
+            self.FailedPlugins.Clear();
+            foreach (var tampered in scan.TamperedModNames)
+                self.FailedPlugins.Add($"{tampered} (HashMismatch)");
+
+            // Same rule the receiver applies to a peer's MOD record.
+            self.IsCompliant = !IsFailingVerdict(EvaluatePlugin("com.sbgl.unified", GetOwnUnifiedModSha256()));
+            self.HasMelonLoader = HasMelonLoaderLoaded();
+        }
+
         private string _lastLoggedScanSignature = null;
 
         /// <summary>
@@ -565,7 +622,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
 
             if (_allowedModsSnapshot.Count == 0)
             {
-                UnityEngine.Debug.LogWarning("[SBGL-CompPluginCheck] Local scan: approved-mods manifest is EMPTY (fetch failed?) - every installed plugin will read as illegal.");
+                UnityEngine.Debug.LogWarning("[SBGL-CompPluginCheck] Local scan: no approved-mods manifest loaded yet - compliance checking is inactive (normal at startup; persistent means the fetch is failing).");
                 return;
             }
 
@@ -748,6 +805,9 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 _remotePlayerMods.Remove(id);
                 UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Player left lobby: {friend.Name} ({id}) — removed from tracking");
             }
+
+            // Refresh so a departed player stops being named on the non-compliance banner.
+            UpdateUIReport();
         }
 
         void Awake()
@@ -847,6 +907,16 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                     _bgImage.color = new Color(0.04f, 0.06f, 0.08f, targetAlpha);
                 if (clampedX != ConfigX && _configX != null) _configX.Value = clampedX;
                 if (clampedY != ConfigY && _configY != null) _configY.Value = clampedY;
+
+                // Keep the warning stack clear of the stats card. The card is user-movable,
+                // so anchoring the warnings at a fixed height made them land on top of it -
+                // park them just above whatever height the card currently occupies.
+                if (_warnRect != null)
+                {
+                    float cardTop = clampedY + _bgRect.sizeDelta.y + 12f;
+                    if (!Mathf.Approximately(_warnRect.anchoredPosition.y, cardTop))
+                        _warnRect.anchoredPosition = new Vector2(0f, cardTop);
+                }
             }
 
             bool wantHide = !ConfigHideUIWindow;
@@ -975,9 +1045,9 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
 
             int total     = _playerComplianceStatus.Count;
             int compliant = _playerComplianceStatus.Values.Count(s => s.HasReportedMods && s.IsCompliant && !s.HasMelonLoader && s.FailedPlugins.Count == 0 && !s.IsLegacyReport);
-            int flagged   = _playerComplianceStatus.Values.Count(s => s.HasReportedMods && (!s.IsCompliant || s.HasMelonLoader || s.FailedPlugins.Count > 0));
+            int flagged   = _playerComplianceStatus.Values.Count(IsNonCompliant);
             int unverified= _playerComplianceStatus.Values.Count(s => s.HasReportedMods && s.IsLegacyReport && s.IsCompliant && !s.HasMelonLoader);
-            int pending   = _playerComplianceStatus.Values.Count(s => !s.HasReportedMods);
+            int pending   = _playerComplianceStatus.Values.Count(s => !s.HasReportedMods && !s.TimedOut);
             GUILayout.Label(
                 $"<color=white>Players: <b>{total}</b></color>    <color=lime>✓ {compliant}</color>    <color=red>✗ {flagged}</color>    <color=#AAAAFF>◐ {unverified}</color>    <color=yellow>? {pending}</color>",
                 summaryStyle
@@ -999,7 +1069,10 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                     var status = kvp.Value;
                     string icon, color;
 
-                    if (!status.HasReportedMods)             { icon = "?"; color = "yellow"; }
+                    // TimedOut is checked before HasReportedMods: a player who never
+                    // answered is a finished verdict, not a pending one.
+                    if (status.TimedOut)                     { icon = "✗"; color = "red"; }
+                    else if (!status.HasReportedMods)        { icon = "?"; color = "yellow"; }
                     else if (status.HasMelonLoader)          { icon = "⚠"; color = "orange"; }
                     else if (!status.IsCompliant)            { icon = "✗"; color = "red"; }
                     else if (status.FailedPlugins.Count > 0) { icon = "✗"; color = "red"; }
@@ -1008,6 +1081,9 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
 
                     string displayName = _playerDisplayNames.TryGetValue(status.SteamId, out string dn) ? dn : status.SteamId.ToString();
                     GUILayout.Label($"<color={color}>[{icon}]</color>  {displayName}", nameStyle);
+
+                    if (status.TimedOut)
+                        GUILayout.Label("      <color=#FF4444>✗ no report received - mod not installed?</color>", modStyle);
 
                     if (status.HasMelonLoader)
                         GUILayout.Label("      <color=orange>⚠ MelonLoader detected</color>", modStyle);
@@ -1308,7 +1384,9 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 {
                     UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] ⚠️ Not in a tracked lobby yet - OnLobbyEntered has not fired");
                 }
-                
+
+                RefreshUnresolvedDisplayNames();
+
                 _hasLoggedDiscoveryInfo = true;
                 
                 // Mark players as having timed out if they haven't reported mods
@@ -1336,9 +1414,13 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 foreach (var steamId in playersToMarkNonCompliant)
                 {
                     var status = _playerComplianceStatus[steamId];
-                    if (!status.HasReportedMods)
+                    // TimedOut also gates this block: it used to re-run every tick for the
+                    // life of the lobby, logging the same warning thousands of times and
+                    // burying every other event in the log.
+                    if (!status.HasReportedMods && !status.TimedOut)
                     {
                         UnityEngine.Debug.LogWarning($"[SBGL-CompPluginCheck] Player {steamId} timed out without reporting mods - marking as non-compliant");
+                        status.TimedOut = true;
                         status.IsCompliant = false; // They don't have the mod
                         status.ModList = "(No report received)";
                         SendComplianceNotification(steamId, status);
@@ -1352,6 +1434,42 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             }
         }
         
+        /// <summary>
+        /// Steam delivers persona names asynchronously, and the lobby-member refresh only
+        /// covers players still listed in the current lobby. A peer discovered over P2P
+        /// before its name was cached previously stayed a raw SteamID for the rest of the
+        /// session - which is what put a 17-digit number on the compliance banner.
+        /// Retried every discovery tick until a name comes back.
+        /// </summary>
+        private void RefreshUnresolvedDisplayNames()
+        {
+            if (!SteamClient.IsValid) return;
+
+            foreach (var steamId in _playerComplianceStatus.Keys.ToList())
+            {
+                if (_playerDisplayNames.TryGetValue(steamId, out string existing)
+                    && !string.IsNullOrWhiteSpace(existing)
+                    && existing != steamId.ToString())
+                {
+                    continue; // already have a real name
+                }
+
+                string resolved = null;
+                try { resolved = new Steamworks.Friend(steamId).Name; } catch { }
+
+                if (!string.IsNullOrWhiteSpace(resolved))
+                {
+                    _playerDisplayNames[steamId] = resolved;
+                    UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Resolved display name for {steamId}: {resolved}");
+                    continue;
+                }
+
+                // Nothing cached locally yet - ask Steam to fetch it so a later tick can
+                // pick it up, rather than giving up on this player permanently.
+                try { Steamworks.SteamFriends.RequestUserInformation(steamId, true); } catch { }
+            }
+        }
+
         private void AddPlayerToTracking(ulong steamId, float now)
         {
             // Add player to tracking if not already there
@@ -1569,16 +1687,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             // hash against the manifest's pinned entry for com.sbgl.unified, so compliance is
             // no longer "the payload contained a magic string".
             string ownVersion = UnifiedPlugin.Instance?.Info.Metadata.Version?.ToString() ?? "0.0.0";
-            string ownHash = string.Empty;
-            foreach (var plugin in Chainloader.PluginInfos.Values)
-            {
-                if (string.Equals(plugin.Metadata.GUID, "com.sbgl.unified", StringComparison.OrdinalIgnoreCase))
-                {
-                    ownHash = GetPluginSha256(plugin);
-                    break;
-                }
-            }
-            sb.Append($"MOD|{SanitizeReportField(ownVersion)}|{ownHash};");
+            sb.Append($"MOD|{SanitizeReportField(ownVersion)}|{GetOwnUnifiedModSha256()};");
 
             sb.Append($"ML|{(hasMelonLoader ? 1 : 0)};");
 
@@ -1608,9 +1717,11 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             status.HasReportedMods = true;
             status.HasVerifiedReport = true;
             status.IsLegacyReport = false;
+            status.TimedOut = false; // a late report clears the timeout verdict
             status.FailedPlugins.Clear();
 
             bool unifiedModVerified = false;
+            bool manifestMissing = false;
             var displayList = new StringBuilder();
 
             foreach (var record in payload.Split(';'))
@@ -1622,10 +1733,15 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 {
                     case "MOD":
                         // Compliance = the peer is running an assembly that matches the
-                        // manifest's pinned hash for this mod.
+                        // manifest's pinned hash for this mod. If we hold no manifest we
+                        // cannot judge, so treat the report as unverifiable rather than
+                        // declaring the peer non-compliant.
                         if (f.Length >= 3)
                         {
-                            unifiedModVerified = EvaluatePlugin("com.sbgl.unified", f[2]) == PluginVerdict.Approved;
+                            var modVerdict = EvaluatePlugin("com.sbgl.unified", f[2]);
+                            if (modVerdict == PluginVerdict.ManifestUnavailable)
+                                manifestMissing = true;
+                            unifiedModVerified = modVerdict == PluginVerdict.Approved;
                             displayList.Append($"⚡SBGL.UnifiedMod|{f[1]};");
                         }
                         break;
@@ -1654,15 +1770,39 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 }
             }
 
-            status.IsCompliant = unifiedModVerified;
             status.ModList = displayList.ToString();
             _remotePlayerMods[status.SteamId] = status.ModList;
 
-            if (!unifiedModVerified)
-                UnityEngine.Debug.LogError($"[SBGL-CompPluginCheck] ⚠️ Player {status.SteamId} is not running a manifest-matching SBGL.UnifiedMod.");
+            if (manifestMissing)
+            {
+                // We received a well-formed report but have nothing to check it against.
+                // Present it as unverified rather than passing or failing the peer.
+                status.HasVerifiedReport = false;
+                status.IsLegacyReport = true;
+                status.IsCompliant = true;
+                status.FailedPlugins.Clear();
+                UnityEngine.Debug.LogWarning($"[SBGL-CompPluginCheck] Cannot verify player {status.SteamId}: no approved-mods manifest loaded locally.");
+                return;
+            }
 
-            if (status.FailedPlugins.Count > 0)
-                UnityEngine.Debug.LogError($"[SBGL-CompPluginCheck] ⚠️ Player {status.SteamId} reported plugins failing verification: {string.Join(", ", status.FailedPlugins.ToArray())}");
+            status.IsCompliant = unifiedModVerified;
+
+            // Log only when this player's verdict actually changes - the same report arrives
+            // every few seconds and previously re-logged both errors each time.
+            string verdictSignature = $"{unifiedModVerified}|{status.HasMelonLoader}|{string.Join(",", status.FailedPlugins.ToArray())}";
+            if (verdictSignature != status.LastLoggedVerdict)
+            {
+                status.LastLoggedVerdict = verdictSignature;
+
+                if (!unifiedModVerified)
+                    UnityEngine.Debug.LogError($"[SBGL-CompPluginCheck] ⚠️ Player {status.SteamId} is not running a manifest-matching SBGL.UnifiedMod.");
+
+                if (status.FailedPlugins.Count > 0)
+                    UnityEngine.Debug.LogError($"[SBGL-CompPluginCheck] ⚠️ Player {status.SteamId} reported plugins failing verification: {string.Join(", ", status.FailedPlugins.ToArray())}");
+
+                if (unifiedModVerified && status.FailedPlugins.Count == 0)
+                    UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] ✓ Player {status.SteamId} verified clean.");
+            }
         }
 
         private void ListenForModReports()
@@ -1757,6 +1897,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                         // non-compliant.
                         status.IsLegacyReport = true;
                         status.HasVerifiedReport = false;
+                        status.TimedOut = false; // a late report clears the timeout verdict
                         status.FailedPlugins.Clear();
                         status.IsCompliant = modList.Contains("⚡SBGL.UnifiedMod");
                         
@@ -2692,6 +2833,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         private void UpdateUIReport()
         {
             var localPluginScan = BuildLocalPluginScanResult();
+            RefreshSelfComplianceEntry(localPluginScan);
 
             float.TryParse(_playerMMR, out float mmrValue);
             float.TryParse(_lastChange, out float delta);
@@ -2738,6 +2880,47 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 _missingWarningText.gameObject.SetActive(localPluginScan.MissingModNames.Count > 0 && isRange);
                 if (_missingWarningText.gameObject.activeSelf) _missingWarningText.text = "<color=yellow>MISSING MODS:</color>\n<size=18>" + string.Join(", ", localPluginScan.MissingModNames) + "</size>";
             }
+
+            UpdateNonCompliantPlayersBanner();
+        }
+
+        /// <summary>
+        /// A player has failed the check outright. Shared by the compliance panel and the
+        /// on-screen banner so the two can never disagree about who is flagged.
+        /// Players still inside the reporting window are not yet a verdict.
+        /// </summary>
+        private static bool IsNonCompliant(PlayerComplianceStatus s)
+        {
+            if (s == null) return false;
+            if (s.TimedOut) return true;
+            if (!s.HasReportedMods) return false;
+            return !s.IsCompliant || s.HasMelonLoader || s.FailedPlugins.Count > 0;
+        }
+
+        private void UpdateNonCompliantPlayersBanner()
+        {
+            if (_nonCompliantPlayersText == null) return;
+
+            var names = new List<string>();
+            foreach (var kvp in _playerComplianceStatus)
+            {
+                if (!IsNonCompliant(kvp.Value)) continue;
+                names.Add(_playerDisplayNames.TryGetValue(kvp.Key, out string dn) && !string.IsNullOrWhiteSpace(dn)
+                    ? dn
+                    : kvp.Key.ToString());
+            }
+
+            if (names.Count == 0)
+            {
+                _nonCompliantPlayersText.gameObject.SetActive(false);
+                return;
+            }
+
+            names.Sort(StringComparer.OrdinalIgnoreCase);
+            _nonCompliantPlayersText.text = names.Count == 1
+                ? $"{names[0]} is non compliant!"
+                : $"{string.Join(", ", names.ToArray())} are non compliant!";
+            _nonCompliantPlayersText.gameObject.SetActive(true);
         }
         
         private void UpdateDebugWindow(LocalPluginScanResult localPluginScan)
@@ -2858,14 +3041,23 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
 
             // Warning overlay — screen bottom-center (unchanged)
             _warnContainer = new GameObject("WarnContainer"); _warnContainer.transform.SetParent(_canvasObj.transform, false);
-            RectTransform warnRect = _warnContainer.AddComponent<RectTransform>();
-            warnRect.anchorMin = warnRect.anchorMax = new Vector2(0.5f, 0); warnRect.pivot = new Vector2(0.5f, 0);
-            warnRect.anchoredPosition = new Vector2(0, 15); warnRect.sizeDelta = new Vector2(1000, 200);
+            _warnRect = _warnContainer.AddComponent<RectTransform>();
+            _warnRect.anchorMin = _warnRect.anchorMax = new Vector2(0.5f, 0); _warnRect.pivot = new Vector2(0.5f, 0);
+            _warnRect.anchoredPosition = new Vector2(0, 15); _warnRect.sizeDelta = new Vector2(1000, 200);
             VerticalLayoutGroup warnVlg = _warnContainer.AddComponent<VerticalLayoutGroup>(); warnVlg.childAlignment = TextAnchor.LowerCenter;
+            warnVlg.spacing = 4;
 
             _illegalWarningText = new GameObject("RT").AddComponent<TextMeshProUGUI>(); _illegalWarningText.transform.SetParent(_warnContainer.transform, false);
             _illegalWarningText.text = "ILLEGAL MODS DETECTED"; _illegalWarningText.color = Color.red; _illegalWarningText.fontSize = 32;
             _illegalWarningText.alignment = TextAlignmentOptions.Center; _illegalWarningText.fontStyle = FontStyles.Bold; _illegalWarningText.gameObject.SetActive(false);
+
+            // Names the non-compliant players in the lobby. Every client evaluates the
+            // lobby independently, so this appears for everyone rather than only staff.
+            // Created before the missing-mods line so it sits directly under the banner.
+            _nonCompliantPlayersText = new GameObject("NC").AddComponent<TextMeshProUGUI>(); _nonCompliantPlayersText.transform.SetParent(_warnContainer.transform, false);
+            _nonCompliantPlayersText.color = Color.red; _nonCompliantPlayersText.fontSize = 24;
+            _nonCompliantPlayersText.alignment = TextAlignmentOptions.Center; _nonCompliantPlayersText.fontStyle = FontStyles.Bold;
+            _nonCompliantPlayersText.gameObject.SetActive(false);
 
             _missingWarningText = new GameObject("YT").AddComponent<TextMeshProUGUI>(); _missingWarningText.transform.SetParent(_warnContainer.transform, false);
             _missingWarningText.color = Color.yellow; _missingWarningText.fontSize = 18;

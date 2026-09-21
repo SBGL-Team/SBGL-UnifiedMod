@@ -348,7 +348,13 @@ namespace SBGLeagueAutomation
             CourseManager.MatchStateChanged += OnCourseManagerMatchStateChanged;
             CourseManager.ForceDisplayScoreboardChanged += OnCourseManagerForceDisplayScoreboardChanged;
 
-            new Harmony("com.sbgl.matchmaking").PatchAll();
+            // A patch that fails to apply must not abort Awake — the background sync loop
+            // (queue, match polling, season lookup) is started further down.
+            try {
+                new Harmony("com.sbgl.matchmaking").PatchAll();
+            } catch (Exception ex) {
+                Debug.LogError($"[MatchmakingAssistant] Harmony PatchAll failed — continuing startup: {ex}");
+            }
             Log("Plugin Loaded v6.2.1. Self-Sync Reconciliation Active.");
             
             // Initialize Match Result Submission Service
@@ -2081,7 +2087,7 @@ namespace SBGLeagueAutomation
                     : isCasual
                         ? Season2RuleSet.MATCH_TYPE_CASUAL
                         : isProSeries ? Season2RuleSet.MATCH_TYPE_PRO_SERIES : Season2RuleSet.MATCH_TYPE_RANKED;
-                int seasonToStore = isCasual ? 0 : session.season > 0 ? session.season : Season2RuleSet.SEASON;
+                int seasonToStore = isCasual ? 0 : session.season > 0 ? session.season : SeasonRuleSets.CurrentSeasonNumber;
                 string hostRulesetToStore = isCasual ? "casual" : isProSeries ? "pro_series" : "ranked";
 
                 if (isCasual)
@@ -3565,11 +3571,21 @@ namespace SBGLeagueAutomation
                             ? arr.OfType<JObject>().FirstOrDefault()
                             : token as JObject;
                         string id   = season?["id"]?.ToString();
-                        string name = season?["name"]?.ToString();
+                        string name = season?["season_name"]?.ToString();
+                        if (string.IsNullOrEmpty(name)) name = season?["name"]?.ToString();
                         if (!string.IsNullOrEmpty(id)) {
                             _activeSeasonId   = id;
                             _activeSeasonName = !string.IsNullOrEmpty(name) ? name : "Active Season";
                             Log($"<color=cyan>[Season] Active season: {_activeSeasonName} ({id})</color>");
+
+                            // The season number decides which ruleset the mod applies (see SeasonRuleSets)
+                            int seasonNumber = SeasonRuleSets.ParseSeasonNumber(season?["season_number"]?.ToString(), name);
+                            if (seasonNumber > 0) {
+                                SeasonRuleSets.SetWebsiteSeason(seasonNumber);
+                                Log($"<color=cyan>[Season] Website season {seasonNumber} — applying Season {SeasonRuleSets.Current.Season} rules</color>");
+                            } else {
+                                Log($"<color=orange>[Season] Season record has no season number — applying Season {SeasonRuleSets.Current.Season} rules</color>");
+                            }
                         }
                     } catch (System.Exception ex) {
                         Log($"<color=orange>[Season] Error parsing season response: {ex.Message}</color>");
