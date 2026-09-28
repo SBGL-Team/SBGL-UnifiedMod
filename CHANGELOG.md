@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.1.26
+* Fixed the compliance panel listing every player under "Cannot be checked" when your game couldn't read players' platforms, which can happen when crossplay login fails or hasn't finished. Steam players already verified by the mod, and you yourself, are no longer listed there a second time or counted twice in the player total. The list is back to showing only the players the mod really can't check, such as Epic players.
+
 ## 0.1.25
 * 2v2 now has its own rules: a 30 second shot countdown and max time based on par turned on. 3v3, 4v4 and singles are unchanged. Matches from the 2v2 queue pick this up automatically.
 * Ruleset enforcement is now on by default. Pressing NO RULESET turns rules off for the current lobby only and no longer changes your saved settings, so a single click can't leave every future match unenforced — previously it stayed off for good, and a host could unknowingly run ranked matches with no rules applied. Matches created by SBGL matchmaking ignore the button and always play by the league rules.

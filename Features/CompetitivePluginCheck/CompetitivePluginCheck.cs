@@ -1515,8 +1515,28 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             _consoleLobbyNames.Clear();
             _unverifiedLobbyNames.Clear();
 
+            // Names of players the Steam check already covers, ourselves included. When a client
+            // has no EOS account info (crossplay login failed or still pending), every roster entry
+            // comes back Unknown, which listed the whole lobby - verified players and the local
+            // player too - as "cannot be checked". Each Steam name clears at most one roster entry,
+            // so a second player copying a verified name is still listed.
+            var steamCovered = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (var steamId in _playerComplianceStatus.Keys)
+            {
+                if (!_playerDisplayNames.TryGetValue(steamId, out string steamName) || string.IsNullOrWhiteSpace(steamName)) continue;
+                steamName = steamName.Trim();
+                steamCovered[steamName] = steamCovered.TryGetValue(steamName, out int n) ? n + 1 : 1;
+            }
+
             foreach (var player in GameApiCompat.GetLobbyRoster())
             {
+                if (player.Platform == PlayerPlatform.Unknown
+                    && steamCovered.TryGetValue(player.Name, out int remaining) && remaining > 0)
+                {
+                    steamCovered[player.Name] = remaining - 1;
+                    continue;
+                }
+
                 switch (player.Platform)
                 {
                     case PlayerPlatform.Steam when player.SteamId != 0:
