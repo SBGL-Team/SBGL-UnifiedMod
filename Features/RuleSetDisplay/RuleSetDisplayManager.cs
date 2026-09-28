@@ -3,6 +3,7 @@ using UnityEngine;
 using UnityEngine.SceneManagement;
 using BepInEx.Logging;
 using System;
+using System.Linq;
 
 namespace SBGL.UnifiedMod.Features {
     /// <summary>
@@ -25,6 +26,7 @@ namespace SBGL.UnifiedMod.Features {
         private Texture2D _bgTexture;
         private Texture2D _tooltipBgTexture;
         private string _tooltipRanked = null;
+        private string _tooltip2v2    = null;
         private string _tooltipPro    = null;
         private string _tooltipCasual = null;
         private string _noRulesetTooltip = null;
@@ -62,6 +64,11 @@ namespace SBGL.UnifiedMod.Features {
                 PlayerPrefs.SetString("MatchType", Core.Season2RuleSet.MATCH_TYPE_RANKED);
                 PlayerPrefs.SetInt("Season", Core.SeasonRuleSets.CurrentSeasonNumber);
                 PlayerPrefs.Save();
+
+                // A NO RULESET choice covers one lobby, so the next one starts enforced again.
+                // The saved setting is untouched: if an admin turned rules off there, they stay off.
+                Patches.RulePatches.SuspendedForLobby = false;
+
                 Debug.Log("[RuleSetDisplayManager] Returned to main menu — ruleset reset to ranked");
             }
         }
@@ -93,11 +100,17 @@ namespace SBGL.UnifiedMod.Features {
             if (_defaultAppliedForScene) return;
             _defaultAppliedForScene = true;
 
-            // Default to ranked on every fresh driving-range entry.
-            // If the user clicks a ruleset button this visit, PlayerPrefs will be overwritten
-            // and _defaultAppliedForScene stays true so this won't run again until the scene
-            // changes. When the player returns to the main menu, OnSceneLoaded resets the
-            // selection back to ranked for the next visit.
+            // Keep whatever the host last picked, so back-to-back rounds in the same lobby
+            // stay on that ruleset — a run of 2v2s shouldn't need the button clicked again
+            // after every match. Returning to the main menu ends the lobby and OnSceneLoaded
+            // puts the next one back on ranked.
+            string current = PlayerPrefs.GetString("HostRuleset", "");
+            if (IsKnownRuleset(current))
+            {
+                Debug.Log($"[RuleSetDisplayManager] Keeping ruleset '{current}' for this driving-range session");
+                return;
+            }
+
             PlayerPrefs.SetString("HostRuleset", "ranked");
             PlayerPrefs.SetString("MatchType", Core.Season2RuleSet.MATCH_TYPE_RANKED);
             PlayerPrefs.SetInt("Season", Core.SeasonRuleSets.CurrentSeasonNumber);
@@ -111,6 +124,15 @@ namespace SBGL.UnifiedMod.Features {
 
             PlayerPrefs.Save();
             Debug.Log("[RuleSetDisplayManager] Defaulted ruleset to ranked for this driving-range session");
+        }
+
+        /// <summary>A ruleset the host chose on the panel, as opposed to nothing set yet.</summary>
+        private static bool IsKnownRuleset(string ruleset)
+        {
+            return ruleset == "ranked"
+                || ruleset == "casual"
+                || ruleset == "pro_series"
+                || ruleset == Patches.RulePatches.HOST_RULESET_2V2;
         }
 
         private void RenderPanel() {
@@ -156,8 +178,15 @@ namespace SBGL.UnifiedMod.Features {
             }
 
             bool showDetails = _showDetails?.Value ?? false;
-            bool rulesEnabled = _applyRulesets?.Value ?? false;
+            bool rulesTurnedOffInSettings = !(_applyRulesets?.Value ?? true);
+            bool rulesEnabled = !rulesTurnedOffInSettings && !Patches.RulePatches.SuspendedForLobby;
             string activeRuleset = rulesEnabled ? PlayerPrefs.GetString("HostRuleset", "ranked") : "none";
+
+            // A 2v2 from the queue arrives as a team match type with the ruleset left on ranked,
+            // so highlight by what is actually being applied rather than by the button last clicked.
+            bool is2v2Active = rulesEnabled
+                && (activeRuleset == Patches.RulePatches.HOST_RULESET_2V2
+                    || Core.Season2RuleSet.GetTeamSize(PlayerPrefs.GetString("MatchType", "")) == 2);
 
             float panelWidth = 450f;
             float buttonHeight = 40f;
@@ -169,11 +198,16 @@ namespace SBGL.UnifiedMod.Features {
             float panelY = _posY?.Value ?? 20f;
 
             GUI.DrawTexture(new Rect(panelX, panelY, panelWidth, panelHeight), _bgTexture);
-            GUI.Box(new Rect(panelX, panelY, panelWidth, panelHeight), "<b>APPLY RULESET</b>");
+            // Say so when the saved setting is why nothing is being applied, rather than leaving
+            // the host to wonder why the buttons do nothing.
+            GUI.Box(new Rect(panelX, panelY, panelWidth, panelHeight), rulesTurnedOffInSettings
+                ? "<b>APPLY RULESET</b>  <color=#FFAAAA>— turned off in mod settings</color>"
+                : "<b>APPLY RULESET</b>");
 
             var seasonRules = Core.SeasonRuleSets.Current;
             bool showPro = seasonRules.ShowProSeriesButton;
-            int buttonCount = showPro ? 4 : 3;
+            bool show2v2 = seasonRules.ShowTwoVsTwoButton;
+            int buttonCount = 3 + (showPro ? 1 : 0) + (show2v2 ? 1 : 0);
 
             float btnY = panelY + 28f;
             float btnW = (panelWidth - 10f * (buttonCount + 1)) / buttonCount; // 10px margins and gaps
@@ -181,6 +215,11 @@ namespace SBGL.UnifiedMod.Features {
             float btnX = panelX + 10f;
             var rankedRect = new Rect(btnX, btnY, btnW, buttonHeight);
             btnX += btnW + 10f;
+            var twoVsTwoRect = Rect.zero;
+            if (show2v2) {
+                twoVsTwoRect = new Rect(btnX, btnY, btnW, buttonHeight);
+                btnX += btnW + 10f;
+            }
             var proRect = Rect.zero;
             if (showPro) {
                 proRect = new Rect(btnX, btnY, btnW, buttonHeight);
@@ -194,10 +233,30 @@ namespace SBGL.UnifiedMod.Features {
             if (_tooltipSeason != seasonRules.Season)
             {
                 _tooltipSeason = seasonRules.Season;
+                // The pool is a ban list, so name what's out rather than counting what's in —
+                // the count was from the approved list and missed courses added by game updates.
+                string bannedList = seasonRules.BannedCourses.Length > 0
+                    ? string.Join(", ", seasonRules.BannedCourses.Select(c => c.Name).ToArray())
+                    : "none";
+
                 _tooltipRanked = Core.Season2RuleSet.BuildRulesDescription(seasonRules.GetRankedRules())
                     + "\n<b>Items:</b> <color=#AAFFAA>Game defaults</color>"
-                    + $"\n<b>Courses:</b> <color=#AAFFAA>Random ({seasonRules.ApprovedCourses.Length} maps)</color>"
+                    + $"\n<b>Courses:</b> <color=#AAFFAA>Random, all except {bannedList}</color>"
                     + $"\n<b>Holes:</b> <color=#AAFFAA>{seasonRules.RankedNumHoles}</color>";
+                if (show2v2)
+                {
+                    // Ranked rules with the 2v2 overrides folded in, so the tooltip shows what
+                    // actually gets applied rather than the ranked set plus a footnote.
+                    var twoVsTwoRules = new System.Collections.Generic.Dictionary<MatchSetupRules.Rule, float>(seasonRules.GetRankedRules());
+                    foreach (var kvp in seasonRules.GetTwoVsTwoOverrides())
+                        twoVsTwoRules[kvp.Key] = kvp.Value;
+
+                    _tooltip2v2 = Core.Season2RuleSet.BuildRulesDescription(twoVsTwoRules)
+                        + "\n<b>Items:</b> <color=#AAFFAA>Game defaults</color>"
+                        + $"\n<b>Courses:</b> <color=#AAFFAA>Random, all except {bannedList}</color>"
+                        + $"\n<b>Holes:</b> <color=#AAFFAA>{seasonRules.RankedNumHoles}</color>"
+                        + "\n<color=#FFFFAA>Uploads as an official 2v2. Needs 2 players per team.</color>";
+                }
                 _tooltipPro = Core.Season2RuleSet.BuildRulesDescription(seasonRules.GetProSeriesRules())
                     + "\n<b>Items:</b> <color=#AAFFAA>Game defaults</color>"
                     + "\n<b>Courses:</b> <color=#AAFFAA>Manual selection</color>"
@@ -215,29 +274,37 @@ namespace SBGL.UnifiedMod.Features {
             var casualContent    = new GUIContent("<b>CASUAL</b>");
             var noRulesetContent = new GUIContent("<b>NO RULESET</b>");
 
-            GUI.backgroundColor = activeRuleset == "ranked" ? Color.green : Color.grey;
+            GUI.backgroundColor = activeRuleset == "ranked" && !is2v2Active ? Color.green : Color.grey;
             if (GUI.Button(rankedRect, rankedContent)) {
-                if (_applyRulesets != null) _applyRulesets.Value = true;
+                Patches.RulePatches.SuspendedForLobby = false;
                 ApplyRuleset("ranked");
+            }
+
+            if (show2v2) {
+                GUI.backgroundColor = is2v2Active ? new Color(0.3f, 0.9f, 0.4f) : Color.grey;
+                if (GUI.Button(twoVsTwoRect, new GUIContent("<b>2V2</b>"))) {
+                    Patches.RulePatches.SuspendedForLobby = false;
+                    ApplyRuleset(Patches.RulePatches.HOST_RULESET_2V2);
+                }
             }
 
             if (showPro) {
                 GUI.backgroundColor = activeRuleset == "pro_series" ? Color.magenta : Color.grey;
                 if (GUI.Button(proRect, proContent)) {
-                    if (_applyRulesets != null) _applyRulesets.Value = true;
+                    Patches.RulePatches.SuspendedForLobby = false;
                     ApplyRuleset("pro_series");
                 }
             }
 
             GUI.backgroundColor = activeRuleset == "casual" ? new Color(0.2f, 0.75f, 1f) : Color.grey;
             if (GUI.Button(casualRect, casualContent)) {
-                if (_applyRulesets != null) _applyRulesets.Value = true;
+                Patches.RulePatches.SuspendedForLobby = false;
                 ApplyRuleset("casual");
             }
 
             GUI.backgroundColor = activeRuleset == "none" ? Color.yellow : Color.grey;
             if (GUI.Button(noRulesetRect, noRulesetContent, _smallBtnStyle)) {
-                if (_applyRulesets != null) _applyRulesets.Value = false;
+                Patches.RulePatches.SuspendedForLobby = true;
                 ResetToClassicPreset();
                 Debug.Log("[RuleSetDisplayManager] Ruleset enforcement disabled via No Ruleset button");
             }
@@ -249,8 +316,9 @@ namespace SBGL.UnifiedMod.Features {
             if (Event.current.type == EventType.Repaint) {
                 var mouse = Event.current.mousePosition;
                 string tip = null;
-                if (rankedRect.Contains(mouse))                tip = _tooltipRanked;
-                else if (showPro && proRect.Contains(mouse))   tip = _tooltipPro;
+                if (rankedRect.Contains(mouse))                    tip = _tooltipRanked;
+                else if (show2v2 && twoVsTwoRect.Contains(mouse)) tip = _tooltip2v2;
+                else if (showPro && proRect.Contains(mouse))       tip = _tooltipPro;
                 else if (casualRect.Contains(mouse))           tip = _tooltipCasual;
                 else if (noRulesetRect.Contains(mouse))        tip = _noRulesetTooltip;
 
@@ -293,7 +361,13 @@ namespace SBGL.UnifiedMod.Features {
             int season = Core.SeasonRuleSets.CurrentSeasonNumber;
 
             // Update match type to indicate the selected ruleset
-            if (rulesetName == "ranked") {
+            if (rulesetName == Patches.RulePatches.HOST_RULESET_2V2) {
+                // A 2v2 hosted here counts the same as one from the queue: in an SBGL lobby the
+                // result uploads as an official 2v2, with Red/Blue read from the in-game teams.
+                // Submission is refused if those teams aren't 2 a side, so a mis-set button
+                // can't upload a bad roster.
+                PlayerPrefs.SetString("MatchType", Core.Season2RuleSet.MATCH_TYPE_TEAM_2V2);
+            } else if (rulesetName == "ranked") {
                 PlayerPrefs.SetString("MatchType", Core.Season2RuleSet.MATCH_TYPE_RANKED);
             } else if (rulesetName == "pro_series") {
                 PlayerPrefs.SetString("MatchType", Core.Season2RuleSet.MATCH_TYPE_PRO_SERIES);
@@ -305,7 +379,7 @@ namespace SBGL.UnifiedMod.Features {
             PlayerPrefs.SetInt("Season", season);
             
             // Ranked owns course selection. Casual and Pro Series preserve the host's manual choice.
-            if (rulesetName == "ranked")
+            if (rulesetName == "ranked" || rulesetName == Patches.RulePatches.HOST_RULESET_2V2)
             {
                 var randomCourse = Core.MapPoolConfig.GetRandomApprovedCourse();
                 PlayerPrefs.SetString("SelectedCourse", randomCourse.Name);

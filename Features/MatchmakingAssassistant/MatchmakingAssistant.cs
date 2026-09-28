@@ -2199,7 +2199,12 @@ namespace SBGLeagueAutomation
                 PlayerPrefs.SetString("HostRuleset", _hostRulesetSelection);
                 PlayerPrefs.Save();
                 Log($"Host ruleset stored: {_hostRulesetSelection}");
-                mainMenu.StartHost();
+                if (!GameApiCompat.TryStartHost(mainMenu)) {
+                    Log("<color=red>[Host] Could not start hosting — game build exposes no known host entry point</color>");
+                    _hostLobbyStarted = false;
+                    IsRankedTriggered = false;
+                    return;
+                }
                 Log("Host lobby initiated. Waiting for Steamworks lobby creation callback...");
                 StartCoroutine(UpdateSessionStatus("in_progress"));
             }
@@ -2533,7 +2538,7 @@ namespace SBGLeagueAutomation
                 foreach (var state in states) {
                     if (!state.isConnected || state.isInSpectatorMode) continue;
 
-                    string name = state.name?.Trim();
+                    string name = GameApiCompat.GetPlayerStateName(state)?.Trim();
                     if (string.IsNullOrWhiteSpace(name)) continue;
 
                     teamsByName[name] = state.team;
@@ -4737,13 +4742,36 @@ namespace SBGLeagueAutomation
         public struct PlayerData { public string name, mmr; }
     }
 
-    [HarmonyPatch(typeof(BNetworkManager), nameof(BNetworkManager.LobbyName), MethodType.Setter)]
-    public static class LobbyPatch { 
-        public static void Prefix(ref string value) { 
-            if (SBGLPlugin.IsRankedTriggered) {
-                var pref = PlayerPrefs.GetString("LobbyName");
-                if (!string.IsNullOrEmpty(pref)) value = pref;
-            }
-        } 
+    /// <summary>
+    /// Forces a ranked lobby to use the league's assigned name. The game's write path differs
+    /// per build, so there is one patch per path and each skips itself when its target is
+    /// absent (see LobbyNameCompat). Parameter names differ too, which is why they aren't shared.
+    /// </summary>
+    internal static class RankedLobbyName
+    {
+        internal static string Apply(string requested)
+        {
+            if (!SBGLPlugin.IsRankedTriggered) return requested;
+            var pref = PlayerPrefs.GetString("LobbyName");
+            return string.IsNullOrEmpty(pref) ? requested : pref;
+        }
+    }
+
+    /// <summary>Retail 1.2.2-657: set_LobbyName(string value).</summary>
+    [HarmonyPatch]
+    public static class LobbyPatch {
+        public static bool Prepare() => LobbyNameCompat.PropertySetter != null;
+        public static System.Reflection.MethodBase TargetMethod() => LobbyNameCompat.PropertySetter;
+
+        public static void Prefix(ref string value) { value = RankedLobbyName.Apply(value); }
+    }
+
+    /// <summary>Playtest 1.2.2-691: ServerSanitizeAndSetLobbyName(string name).</summary>
+    [HarmonyPatch]
+    public static class LobbySanitizePatch {
+        public static bool Prepare() => LobbyNameCompat.SanitizeSetter != null;
+        public static System.Reflection.MethodBase TargetMethod() => LobbyNameCompat.SanitizeSetter;
+
+        public static void Prefix(ref string name) { name = RankedLobbyName.Apply(name); }
     }
 }

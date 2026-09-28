@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.25
+* 2v2 now has its own rules: a 30 second shot countdown and max time based on par turned on. 3v3, 4v4 and singles are unchanged. Matches from the 2v2 queue pick this up automatically.
+* Ruleset enforcement is now on by default. Pressing NO RULESET turns rules off for the current lobby only and no longer changes your saved settings, so a single click can't leave every future match unenforced — previously it stayed off for good, and a host could unknowingly run ranked matches with no rules applied. Matches created by SBGL matchmaking ignore the button and always play by the league rules.
+* The "Apply Rulesets" setting remains as the full off switch if rule enforcement itself misbehaves. Turning it off stops the mod touching match rules at all, including matches from the queue, and the Driving Range panel says so in its title so it can't be mistaken for a fault.
+* The Ranked tooltip now lists the banned courses instead of counting approved ones, matching how the pool actually works: everything that isn't banned is in play, including courses added by game updates.
+* A course name sent by the website for a ranked match is now only rejected if that course is banned. Previously anything missing from the mod's own list was replaced, including new courses.
+* The selected ruleset now stays put between rounds, so a run of 2v2s back to back doesn't need the button clicked again after every match. It resets to Ranked when you return to the main menu.
+* Added a 2V2 button to the Driving Range ruleset panel for running 2v2 outside the queue. It applies the 2v2 rules and the match counts as an official 2v2, uploading with Red/Blue rosters in the same way as a queued one. The upload is refused if the in-game teams aren't two a side, so a lobby left on 2V2 by mistake can't submit a broken result.
+* The mod now runs on both the current game build and the 1.2.2-691 playtest from one install. The playtest renamed several things the mod hooks into, which previously stopped it loading properly: the lobby name API, the way hosting is started, and the player name on the scoreboard. The mod now finds whichever the running game has, and says which it found in the log.
+* Compliance checking now works with crossplay. Every player in the lobby is listed, and the mod identifies each one's platform from the game itself rather than guessing. Console players are shown as "Console — mods not possible" and aren't flagged, since they can't install mods. Steam players are now identified by their real Steam ID, so a Steam player is held to the mod check whether or not the mod saw them join a Steam lobby.
+* Players on a PC platform the mod can't reach are listed under "Cannot be checked". They aren't marked as passing, because they can install mods and no report can be verified for them.
+* Fixed the mod failing to detect the lobby name on the playtest, which left league lobbies unrecognised and stopped ranked lobbies being renamed. The name is now read from the game directly rather than from Steam lobby data, which the playtest no longer publishes.
+* Mods that aren't on the approved list are now named. The compliance panel shows "✗ ModName (UnknownGuid)" on your own row, the "ILLEGAL MODS DETECTED" banner lists the mods responsible, and the name is written to the log. Previously only tampered mods were named, so a mod that simply wasn't approved produced a warning with nothing to act on.
+* Your own row in the compliance panel now turns red for an unapproved mod, and that mod is marked with a red ✗ in your mod list. It previously showed a green tick while other players in the lobby saw you flagged.
+* A player whose own scan failed is now shown as failed rather than as a warning, and counts as non-compliant. This covers what only their client can see, such as a suspicious assembly.
+
 ## 0.1.24
 * Added Season 3. The mod now follows the season set on SBGLeague.com and applies that season's rules automatically, so the switch happens on the site rather than needing a mod update. If a season has no rules in the mod yet, the previous season's rules carry over.
 * Season 3 ranked and team matches are 12 holes, up from 9.

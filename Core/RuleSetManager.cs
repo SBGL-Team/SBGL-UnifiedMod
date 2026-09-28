@@ -57,14 +57,16 @@ namespace SBGL.UnifiedMod.Core
                 return false;
             }
 
-            bool isApproved = MapPoolConfig.IsCourseApproved(courseName);
+            // The pool is a ban list: anything not banned is allowed, including courses added
+            // by a game update that the mod has never heard of.
+            bool isBanned = MapPoolConfig.IsCourseBanned(courseName);
 
-            if (!isApproved)
+            if (isBanned)
             {
-                LogWarning($"Course '{courseName}' is not approved for ranked play");
+                LogWarning($"Course '{courseName}' is banned for ranked play");
             }
 
-            return isApproved;
+            return !isBanned;
         }
 
         /// <summary>
@@ -128,9 +130,9 @@ namespace SBGL.UnifiedMod.Core
                 return GetFallbackCourse();
             }
 
-            if (!MapPoolConfig.IsCourseApproved(courseName))
+            if (MapPoolConfig.IsCourseBanned(courseName))
             {
-                LogError($"Course '{courseName}' is not approved, using fallback");
+                LogError($"Course '{courseName}' is banned, using fallback");
                 return GetFallbackCourse();
             }
 

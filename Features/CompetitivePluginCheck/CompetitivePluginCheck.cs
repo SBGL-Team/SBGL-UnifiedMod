@@ -96,6 +96,13 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         {
             public List<string> MissingModNames { get; } = new List<string>();
             public List<string> TamperedModNames { get; } = new List<string>();
+
+            /// <summary>
+            /// Installed mods that are not on the approved list. These used to set
+            /// HasIllegalMods without keeping the name, so our own row could only show an
+            /// unnamed "scan failed" warning while every mod still rendered as a pass.
+            /// </summary>
+            public List<string> UnapprovedModNames { get; } = new List<string>();
             public List<string> SuspiciousRuntimeAssemblies { get; } = new List<string>();
             public bool HasIllegalMods { get; set; }
         }
@@ -253,6 +260,8 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         // Lobby name captured in real-time by Harmony patch on BNetworkManager.set_LobbyName
         internal static string _currentLobbyName = "";
         private int _lastPlayerCosmeticsCount = 0; // Track count of PlayerCosmetics to detect when players join/leave
+        private readonly List<string> _unverifiedLobbyNames = new List<string>(); // in the lobby, cannot be checked
+        private readonly List<string> _consoleLobbyNames = new List<string>();    // console players: mods not possible
         private Rect _compliancePanelRect;
         private bool _compliancePanelRectInit = false;
         private GUIStyle _compWindowStyle;
@@ -561,6 +570,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 }
                 else if (verdict == PluginVerdict.UnknownGuid)
                 {
+                    result.UnapprovedModNames.Add(plugin.Metadata.Name);
                     result.HasIllegalMods = true;
                 }
             }
@@ -602,6 +612,11 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             foreach (var tampered in scan.TamperedModNames)
                 self.FailedPlugins.Add($"{tampered} (HashMismatch)");
 
+            // Same verdict wording peers use, so our own row names an unapproved mod
+            // instead of leaving the player with a warning and nothing to act on.
+            foreach (var unapproved in scan.UnapprovedModNames)
+                self.FailedPlugins.Add($"{unapproved} ({PluginVerdict.UnknownGuid})");
+
             // Same rule the receiver applies to a peer's MOD record.
             self.IsCompliant = !IsFailingVerdict(EvaluatePlugin("com.sbgl.unified", GetOwnUnifiedModSha256()));
             self.HasMelonLoader = HasMelonLoaderLoaded();
@@ -616,7 +631,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         /// </summary>
         private void LogScanResultIfChanged(LocalPluginScanResult result)
         {
-            string signature = $"{result.HasIllegalMods}|{string.Join(",", result.TamperedModNames.ToArray())}|{string.Join(",", result.SuspiciousRuntimeAssemblies.ToArray())}|{result.MissingModNames.Count}";
+            string signature = $"{result.HasIllegalMods}|{string.Join(",", result.TamperedModNames.ToArray())}|{string.Join(",", result.UnapprovedModNames.ToArray())}|{string.Join(",", result.SuspiciousRuntimeAssemblies.ToArray())}|{result.MissingModNames.Count}";
             if (signature == _lastLoggedScanSignature) return;
             _lastLoggedScanSignature = signature;
 
@@ -635,6 +650,8 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             UnityEngine.Debug.LogWarning("[SBGL-CompPluginCheck] Local scan: ILLEGAL MODS DETECTED");
             if (result.TamperedModNames.Count > 0)
                 UnityEngine.Debug.LogWarning($"[SBGL-CompPluginCheck]   hash mismatch / unverifiable: {string.Join(", ", result.TamperedModNames.ToArray())}");
+            if (result.UnapprovedModNames.Count > 0)
+                UnityEngine.Debug.LogWarning($"[SBGL-CompPluginCheck]   not on approved list: {string.Join(", ", result.UnapprovedModNames.ToArray())}");
             if (result.SuspiciousRuntimeAssemblies.Count > 0)
                 UnityEngine.Debug.LogWarning($"[SBGL-CompPluginCheck]   suspicious assemblies: {string.Join(", ", result.SuspiciousRuntimeAssemblies.ToArray())}");
         }
@@ -748,7 +765,10 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 }
                 catch { }
             }
-            return string.Empty;
+
+            // The 1.2.2-691 playtest stopped publishing the name to Steam lobby data, which left
+            // this blank for every player. Ask the game for it directly instead.
+            return LobbyNameCompat.Get();
         }
 
         private System.Collections.IEnumerator RetryResolveLobbyName(Steamworks.Data.Lobby lobby)
@@ -810,9 +830,25 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             UpdateUIReport();
         }
 
+        /// <summary>
+        /// Newer game builds raise LobbyNameSet on every client when the name changes. The
+        /// server-side write patch never runs on a client, so this is how non-hosts learn it.
+        /// </summary>
+        private void OnGameLobbyNameSet()
+        {
+            string name = LobbyNameCompat.Get();
+            if (!string.IsNullOrWhiteSpace(name) && name != _currentLobbyName)
+            {
+                _currentLobbyName = name;
+                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Lobby name from game: '{name}'");
+            }
+        }
+
         void Awake()
         {
             Instance = this;
+
+            LobbyNameCompat.TrySubscribe(OnGameLobbyNameSet);
 
             // Initialize configuration values from PlayerPrefs with defaults
             if (!PlayerPrefs.HasKey("CompCheck_X")) PlayerPrefs.SetFloat("CompCheck_X", 0f);
@@ -845,6 +881,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             if (Instance == this) Instance = null;
             UnifiedPlugin.ApiConfigChanged -= OnApiConfigChanged;
             AppDomain.CurrentDomain.AssemblyLoad -= OnRuntimeAssemblyLoaded;
+            LobbyNameCompat.TryUnsubscribe(OnGameLobbyNameSet);
         }
 
         private void OnApiConfigChanged()
@@ -1049,7 +1086,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             int unverified= _playerComplianceStatus.Values.Count(s => s.HasReportedMods && s.IsLegacyReport && s.IsCompliant && !s.HasMelonLoader);
             int pending   = _playerComplianceStatus.Values.Count(s => !s.HasReportedMods && !s.TimedOut);
             GUILayout.Label(
-                $"<color=white>Players: <b>{total}</b></color>    <color=lime>✓ {compliant}</color>    <color=red>✗ {flagged}</color>    <color=#AAAAFF>◐ {unverified}</color>    <color=yellow>? {pending}</color>",
+                $"<color=white>Players: <b>{total + _consoleLobbyNames.Count + _unverifiedLobbyNames.Count}</b></color>    <color=lime>✓ {compliant}</color>    <color=red>✗ {flagged}</color>    <color=#88CCFF>C {_consoleLobbyNames.Count}</color>    <color=orange>! {_unverifiedLobbyNames.Count}</color>    <color=#AAAAFF>◐ {unverified}</color>    <color=yellow>? {pending}</color>",
                 summaryStyle
             );
 
@@ -1076,6 +1113,9 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                     else if (status.HasMelonLoader)          { icon = "⚠"; color = "orange"; }
                     else if (!status.IsCompliant)            { icon = "✗"; color = "red"; }
                     else if (status.FailedPlugins.Count > 0) { icon = "✗"; color = "red"; }
+                    // The peer found something we can't see — a local-only check such as a
+                    // suspicious assembly, or a mod its manifest rejects. Still a failure.
+                    else if (status.SelfReportedIllegal)     { icon = "✗"; color = "red"; }
                     else if (status.IsLegacyReport)          { icon = "◐"; color = "#AAAAFF"; }
                     else                                     { icon = "✓"; color = "lime"; }
 
@@ -1093,7 +1133,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                         GUILayout.Label($"      <color=#FF4444>✗ {failed}</color>", modStyle);
 
                     if (status.SelfReportedIllegal && status.FailedPlugins.Count == 0)
-                        GUILayout.Label("      <color=orange>⚠ peer reports its own scan failed</color>", modStyle);
+                        GUILayout.Label("      <color=#FF4444>✗ own scan failed - check that player's log for the mod</color>", modStyle);
 
                     if (status.IsLegacyReport)
                         GUILayout.Label("      <color=#AAAAFF>◐ old mod version - report not verifiable</color>", modStyle);
@@ -1131,6 +1171,26 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                         }
                     }
 
+                    GUILayout.Space(5);
+                }
+
+                // Players the Steam-based check can't reach. Console and crossplay players can't
+                // install mods at all, but a Steam player the mod simply failed to see would land
+                // here too, so this states what is known rather than clearing them.
+                if (_consoleLobbyNames.Count > 0)
+                {
+                    GUILayout.Label("<color=#88CCFF>Console — mods not possible</color>", summaryStyle);
+                    foreach (var rosterName in _consoleLobbyNames)
+                        GUILayout.Label($"<color=#88CCFF>[C]</color>  {rosterName}", nameStyle);
+                    GUILayout.Space(5);
+                }
+
+                if (_unverifiedLobbyNames.Count > 0)
+                {
+                    GUILayout.Label("<color=orange>Cannot be checked — not on Steam or console</color>", summaryStyle);
+                    foreach (var rosterName in _unverifiedLobbyNames)
+                        GUILayout.Label($"<color=orange>[!]</color>  {rosterName}", nameStyle);
+                    GUILayout.Label("      <color=orange>these players can install mods and cannot be verified</color>", modStyle);
                     GUILayout.Space(5);
                 }
             }
@@ -1386,6 +1446,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 }
 
                 RefreshUnresolvedDisplayNames();
+                RefreshLobbyRoster();
 
                 _hasLoggedDiscoveryInfo = true;
                 
@@ -1441,6 +1502,54 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         /// session - which is what put a 17-digit number on the compliance banner.
         /// Retried every discovery tick until a name comes back.
         /// </summary>
+        /// <summary>
+        /// Names of players in the lobby that the Steam-based check never sees: console and
+        /// crossplay players, who have no Steam ID. They used to be skipped silently, so the
+        /// panel under-reported the lobby and gave no hint that anyone was missing.
+        /// </summary>
+        private void RefreshLobbyRoster()
+        {
+            if (!GameApiCompat.HasPlayerRoster) return;
+
+            float now = Time.time;
+            _consoleLobbyNames.Clear();
+            _unverifiedLobbyNames.Clear();
+
+            foreach (var player in GameApiCompat.GetLobbyRoster())
+            {
+                switch (player.Platform)
+                {
+                    case PlayerPlatform.Steam when player.SteamId != 0:
+                        // Their real Steam ID, straight from the platform. Tracking them here means
+                        // a Steam player is held to the mod check even if the mod never saw them
+                        // join a Steam lobby, which is otherwise a way to avoid being checked.
+                        _playerDisplayNames[player.SteamId] = player.Name;
+                        if (player.SteamId != (ulong)Steamworks.SteamClient.SteamId)
+                            AddPlayerToTracking(player.SteamId, now);
+                        break;
+
+                    case PlayerPlatform.Console:
+                        // Closed platform: mods are not possible, so there is nothing to check.
+                        if (!_consoleLobbyNames.Contains(player.Name))
+                            _consoleLobbyNames.Add(player.Name);
+                        break;
+
+                    default:
+                        // A PC platform we can't reach, or account info that hasn't arrived yet.
+                        // Never treated as passing: for ranked this needs a human decision.
+                        string label = player.Platform == PlayerPlatform.OtherPc && !string.IsNullOrWhiteSpace(player.AccountType)
+                            ? $"{player.Name} ({player.AccountType})"
+                            : player.Name;
+                        if (!_unverifiedLobbyNames.Contains(label))
+                            _unverifiedLobbyNames.Add(label);
+                        break;
+                }
+            }
+
+            _consoleLobbyNames.Sort(StringComparer.OrdinalIgnoreCase);
+            _unverifiedLobbyNames.Sort(StringComparer.OrdinalIgnoreCase);
+        }
+
         private void RefreshUnresolvedDisplayNames()
         {
             if (!SteamClient.IsValid) return;
@@ -2872,7 +2981,19 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
 
             UpdateDebugWindow(localPluginScan);
 
-            if (_illegalWarningText != null) _illegalWarningText.gameObject.SetActive(localPluginScan.HasIllegalMods);
+            if (_illegalWarningText != null)
+            {
+                _illegalWarningText.gameObject.SetActive(localPluginScan.HasIllegalMods);
+
+                // Name what failed. The banner used to say only "ILLEGAL MODS DETECTED",
+                // leaving the player to guess which mod to remove.
+                var offenders = localPluginScan.TamperedModNames
+                    .Concat(localPluginScan.UnapprovedModNames)
+                    .ToList();
+                _illegalWarningText.text = offenders.Count > 0
+                    ? "ILLEGAL MODS DETECTED\n<size=18>" + string.Join(", ", offenders) + "</size>"
+                    : "ILLEGAL MODS DETECTED";
+            }
             if (_missingWarningText != null)
             {
                 string scene = SceneManager.GetActiveScene().name;
@@ -2894,7 +3015,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             if (s == null) return false;
             if (s.TimedOut) return true;
             if (!s.HasReportedMods) return false;
-            return !s.IsCompliant || s.HasMelonLoader || s.FailedPlugins.Count > 0;
+            return !s.IsCompliant || s.HasMelonLoader || s.FailedPlugins.Count > 0 || s.SelfReportedIllegal;
         }
 
         private void UpdateNonCompliantPlayersBanner()
@@ -2956,6 +3077,12 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                     {
                         debugSb.AppendLine(assemblyPath);
                     }
+                }
+                if (localPluginScan.UnapprovedModNames.Count > 0)
+                {
+                    debugSb.AppendLine("--- NOT ON APPROVED LIST ---");
+                    foreach (var modName in localPluginScan.UnapprovedModNames)
+                        debugSb.AppendLine(modName);
                 }
                 debugSb.AppendLine("--- REMOTE PLAYERS ---");
                 
@@ -3318,13 +3445,35 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         }
     }
 
-    // Harmony patch to capture lobby name whenever BNetworkManager.LobbyName is set
-    [HarmonyPatch(typeof(BNetworkManager), nameof(BNetworkManager.LobbyName), MethodType.Setter)]
+    // Captures the lobby name as the game sets it. The write path differs per game build, so
+    // each patch resolves its own target and skips itself where that target doesn't exist
+    // (see LobbyNameCompat). Clients on the newer build never run the server-side method, so
+    // they pick the name up from the LobbyNameSet event and the polling in TryReadLobbyName.
+
+    /// <summary>Retail 1.2.2-657: the name is assigned through the LobbyName property.</summary>
+    [HarmonyPatch]
     public static class LobbyNameCapturePatch
     {
+        public static bool Prepare() => LobbyNameCompat.PropertySetter != null;
+        public static MethodBase TargetMethod() => LobbyNameCompat.PropertySetter;
+
         public static void Postfix(string value)
         {
             CompetitivePluginCheck._currentLobbyName = value ?? "";
+        }
+    }
+
+    /// <summary>Playtest 1.2.2-691: the server sets the name here, and returns what it applied.</summary>
+    [HarmonyPatch]
+    public static class LobbyNameSanitizeCapturePatch
+    {
+        public static bool Prepare() => LobbyNameCompat.SanitizeSetter != null;
+        public static MethodBase TargetMethod() => LobbyNameCompat.SanitizeSetter;
+
+        public static void Postfix(string __result)
+        {
+            if (!string.IsNullOrWhiteSpace(__result))
+                CompetitivePluginCheck._currentLobbyName = __result;
         }
     }
 }

@@ -244,8 +244,8 @@ namespace SBGL.UnifiedMod.Core
                 new ConfigDescription("Vertical position", new AcceptableValueRange<float>(0f, 4000f)));
             RS_ShowDetails = Config.Bind("RuleSetDisplay.UI", "Show Details Panel", false,
                 "Show match type, course, season and ruleset labels below the buttons");
-            RS_ApplyRulesets = Config.Bind("RuleSetDisplay.UI", "Apply Rulesets", false,
-                "When disabled, the mod will NOT enforce Season 1 rules or item weights on match start. Use this as a fallback if rules are being applied incorrectly.");
+            RS_ApplyRulesets = Config.Bind("RuleSetDisplay.UI", "Apply Rulesets", true,
+                "Whether the mod enforces the league ruleset when a match starts. Turn this off to stop the mod touching match rules at all, including matches from the queue — the escape hatch if rule enforcement itself misbehaves. To skip rules for a single lobby, use the NO RULESET button on the Driving Range instead.");
 
             // === LIVE LEADERBOARD CONFIG ===
             LL_MaxPlayers = Config.Bind("LiveLeaderboard.UI", "Max Players", 16,
@@ -664,6 +664,11 @@ namespace SBGL.UnifiedMod.Core
                 RulePatches.SetLogger(Logger);
                 RulePatches.SetApplyRulesetsConfig(RS_ApplyRulesets);
                 Logger.LogInfo("[Init] ✓ Harmony patches initialized successfully");
+                // Names the game API this build resolved to, so a future rename shows up in the log
+                // rather than as a silently missing feature.
+                Logger.LogInfo($"[Init] Lobby name API: {LobbyNameCompat.Describe()}");
+                Logger.LogInfo($"[Init] Game API: {GameApiCompat.Describe()}");
+                Logger.LogInfo($"[Init] Player platform source: {EosIdentityCompat.Describe()}");
             }
             catch (System.Exception ex)
             {

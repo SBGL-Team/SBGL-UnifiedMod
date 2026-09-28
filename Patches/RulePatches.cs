@@ -9,6 +9,21 @@ namespace SBGL.UnifiedMod.Patches
     [HarmonyPatch]
     public static class RulePatches
     {
+        /// <summary>
+        /// HostRuleset value for the Driving Range 2V2 button. It applies the 2v2 rules and sets
+        /// the team 2v2 match type, so the result uploads as an official 2v2 with Red/Blue
+        /// rosters. Submission is refused unless the in-game teams are two a side.
+        /// </summary>
+        public const string HOST_RULESET_2V2 = "ranked_2v2";
+
+        /// <summary>
+        /// Set by the NO RULESET button: rules are off for this lobby only, and it clears when
+        /// the host picks another ruleset or returns to the main menu. Deliberately not saved to
+        /// config — a stray click shouldn't leave every future match unenforced. The saved
+        /// "Apply Rulesets" setting is the lasting off switch for when rules misbehave.
+        /// </summary>
+        public static bool SuspendedForLobby = false;
+
         private static ManualLogSource _logger = null;
         private static BepInEx.Configuration.ConfigEntry<bool> _applyRulesets = null;
 
@@ -46,9 +61,20 @@ namespace SBGL.UnifiedMod.Patches
             {
                 if (!__instance.isServer) return;
 
-                if (!(_applyRulesets?.Value ?? false))
+                // The saved setting is the escape hatch for when rule enforcement itself is
+                // misbehaving, so it wins everywhere, including matches from the queue.
+                if (!(_applyRulesets?.Value ?? true))
                 {
-                    Log("ApplyRulesets is disabled in config — skipping rule enforcement");
+                    Log("Apply Rulesets is turned off in the mod settings — skipping rule enforcement");
+                    return;
+                }
+
+                // The NO RULESET button only covers the host's own lobby. A match the league's
+                // matchmaking created still plays by the league rules.
+                bool fromMatchmaking = SBGLeagueAutomation.SBGLPlugin.IsRankedTriggered;
+                if (SuspendedForLobby && !fromMatchmaking)
+                {
+                    Log("NO RULESET selected for this lobby — skipping rule enforcement");
                     return;
                 }
 
@@ -110,6 +136,18 @@ namespace SBGL.UnifiedMod.Patches
                 rulesDict = season.GetProSeriesRules();
             else
                 rulesDict = season.GetRankedRules();
+
+            // 2v2 has its own rules on top of ranked. This covers both a 2v2 from the queue,
+            // which arrives as a team match type, and a host picking 2V2 on the Driving Range.
+            // 3v3, 4v4 and singles are untouched.
+            string matchType = PlayerPrefs.GetString("MatchType", "");
+            bool is2v2 = hostRuleset == HOST_RULESET_2V2 || Season2RuleSet.GetTeamSize(matchType) == 2;
+            if (is2v2 && season.GetTwoVsTwoOverrides != null)
+            {
+                foreach (var kvp in season.GetTwoVsTwoOverrides())
+                    rulesDict[kvp.Key] = kvp.Value;
+                Log("  2v2 ruleset: applying 2v2 rule overrides");
+            }
 
             int appliedCount = 0;
             foreach (var kvp in rulesDict)

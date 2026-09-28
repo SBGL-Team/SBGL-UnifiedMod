@@ -19,6 +19,15 @@ namespace SBGL.UnifiedMod.Core
         /// <summary>Whether the Driving Range panel offers a PRO SERIES button.</summary>
         public bool ShowProSeriesButton { get; }
 
+        /// <summary>
+        /// Rules that apply to 2v2 on top of the ranked set. Null when the season plays 2v2 by
+        /// the same rules as everything else. 3v3 and 4v4 are not affected.
+        /// </summary>
+        public Func<Dictionary<MatchSetupRules.Rule, float>> GetTwoVsTwoOverrides { get; }
+
+        /// <summary>Whether the Driving Range panel offers a 2V2 button for this season.</summary>
+        public bool ShowTwoVsTwoButton => GetTwoVsTwoOverrides != null;
+
         public MapPoolConfig.Course[] ApprovedCourses { get; }
         public MapPoolConfig.Course[] BannedCourses { get; }
 
@@ -34,11 +43,13 @@ namespace SBGL.UnifiedMod.Core
             MapPoolConfig.Course[] bannedCourses,
             Func<Dictionary<MatchSetupRules.Rule, float>> rankedRules,
             Func<Dictionary<MatchSetupRules.Rule, float>> proSeriesRules,
-            Func<Dictionary<MatchSetupRules.Rule, float>> casualRules)
+            Func<Dictionary<MatchSetupRules.Rule, float>> casualRules,
+            Func<Dictionary<MatchSetupRules.Rule, float>> twoVsTwoOverrides = null)
         {
             Season = season;
             RankedNumHoles = rankedNumHoles;
             ShowProSeriesButton = showProSeriesButton;
+            GetTwoVsTwoOverrides = twoVsTwoOverrides;
             ApprovedCourses = approvedCourses;
             BannedCourses = bannedCourses;
             GetRankedRules = rankedRules;
@@ -72,7 +83,8 @@ namespace SBGL.UnifiedMod.Core
                 proSeriesRules: Season2RuleSet.GetProSeriesRulesSettings,
                 casualRules: Season2RuleSet.GetCasualRulesSettings),
 
-            // Season 3: 12 holes, Vertigo in and Uptown out, no Pro Series button.
+            // Season 3: 12 holes, Vertigo in and Uptown out, no Pro Series button, and a
+            // 30-second shot countdown in 2v2 only.
             // Wind / Comeback / White Flag are unchanged from Season 2.
             new SeasonRules(
                 season: 3,
@@ -82,8 +94,17 @@ namespace SBGL.UnifiedMod.Core
                 bannedCourses: MapPoolConfig.Season3BannedCourses,
                 rankedRules: Season2RuleSet.GetRankedRulesSettings,
                 proSeriesRules: Season2RuleSet.GetProSeriesRulesSettings,
-                casualRules: Season2RuleSet.GetCasualRulesSettings),
+                casualRules: Season2RuleSet.GetCasualRulesSettings,
+                twoVsTwoOverrides: Season3TwoVsTwoOverrides),
         };
+
+        /// <summary>Season 3 plays 2v2 on a shorter shot clock, with hole time scaled to par.</summary>
+        private static Dictionary<MatchSetupRules.Rule, float> Season3TwoVsTwoOverrides() =>
+            new Dictionary<MatchSetupRules.Rule, float>
+            {
+                { MatchSetupRules.Rule.Countdown,         30f },
+                { MatchSetupRules.Rule.MaxTimeBasedOnPar,  1f },
+            };
 
         // -1 until read from PlayerPrefs. PlayerPrefs can't be touched from a static initializer.
         private static int _websiteSeason = -1;
