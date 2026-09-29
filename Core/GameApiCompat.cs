@@ -115,7 +115,9 @@ namespace SBGL.UnifiedMod.Core
                 var found = UnityEngine.Object.FindObjectsByType(PlayerIdType, FindObjectsSortMode.None);
                 foreach (var obj in found)
                 {
-                    string name = PlayerIdName.Invoke(obj, null) as string;
+                    // PlayerNameNoRichText is wrapped as "<noparse>name</noparse>", so it never
+                    // compared equal to the player's Steam name.
+                    string name = StripNoParse(PlayerIdName.Invoke(obj, null) as string);
                     if (string.IsNullOrWhiteSpace(name)) continue;
 
                     var player = new RosterPlayer
@@ -124,6 +126,15 @@ namespace SBGL.UnifiedMod.Core
                         Name = name.Trim(),
                         Platform = PlayerPlatform.Unknown,
                     };
+
+                    // Over Steam networking the game sets the player guid to their Steam ID
+                    // (BNetworkManager.ServerGetPlayerGuid), so a Steam-shaped guid identifies a
+                    // Steam player even on builds with no EOS account info.
+                    if (IsIndividualSteamId(player.Guid))
+                    {
+                        player.Platform = PlayerPlatform.Steam;
+                        player.SteamId = player.Guid;
+                    }
 
                     // Platform comes from the account info the game caches for player icons.
                     object eosId = PlayerIdEosId?.Invoke(obj, null);
@@ -145,6 +156,15 @@ namespace SBGL.UnifiedMod.Core
 
             return roster;
         }
+
+        private static string StripNoParse(string name) =>
+            name?.Replace("<noparse>", string.Empty).Replace("</noparse>", string.Empty);
+
+        /// <summary>
+        /// True for a public-universe individual Steam account ID (upper 32 bits 0x01100001).
+        /// Other transports use small connection-based guids, which never match this.
+        /// </summary>
+        private static bool IsIndividualSteamId(ulong id) => (id >> 32) == 0x01100001UL;
 
         /// <summary>The player's name from a CourseManager.PlayerState, or "" if unreadable.</summary>
         public static string GetPlayerStateName(CourseManager.PlayerState state)
