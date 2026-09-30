@@ -1250,21 +1250,18 @@ namespace SBGLeagueAutomation
             onResolved?.Invoke(null);
         }
 
-        private string BuildStableManualLocalSessionId() {
+        /// <summary>
+        /// Session ID for a match outside the queue. The gateway requires a real UUID, so the host
+        /// generates one per match: it is cached in _localManualSessionId, which survives every
+        /// hole of the match (and its upload retries, keeping match.submit idempotent) and is
+        /// cleared by ResetPerMatchState on the return to the Driving Range, so the next match in
+        /// the same lobby gets a new one. Only the host uploads, so no other client needs it.
+        /// </summary>
+        private string BuildManualLocalSessionId() {
+            string sessionId = Guid.NewGuid().ToString();
             string steamLobbyId = SBGL.UnifiedMod.Features.CompetitivePluginCheck.CompetitivePluginCheck.GetCurrentSteamLobbyId();
-            if (!string.IsNullOrWhiteSpace(steamLobbyId)) {
-                return $"local-lobby-{steamLobbyId}";
-            }
-
-            string lobbyName = ResolveCurrentLobbyName();
-            if (!string.IsNullOrWhiteSpace(lobbyName)) {
-                string normalizedLobbyName = Regex.Replace(lobbyName.Trim(), @"[^A-Za-z0-9_-]+", "-").Trim('-');
-                if (!string.IsNullOrWhiteSpace(normalizedLobbyName)) {
-                    return $"local-name-{normalizedLobbyName}";
-                }
-            }
-
-            return "local-manual";
+            Log($"<color=cyan>[Match Creation] Generated session ID {sessionId} for this match (Steam lobby {(string.IsNullOrWhiteSpace(steamLobbyId) ? "unknown" : steamLobbyId)})</color>");
+            return sessionId;
         }
 
         private IEnumerator ResolveExistingMatchEntryId(string matchId, string playerId, Action<string> onResolved, bool logMisses = false) {
@@ -2282,7 +2279,7 @@ namespace SBGLeagueAutomation
             bool isManualLocalLobby = _currentSession == null;
             if (isManualLocalLobby) {
                 if (string.IsNullOrWhiteSpace(_localManualSessionId)) {
-                    _localManualSessionId = BuildStableManualLocalSessionId();
+                    _localManualSessionId = BuildManualLocalSessionId();
                 }
 
                 Log($"<color=cyan>[Match Creation] Manual local lobby detected. Session surrogate: {_localManualSessionId}</color>");
@@ -3533,7 +3530,10 @@ namespace SBGLeagueAutomation
 
         private MatchStats CollectMatchStats(float duration) {
             try {
-                string activeSessionId = _currentSession != null ? _currentSession.id : (_localManualSessionId ?? "local-manual-session");
+                if (_currentSession == null && string.IsNullOrWhiteSpace(_localManualSessionId)) {
+                    _localManualSessionId = BuildManualLocalSessionId();
+                }
+                string activeSessionId = _currentSession != null ? _currentSession.id : _localManualSessionId;
 
                 // Collect basic match metadata
                 var stats = new MatchStats {
