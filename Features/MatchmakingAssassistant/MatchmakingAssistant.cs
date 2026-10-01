@@ -4316,6 +4316,23 @@ namespace SBGLeagueAutomation
         // reads. Every write is funnelled through the server-side gateway as
         // { "action": ..., "payload": ... }, and the server performs it with a privileged key.
         // Reads continue to use CallAPI/ApplyApiHeaders against the database directly.
+        // The gateway's update/leave actions name the record being changed "id"; callers carry it
+        // under its descriptive name. The descriptive field is kept as well.
+        private static readonly Dictionary<string, string> GatewayRecordIdFields = new Dictionary<string, string> {
+            ["entry.update"]   = "match_entry_id",
+            ["match.update"]   = "match_id",
+            ["session.update"] = "matchmaking_session_id",
+            ["queue.update"]   = "queue_id",
+            ["queue.leave"]    = "queue_id",
+        };
+
+        private static void AddGatewayRecordId(string action, JObject payload) {
+            if (payload["id"] != null) return;
+            if (!GatewayRecordIdFields.TryGetValue(action, out string field)) return;
+            JToken value = payload[field];
+            if (value != null && value.Type != JTokenType.Null) payload["id"] = value.DeepClone();
+        }
+
         internal IEnumerator CallGateway(string action, JObject payload, Action<JObject> onSuccess, Action<string> onError = null) {
             if (!UnifiedPlugin.IsModGatewayConfigured()) {
                 string reason = "Mod gateway is not configured (missing URL or mod key) — write skipped.";
@@ -4325,9 +4342,12 @@ namespace SBGLeagueAutomation
                 yield break;
             }
 
+            payload = payload ?? new JObject();
+            AddGatewayRecordId(action, payload);
+
             var body = new JObject {
                 ["action"] = action,
-                ["payload"] = payload ?? new JObject()
+                ["payload"] = payload
             };
             string json = body.ToString(Newtonsoft.Json.Formatting.None);
             string url = UnifiedPlugin.GetCurrentModGatewayUrl();

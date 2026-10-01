@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.29
+* Fixed match scores not reaching the website. Matches were created, but every player stayed at 0 points with no finishing position, because the website now expects updates in a different format and refused every score update with "id is required". Scores, over/under and final positions are now saved after each hole and at the end of the match.
+* The same change fixes queue and matchmaking session updates (leaving the queue, ready, accept and completing a session), which were being refused in the same way.
+
 ## 0.1.28
 * Fixed match uploads failing from lobbies outside the SBGL queue, such as manual "SBGL-" lobbies, the Driving Range 2V2 button and matches uploaded with "Upload All Matches". The website now requires every match to carry a session ID, which these lobbies didn't have, so every upload was refused with "matchmaking_session_id is required". The host now gives each match its own ID, which stays the same across all of that match's holes and any upload retries, so a retried upload is recognised instead of creating a duplicate. The next match in the same lobby gets a new one.
 
