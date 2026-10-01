@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.1.28
+* Fixed match uploads failing from lobbies outside the SBGL queue, such as manual "SBGL-" lobbies, the Driving Range 2V2 button and matches uploaded with "Upload All Matches". The website now requires every match to carry a session ID, which these lobbies didn't have, so every upload was refused with "matchmaking_session_id is required". The host now gives each match its own ID, which stays the same across all of that match's holes and any upload retries, so a retried upload is recognised instead of creating a duplicate. The next match in the same lobby gets a new one.
+
 ## 0.1.27
 * Fixed Steam players, including yourself, still being listed under "Cannot be checked" after 0.1.26. The mod now recognises Steam players by their Steam ID, which the game assigns to every player on Steam, so the list only shows players it really can't check, such as Epic players. Copying a verified player's name no longer affects who is listed.
 * A Steam player in the lobby whose mod report never arrives is now held to the check and shown as "no report received", instead of being listed as unable to be checked.
