@@ -44,6 +44,9 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         private ConfigEntry<bool> _configMelonLoaderChatEnabled;
         private ConfigEntry<string> _configPlayerId;
         private const string ALLOWED_MODS_URL = "https://gist.githubusercontent.com/Kingcox22/59765f02af8dd87179ca920409ff3b27/raw/Approved_Mods.json";
+        private const string UNIFIED_MOD_GUID = "com.sbgl.unified";
+        private const string THUNDERSTORE_PACKAGE_URL = "https://thunderstore.io/api/experimental/package/KingCox22/SBGL_UnifiedMod/";
+        private const float RELEASE_CHECK_INTERVAL = 900f; // Thunderstore is re-checked at most every 15 minutes
 
         public static CompetitivePluginCheck Instance { get; private set; }
 
@@ -77,6 +80,12 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             /// <summary>The peer's own local scan verdict, as self-reported.</summary>
             public bool SelfReportedIllegal { get; set; }
 
+            /// <summary>Why this peer's Unified Mod failed, when the cause is its version.</summary>
+            public UnifiedVersionState UnifiedVersionState { get; set; } = UnifiedVersionState.Current;
+
+            /// <summary>Set while this peer passes on a previous release that is about to expire.</summary>
+            public DateTime? UpdateDeadlineUtc { get; set; }
+
             /// <summary>
             /// Set once this player has gone past the reporting window without sending
             /// anything. Distinct from HasReportedMods:false, which also covers players
@@ -105,6 +114,13 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             public List<string> UnapprovedModNames { get; } = new List<string>();
             public List<string> SuspiciousRuntimeAssemblies { get; } = new List<string>();
             public bool HasIllegalMods { get; set; }
+
+            /// <summary>
+            /// Set when our own Unified Mod fails its hash pin only because it is a different
+            /// release (older, or newer and awaiting approval). Kept out of TamperedModNames so
+            /// the player is told to update rather than accused of illegal mods.
+            /// </summary>
+            public UnifiedVersionState OwnUnifiedVersionState { get; set; } = UnifiedVersionState.Current;
         }
 
         private sealed class AllowedModsSnapshot
@@ -114,20 +130,43 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             public static readonly AllowedModsSnapshot Empty = new AllowedModsSnapshot(
                 new HashSet<string>(StringComparer.OrdinalIgnoreCase),
                 new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
-                null);
+                null, null, null);
 
             private readonly HashSet<string> _allowedGuids;
             private readonly Dictionary<string, string> _displayNamesByGuid;
             private readonly Dictionary<string, HashSet<string>> _allowedHashesByGuid; // null = no hash enforcement
+            private readonly Dictionary<string, string> _versionsByGuid; // null = manifest carries no versions
+            private readonly Dictionary<string, DateTime> _hashExpiryUtc; // hash -> last moment it is accepted
 
             private AllowedModsSnapshot(
                 HashSet<string> allowedGuids,
                 Dictionary<string, string> displayNamesByGuid,
-                Dictionary<string, HashSet<string>> allowedHashesByGuid)
+                Dictionary<string, HashSet<string>> allowedHashesByGuid,
+                Dictionary<string, string> versionsByGuid,
+                Dictionary<string, DateTime> hashExpiryUtc)
             {
                 _allowedGuids = allowedGuids;
                 _displayNamesByGuid = displayNamesByGuid;
                 _allowedHashesByGuid = allowedHashesByGuid;
+                _versionsByGuid = versionsByGuid;
+                _hashExpiryUtc = hashExpiryUtc;
+            }
+
+            /// <summary>
+            /// When this hash stops being accepted, or null if it never expires. Lets the
+            /// previous release stay valid while a new one is still processing on Thunderstore.
+            /// </summary>
+            public DateTime? GetHashExpiryUtc(string sha256)
+            {
+                if (_hashExpiryUtc == null || string.IsNullOrWhiteSpace(sha256)) return null;
+                return _hashExpiryUtc.TryGetValue(sha256, out var expiry) ? expiry : (DateTime?)null;
+            }
+
+            /// <summary>The version the manifest pins for this GUID, or null if it names none.</summary>
+            public System.Version GetApprovedVersion(string guid)
+            {
+                if (_versionsByGuid == null || string.IsNullOrWhiteSpace(guid)) return null;
+                return _versionsByGuid.TryGetValue(guid, out string v) && System.Version.TryParse(v, out var parsed) ? parsed : null;
             }
 
             public int Count => _displayNamesByGuid.Count;
@@ -163,6 +202,8 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 var allowedGuids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 var displayNamesByGuid = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 var allowedHashesByGuid = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+                var versionsByGuid = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                var hashExpiryUtc = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
 
                 try
                 {
@@ -179,6 +220,10 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                         allowedGuids.Add(guid);
                         displayNamesByGuid[guid] = string.IsNullOrWhiteSpace(name) ? guid : name;
 
+                        string version = mod["version"]?.Value<string>();
+                        if (!string.IsNullOrWhiteSpace(version))
+                            versionsByGuid[guid] = version.Trim();
+
                         var assemblies = mod["assemblies"] as JArray;
                         if (assemblies != null && assemblies.Count > 0)
                         {
@@ -188,6 +233,16 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                                 string sha256 = asm["sha256"]?.Value<string>();
                                 if (!string.IsNullOrWhiteSpace(sha256))
                                     hashes.Add(sha256);
+
+                                // Optional "validUntil" (ISO 8601, UTC): a grace period for the
+                                // previous release while the new one becomes downloadable.
+                                string validUntil = asm["validUntil"]?.Type == JTokenType.Date
+                                    ? asm["validUntil"].Value<DateTime>().ToUniversalTime().ToString("o")
+                                    : asm["validUntil"]?.Value<string>();
+                                if (!string.IsNullOrWhiteSpace(sha256) && !string.IsNullOrWhiteSpace(validUntil)
+                                    && DateTime.TryParse(validUntil, System.Globalization.CultureInfo.InvariantCulture,
+                                        System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var expiry))
+                                    hashExpiryUtc[sha256] = expiry;
                             }
                             if (hashes.Count > 0)
                                 allowedHashesByGuid[guid] = hashes;
@@ -200,7 +255,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                     return Empty;
                 }
 
-                return new AllowedModsSnapshot(allowedGuids, displayNamesByGuid, allowedHashesByGuid);
+                return new AllowedModsSnapshot(allowedGuids, displayNamesByGuid, allowedHashesByGuid, versionsByGuid, hashExpiryUtc);
             }
 
             /// <summary>Parses the legacy pipe-delimited text format (fallback).</summary>
@@ -236,7 +291,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 }
 
                 // No hash constraints when loading legacy text format
-                return new AllowedModsSnapshot(allowedGuids, displayNamesByGuid, null);
+                return new AllowedModsSnapshot(allowedGuids, displayNamesByGuid, null, null, null);
             }
 
             /// <summary>Auto-detects JSON vs legacy text and parses accordingly.</summary>
@@ -270,6 +325,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         private GameObject _canvasObj, _profilePicContainer, _bgObj, _warnContainer, _debugWindowObj, _flagContainer;
         private TextMeshProUGUI _statsText, _illegalWarningText, _missingWarningText, _debugWindowText;
         private TextMeshProUGUI _nonCompliantPlayersText;
+        private TextMeshProUGUI _updateNoticeText;
         private TextMeshProUGUI _cardNameText, _cardMMRText, _cardRankText, _cardSecondaryText, _cardSyncText;
         private Image _bgImage, _debugWindowBg, _rankColorStripImage;
         private RawImage _profileIcon, _flagIcon;
@@ -283,6 +339,12 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         };
 
         private AllowedModsSnapshot _allowedModsSnapshot = AllowedModsSnapshot.Empty;
+
+        // Newest SBGL Unified Mod on Thunderstore and when it was published - the "when" behind
+        // the update notices. Null until the first successful check.
+        private System.Version _latestPublishedVersion;
+        private DateTime? _latestPublishedUtc;
+        private float _nextReleaseCheckTime = 0f;
         private readonly HashSet<string> _observedRuntimeAssemblyPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private Steamworks.Data.Lobby _currentLobby;
         private bool _inLobby = false;
@@ -528,7 +590,11 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             if (string.IsNullOrWhiteSpace(sha256))
                 return PluginVerdict.Unverifiable;
 
-            return allowedHashes.Contains(sha256) ? PluginVerdict.Approved : PluginVerdict.HashMismatch;
+            if (!allowedHashes.Contains(sha256)) return PluginVerdict.HashMismatch;
+
+            // A previous release kept valid for a grace period stops passing once it expires.
+            var expiry = _allowedModsSnapshot.GetHashExpiryUtc(sha256);
+            return expiry != null && DateTime.UtcNow > expiry.Value ? PluginVerdict.HashMismatch : PluginVerdict.Approved;
         }
 
         private static bool IsFailingVerdict(PluginVerdict verdict)
@@ -560,6 +626,16 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                     continue;
 
                 var verdict = EvaluatePlugin(guid, GetPluginSha256(plugin));
+
+                if (verdict == PluginVerdict.HashMismatch && string.Equals(guid, UNIFIED_MOD_GUID, StringComparison.OrdinalIgnoreCase))
+                {
+                    var versionState = GetUnifiedVersionState(OwnUnifiedVersion, trustNewerVersion: true);
+                    if (versionState == UnifiedVersionState.Outdated || versionState == UnifiedVersionState.AwaitingApproval)
+                    {
+                        result.OwnUnifiedVersionState = versionState;
+                        continue;
+                    }
+                }
 
                 // Don't break early - a full list of what failed is more useful than the
                 // first failure, and the report now carries per-plugin verdicts to peers.
@@ -594,6 +670,21 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             return result;
         }
 
+        /// <summary>Row wording for a Unified Mod that is the wrong release, or null when it isn't.</summary>
+        private string DescribeUnifiedVersionProblem(UnifiedVersionState state, System.Version version)
+        {
+            var approved = _allowedModsSnapshot.GetApprovedVersion(UNIFIED_MOD_GUID);
+            switch (state)
+            {
+                case UnifiedVersionState.Outdated:
+                    return $"SBGL Unified Mod outdated ({version}) - update to {approved}";
+                case UnifiedVersionState.AwaitingApproval:
+                    return $"SBGL Unified Mod {version} awaiting league approval";
+                default:
+                    return null;
+            }
+        }
+
         /// <summary>
         /// Re-applies our own scan to our own row in the compliance panel.
         /// The self entry used to be built once at first discovery and never updated, so
@@ -616,6 +707,12 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             // instead of leaving the player with a warning and nothing to act on.
             foreach (var unapproved in scan.UnapprovedModNames)
                 self.FailedPlugins.Add($"{unapproved} ({PluginVerdict.UnknownGuid})");
+
+            self.UnifiedVersionState = scan.OwnUnifiedVersionState;
+            self.UpdateDeadlineUtc = _allowedModsSnapshot.GetHashExpiryUtc(GetOwnUnifiedModSha256());
+            string versionNote = DescribeUnifiedVersionProblem(scan.OwnUnifiedVersionState, OwnUnifiedVersion);
+            if (versionNote != null)
+                self.FailedPlugins.Add(versionNote);
 
             // Same rule the receiver applies to a peer's MOD record.
             self.IsCompliant = !IsFailingVerdict(EvaluatePlugin("com.sbgl.unified", GetOwnUnifiedModSha256()));
@@ -1138,6 +1235,9 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                     if (status.IsLegacyReport)
                         GUILayout.Label("      <color=#AAAAFF>◐ old mod version - report not verifiable</color>", modStyle);
 
+                    if (status.UpdateDeadlineUtc != null && status.IsCompliant)
+                        GUILayout.Label($"      <color=yellow>⏳ must update to {_allowedModsSnapshot.GetApprovedVersion(UNIFIED_MOD_GUID)} by {status.UpdateDeadlineUtc.Value.ToLocalTime():MMM d, h:mm tt}</color>", modStyle);
+
                     if (_remotePlayerMods.TryGetValue(status.SteamId, out string modList))
                     {
                         var failedNames = new HashSet<string>(
@@ -1156,7 +1256,8 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                             string modColor, modPrefix;
                             if (status.HasVerifiedReport)
                             {
-                                bool failed = failedNames.Contains(modName.Trim().ToLowerInvariant());
+                                // Our own mod's line follows the Unified Mod verdict; it never appears in FailedPlugins by name.
+                                bool failed = isOurMod ? !status.IsCompliant : failedNames.Contains(modName.Trim().ToLowerInvariant());
                                 modColor  = failed ? "#FF4444" : "#AAFFAA";
                                 modPrefix = failed ? "✗" : "✓";
                             }
@@ -1848,6 +1949,8 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             status.IsLegacyReport = false;
             status.TimedOut = false; // a late report clears the timeout verdict
             status.FailedPlugins.Clear();
+            status.UnifiedVersionState = UnifiedVersionState.Current;
+            status.UpdateDeadlineUtc = null;
 
             bool unifiedModVerified = false;
             bool manifestMissing = false;
@@ -1872,6 +1975,18 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                                 manifestMissing = true;
                             unifiedModVerified = modVerdict == PluginVerdict.Approved;
                             displayList.Append($"⚡SBGL.UnifiedMod|{f[1]};");
+                            if (unifiedModVerified)
+                                status.UpdateDeadlineUtc = _allowedModsSnapshot.GetHashExpiryUtc(f[2]);
+
+                            // A failed pin is usually just an old release. Say so, so the
+                            // panel reads "needs to update" rather than looking like tampering.
+                            if (modVerdict == PluginVerdict.HashMismatch && System.Version.TryParse(f[1], out var peerVersion))
+                            {
+                                RefreshReleaseIfPeerIsAhead(peerVersion);
+                                status.UnifiedVersionState = GetUnifiedVersionState(peerVersion);
+                                string versionNote = DescribeUnifiedVersionProblem(status.UnifiedVersionState, peerVersion);
+                                if (versionNote != null) status.FailedPlugins.Add(versionNote);
+                            }
                         }
                         break;
 
@@ -2957,6 +3072,123 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                     _allowedModsSnapshot = AllowedModsSnapshot.Parse(w.downloadHandler.text);
                 }
             }
+
+            if (Time.realtimeSinceStartup >= _nextReleaseCheckTime)
+            {
+                _nextReleaseCheckTime = Time.realtimeSinceStartup + RELEASE_CHECK_INTERVAL;
+                yield return CheckLatestReleaseRoutine();
+            }
+        }
+
+        /// <summary>
+        /// Reads the newest published version and its publish time from Thunderstore. Only
+        /// used for the wording of update notices; compliance itself still comes from the
+        /// approved-mods manifest.
+        /// </summary>
+        IEnumerator CheckLatestReleaseRoutine()
+        {
+            using (UnityWebRequest w = UnityWebRequest.Get(THUNDERSTORE_PACKAGE_URL))
+            {
+                w.timeout = 10;
+                yield return w.SendWebRequest();
+                if (w.result != UnityWebRequest.Result.Success) yield break;
+
+                try
+                {
+                    var latest = JObject.Parse(w.downloadHandler.text)["latest"];
+                    if (System.Version.TryParse((string)latest?["version_number"], out var version))
+                        _latestPublishedVersion = version;
+                    if (DateTime.TryParse((string)latest?["date_created"], System.Globalization.CultureInfo.InvariantCulture,
+                            System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var published))
+                        _latestPublishedUtc = published;
+                }
+                catch (Exception ex)
+                {
+                    UnityEngine.Debug.LogWarning($"[SBGL-CompPluginCheck] Could not read the latest release from Thunderstore: {ex.Message}");
+                }
+            }
+        }
+
+        private enum UnifiedVersionState
+        {
+            Unknown,          // no manifest version to compare against
+            Current,          // matches the approved version
+            Outdated,         // older than the approved version: must update
+            AwaitingApproval  // the newest Thunderstore release, not yet on the approved list
+        }
+
+        private static System.Version OwnUnifiedVersion => UnifiedPlugin.Instance?.Info.Metadata.Version ?? new System.Version(0, 0, 0);
+
+        /// <summary>
+        /// Where a reported Unified Mod version stands against the approved list. This only
+        /// explains a failed hash check; it never makes a build pass. A version string is
+        /// self-reported, so "outdated" can be claimed by a modified client too - it is still
+        /// non-compliant, only described differently.
+        /// </summary>
+        /// <param name="trustNewerVersion">
+        /// True for our own copy: the version is read from our own plugin, not claimed by a
+        /// peer, so a newer-than-approved build is simply waiting for approval. This covers the
+        /// window between a Thunderstore upload and the approved-list update, even before
+        /// Thunderstore's listing refreshes or when it can't be reached.
+        /// </param>
+        private UnifiedVersionState GetUnifiedVersionState(System.Version version, bool trustNewerVersion = false)
+        {
+            var approved = _allowedModsSnapshot.GetApprovedVersion(UNIFIED_MOD_GUID);
+            if (approved == null || version == null) return UnifiedVersionState.Unknown;
+            if (version < approved) return UnifiedVersionState.Outdated;
+            if (version == approved) return UnifiedVersionState.Current;
+            // A peer's newer version is only believable if Thunderstore has actually published it.
+            return trustNewerVersion || (_latestPublishedVersion != null && version == _latestPublishedVersion)
+                ? UnifiedVersionState.AwaitingApproval
+                : UnifiedVersionState.Unknown;
+        }
+
+        private float _lastPeerTriggeredReleaseCheck = -1000f;
+        private const float PEER_RELEASE_CHECK_COOLDOWN = 120f;
+
+        /// <summary>
+        /// A peer reported a Unified Mod newer than both the approved list and the release we
+        /// last saw - most likely one just uploaded. Re-check Thunderstore now rather than
+        /// waiting up to RELEASE_CHECK_INTERVAL, so they read as "awaiting approval" quickly.
+        /// </summary>
+        private void RefreshReleaseIfPeerIsAhead(System.Version peerVersion)
+        {
+            var approved = _allowedModsSnapshot.GetApprovedVersion(UNIFIED_MOD_GUID);
+            if (approved == null || peerVersion <= approved) return;
+            if (_latestPublishedVersion != null && peerVersion <= _latestPublishedVersion) return;
+            if (Time.realtimeSinceStartup - _lastPeerTriggeredReleaseCheck < PEER_RELEASE_CHECK_COOLDOWN) return;
+
+            _lastPeerTriggeredReleaseCheck = Time.realtimeSinceStartup;
+            _nextReleaseCheckTime = Time.realtimeSinceStartup + RELEASE_CHECK_INTERVAL;
+            StartCoroutine(CheckLatestReleaseRoutine());
+        }
+
+        /// <summary>"Oct 1, 3:18 PM (2 days ago)" in the player's local time, or "" if unknown.</summary>
+        private static string DescribeReleaseTime(DateTime? publishedUtc)
+        {
+            if (publishedUtc == null) return "";
+            var local = publishedUtc.Value.ToLocalTime();
+            var age = DateTime.UtcNow - publishedUtc.Value;
+            string ago = age.TotalMinutes < 60 ? $"{Math.Max(1, (int)age.TotalMinutes)} min ago"
+                       : age.TotalHours < 24  ? $"{(int)age.TotalHours} hours ago"
+                       : $"{(int)age.TotalDays} days ago";
+            return $"{local:MMM d, h:mm tt} ({ago})";
+        }
+
+        /// <summary>"in 2 hours" / "in 25 min" until the given UTC time.</summary>
+        private static string DescribeTimeLeft(DateTime deadlineUtc)
+        {
+            var left = deadlineUtc - DateTime.UtcNow;
+            if (left.TotalMinutes < 60) return $"in {Math.Max(1, (int)Math.Ceiling(left.TotalMinutes))} min";
+            if (left.TotalHours < 48) return $"in {(int)left.TotalHours} hours";
+            return $"in {(int)left.TotalDays} days";
+        }
+
+        /// <summary>Release time for the approved version, when Thunderstore's latest is that version.</summary>
+        private string DescribeApprovedReleaseTime()
+        {
+            var approved = _allowedModsSnapshot.GetApprovedVersion(UNIFIED_MOD_GUID);
+            return approved != null && approved == _latestPublishedVersion ? DescribeReleaseTime(_latestPublishedUtc) : "";
         }
 
         private void UpdateUIReport()
@@ -3022,7 +3254,83 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 if (_missingWarningText.gameObject.activeSelf) _missingWarningText.text = "<color=yellow>MISSING MODS:</color>\n<size=18>" + string.Join(", ", localPluginScan.MissingModNames) + "</size>";
             }
 
+            UpdateOwnUpdateNotice(localPluginScan);
+
             UpdateNonCompliantPlayersBanner();
+        }
+
+        /// <summary>
+        /// Tells the player when their Unified Mod is out of date and when the update came out.
+        /// A required update shows everywhere, since the player is already flagged; an update
+        /// that isn't required yet only shows on the Driving Range, as a heads-up.
+        /// </summary>
+        private void UpdateOwnUpdateNotice(LocalPluginScanResult scan)
+        {
+            if (_updateNoticeText == null) return;
+
+            var own = OwnUnifiedVersion;
+            var approved = _allowedModsSnapshot.GetApprovedVersion(UNIFIED_MOD_GUID);
+            string scene = SceneManager.GetActiveScene().name;
+            bool isRange = scene.Contains("Driving") || scene.Contains("Range");
+            string text = null;
+
+            var deadline = _allowedModsSnapshot.GetHashExpiryUtc(GetOwnUnifiedModSha256());
+
+            if (deadline != null && DateTime.UtcNow <= deadline.Value && approved != null && own < approved)
+            {
+                // Still accepted, but only until the grace period ends.
+                string released = DescribeApprovedReleaseTime();
+                _updateNoticeText.color = Color.yellow;
+                _updateNoticeText.fontStyle = FontStyles.Bold;
+                _updateNoticeText.fontSize = 22;
+                text = $"UPDATE REQUIRED BY {deadline.Value.ToLocalTime():MMM d, h:mm tt} ({DescribeTimeLeft(deadline.Value)})\n<size=16>"
+                     + $"SBGL Unified Mod {approved} "
+                     + (released.Length > 0 ? $"was released {released}" : "is on its way to Thunderstore - check your mod manager shortly")
+                     + $". After the deadline, {own} is non-compliant.</size>";
+            }
+            else if (scan.OwnUnifiedVersionState == UnifiedVersionState.Outdated)
+            {
+                string released = DescribeApprovedReleaseTime();
+                _updateNoticeText.color = Color.red;
+                _updateNoticeText.fontStyle = FontStyles.Bold;
+                _updateNoticeText.fontSize = 28;
+                text = "NON-COMPLIANT: SBGL UNIFIED MOD OUT OF DATE\n<size=18>"
+                     + $"You have {own}. Version {approved} is required"
+                     + (released.Length > 0 ? $" (released {released})" : "")
+                     + ". Update through your mod manager.</size>";
+            }
+            else if (scan.OwnUnifiedVersionState == UnifiedVersionState.AwaitingApproval)
+            {
+                _updateNoticeText.color = Color.yellow;
+                _updateNoticeText.fontStyle = FontStyles.Normal;
+                _updateNoticeText.fontSize = 18;
+                text = $"SBGL Unified Mod {own} is waiting for league approval.\n<size=16>You are non-compliant until it is approved.</size>";
+            }
+            else if (isRange && _latestPublishedVersion != null && _latestPublishedVersion > own
+                     && (approved == null || _latestPublishedVersion > approved))
+            {
+                _updateNoticeText.color = Color.yellow;
+                _updateNoticeText.fontStyle = FontStyles.Normal;
+                _updateNoticeText.fontSize = 18;
+                string released = DescribeReleaseTime(_latestPublishedUtc);
+                text = $"UPDATE AVAILABLE: SBGL Unified Mod {_latestPublishedVersion}"
+                     + (released.Length > 0 ? $" - released {released}" : "")
+                     + "\n<size=16>Once it is approved, older versions are non-compliant. Update before your next league match.</size>";
+            }
+
+            _updateNoticeText.gameObject.SetActive(text != null);
+            if (text != null) _updateNoticeText.text = text;
+        }
+
+        /// <summary>
+        /// Failing only because of an old Unified Mod release - nothing else wrong. They are
+        /// non-compliant like anyone else; the banner adds the reason so they know to update.
+        /// </summary>
+        private static bool IsOnlyOutdated(PlayerComplianceStatus s)
+        {
+            return s != null && !s.TimedOut && !s.HasMelonLoader && !s.SelfReportedIllegal
+                && s.UnifiedVersionState == UnifiedVersionState.Outdated
+                && s.FailedPlugins.Count == 1;
         }
 
         /// <summary>
@@ -3043,12 +3351,19 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             if (_nonCompliantPlayersText == null) return;
 
             var names = new List<string>();
+            bool anyOutdated = false;
             foreach (var kvp in _playerComplianceStatus)
             {
                 if (!IsNonCompliant(kvp.Value)) continue;
-                names.Add(_playerDisplayNames.TryGetValue(kvp.Key, out string dn) && !string.IsNullOrWhiteSpace(dn)
+                string name = _playerDisplayNames.TryGetValue(kvp.Key, out string dn) && !string.IsNullOrWhiteSpace(dn)
                     ? dn
-                    : kvp.Key.ToString());
+                    : kvp.Key.ToString();
+                if (IsOnlyOutdated(kvp.Value))
+                {
+                    name += " (outdated mod)";
+                    anyOutdated = true;
+                }
+                names.Add(name);
             }
 
             if (names.Count == 0)
@@ -3058,9 +3373,15 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             }
 
             names.Sort(StringComparer.OrdinalIgnoreCase);
-            _nonCompliantPlayersText.text = names.Count == 1
+            string text = names.Count == 1
                 ? $"{names[0]} is non compliant!"
                 : $"{string.Join(", ", names.ToArray())} are non compliant!";
+            if (anyOutdated)
+            {
+                var approved = _allowedModsSnapshot.GetApprovedVersion(UNIFIED_MOD_GUID);
+                text += $"\n<size=18>Outdated mods must update to SBGL Unified Mod {approved}</size>";
+            }
+            _nonCompliantPlayersText.text = text;
             _nonCompliantPlayersText.gameObject.SetActive(true);
         }
         
@@ -3197,6 +3518,11 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             _illegalWarningText = new GameObject("RT").AddComponent<TextMeshProUGUI>(); _illegalWarningText.transform.SetParent(_warnContainer.transform, false);
             _illegalWarningText.text = "ILLEGAL MODS DETECTED"; _illegalWarningText.color = Color.red; _illegalWarningText.fontSize = 32;
             _illegalWarningText.alignment = TextAlignmentOptions.Center; _illegalWarningText.fontStyle = FontStyles.Bold; _illegalWarningText.gameObject.SetActive(false);
+
+            // Our own update status: required (outdated), awaiting approval, or available.
+            _updateNoticeText = new GameObject("UP").AddComponent<TextMeshProUGUI>(); _updateNoticeText.transform.SetParent(_warnContainer.transform, false);
+            _updateNoticeText.fontSize = 18; _updateNoticeText.alignment = TextAlignmentOptions.Center;
+            _updateNoticeText.gameObject.SetActive(false);
 
             // Names the non-compliant players in the lobby. Every client evaluates the
             // lobby independently, so this appears for everyone rather than only staff.

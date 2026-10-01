@@ -5,7 +5,7 @@
         <AssemblyName>SBGL.UnifiedMod</AssemblyName>
         <RootNamespace>SBGL.UnifiedMod</RootNamespace>
         <Product>Super Battle Golf League Unified Mod</Product>
-        <Version>0.1.29</Version>
+        <Version>0.1.30</Version>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
         <LangVersion>latest</LangVersion>
         <RestoreAdditionalProjectSources>
@@ -173,6 +173,16 @@
         <ZipDirectory SourceDirectory="$(ThunderstoreDir)" DestinationFile="$(ThunderstoreZip)" />
 
         <Message Importance="high" Text="Thunderstore package: $(ThunderstoreZip)" />
+
+        <!-- The matching approved-mods gist file: new hash current, previous release kept valid
+             for ApprovedModsGraceHours. Needs network access to read the gist; a failure here
+             only warns, so offline builds still succeed. -->
+        <PropertyGroup>
+            <ApprovedModsGraceHours Condition="'$(ApprovedModsGraceHours)' == ''">24</ApprovedModsGraceHours>
+            <ApprovedModsFile>$(ThunderstoreRoot)\Approved_Mods_$(Version).json</ApprovedModsFile>
+        </PropertyGroup>
+        <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\tools\New-ApprovedModsJson.ps1&quot; -DllPath &quot;$(ThunderstoreDir)\$(AssemblyName).dll&quot; -Version $(Version) -OutFile &quot;$(ApprovedModsFile)&quot; -GraceHours $(ApprovedModsGraceHours)"
+              ContinueOnError="WarnAndContinue" />
     </Target>
 
 </Project>

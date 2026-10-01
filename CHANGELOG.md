@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.30
+* Added an out-of-date warning. When a newer SBGL Unified Mod is required, the mod now shows "NON-COMPLIANT: SBGL UNIFIED MOD OUT OF DATE" with your version, the required version and when it was released, instead of "ILLEGAL MODS DETECTED".
+* When a new version is released, the Driving Range shows "UPDATE AVAILABLE" with the version and its release time, so players can update before it becomes required.
+* When a new version is released, players on the previous version now have a set amount of time to update. Until then they stay compliant and see "UPDATE REQUIRED BY" with the deadline. After it, the previous version is non-compliant.
+* Players who update before the new version is approved now see "waiting for league approval" instead of "ILLEGAL MODS DETECTED".
+* Other players with an outdated mod are listed as non-compliant with "(outdated mod)" next to their name, and their compliance panel row shows which version they need.
+* Fixed another player's SBGL Unified Mod showing a green tick in their mod list when it had failed the compliance check.
+
 ## 0.1.29
 * Fixed match scores not reaching the website. Matches were created, but every player stayed at 0 points with no finishing position, because the website now expects updates in a different format and refused every score update with "id is required". Scores, over/under and final positions are now saved after each hole and at the end of the match.
 * The same change fixes queue and matchmaking session updates (leaving the queue, ready, accept and completing a session), which were being refused in the same way.
