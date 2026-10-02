@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.1.32
+* The "UPDATE REQUIRED BY", "UPDATE AVAILABLE" and "waiting for league approval" notices are now hidden during a round and only appear on the Driving Range and main menu. The red "NON-COMPLIANT: SBGL UNIFIED MOD OUT OF DATE" warning still shows everywhere.
+
 ## 0.1.31
 * Fixed team matches (2v2, 3v3 and 4v4) never uploading to the website. Team matches are submitted once at the end with the final Red and Blue scores, but the end-of-match upload was being skipped for them.
 * Fixed players from a previous match being included in the next match played in the same lobby, including players who had already left. Each match now starts with only the players actually in it.

@@ -3272,11 +3272,19 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             var approved = _allowedModsSnapshot.GetApprovedVersion(UNIFIED_MOD_GUID);
             string scene = SceneManager.GetActiveScene().name;
             bool isRange = scene.Contains("Driving") || scene.Contains("Range");
+            // Heads-ups stay out of the way during a round; only being flagged shows mid-round.
+            bool isOutsideRound = isRange || scene.IndexOf("menu", StringComparison.OrdinalIgnoreCase) >= 0;
             string text = null;
 
             var deadline = _allowedModsSnapshot.GetHashExpiryUtc(GetOwnUnifiedModSha256());
 
-            if (deadline != null && DateTime.UtcNow <= deadline.Value && approved != null && own < approved)
+            bool inGracePeriod = deadline != null && DateTime.UtcNow <= deadline.Value && approved != null && own < approved;
+
+            if (!isOutsideRound && scan.OwnUnifiedVersionState != UnifiedVersionState.Outdated)
+            {
+                // Mid-round: only the red non-compliant banner (Outdated, below) is shown.
+            }
+            else if (inGracePeriod)
             {
                 // Still accepted, but only until the grace period ends.
                 string released = DescribeApprovedReleaseTime();
