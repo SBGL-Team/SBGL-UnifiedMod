@@ -813,6 +813,19 @@ namespace SBGLLiveLeaderboard
         }
 
         /// <summary>
+        /// Clears the previous match's live standings between matches in the same lobby. They
+        /// used to survive until the main menu, so the next match's roster - read at round start,
+        /// before its first scoreboard - came from the previous match, including players who had
+        /// since left. The final snapshot is kept for the Driving Range display.
+        /// </summary>
+        public void ResetForNewMatch()
+        {
+            _persistentLeaderboard.Clear();
+            _lastKnownRoundPlayers.Clear();
+            _roundCacheActive = false;
+        }
+
+        /// <summary>
         /// Captures the current leaderboard state as a final snapshot before leaving gameplay.
         /// Call this when transitioning away from a gameplay scene to preserve match-end scores.
         /// </summary>

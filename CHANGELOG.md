@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.31
+* Fixed team matches (2v2, 3v3 and 4v4) never uploading to the website. Team matches are submitted once at the end with the final Red and Blue scores, but the end-of-match upload was being skipped for them.
+* Fixed players from a previous match being included in the next match played in the same lobby, including players who had already left. Each match now starts with only the players actually in it.
+
 ## 0.1.30
 * Added an out-of-date warning. When a newer SBGL Unified Mod is required, the mod now shows "NON-COMPLIANT: SBGL UNIFIED MOD OUT OF DATE" with your version, the required version and when it was released, instead of "ILLEGAL MODS DETECTED".
 * When a new version is released, the Driving Range shows "UPDATE AVAILABLE" with the version and its release time, so players can update before it becomes required.

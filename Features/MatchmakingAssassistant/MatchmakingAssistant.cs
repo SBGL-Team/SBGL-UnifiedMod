@@ -493,7 +493,7 @@ namespace SBGLeagueAutomation
             
             // On return to driving range, finalize one last time before clearing per-match state.
             if (sceneName.Contains("drivingrange") || sceneName.Contains("driving range")) {
-                if (!_matchStatsSubmitted && !string.IsNullOrEmpty(_currentMatchId)) {
+                if (!_matchStatsSubmitted && (!string.IsNullOrEmpty(_currentMatchId) || HasPendingTeamSubmission)) {
                     Log("<color=cyan>[Match Stats] Returned to Driving Range - running final match finalization before reset...</color>");
                     StartCoroutine(FinalizeAndResetAfterDrivingRange());
                 } else {
@@ -662,8 +662,18 @@ namespace SBGLeagueAutomation
             }
         }
 
+        /// <summary>
+        /// A team match was played this round and is waiting for its one end-of-match submit.
+        /// Team matches create no Match record at round start, so the end-of-match paths can't
+        /// key off _currentMatchId for them - which used to mean they never uploaded at all.
+        /// </summary>
+        private bool HasPendingTeamSubmission =>
+            !_matchStatsSubmitted && IsCurrentMatchTeamRanked()
+            && _cachedTeamAssignments != null && _cachedTeamAssignments.Count > 0;
+
         private void TryBeginAssemblyDrivenFinalization(string source) {
-            if (_endOfMatchSignalCoroutine != null || _matchStatsSubmitted || string.IsNullOrWhiteSpace(_currentMatchId)) {
+            if (_endOfMatchSignalCoroutine != null || _matchStatsSubmitted
+                || (string.IsNullOrWhiteSpace(_currentMatchId) && !HasPendingTeamSubmission)) {
                 return;
             }
 
@@ -1414,6 +1424,12 @@ namespace SBGLeagueAutomation
             _finalLeaderboardSnapshot.Clear();
             MatchResultSubmissionService.ReceivedP2PMatchId = null;
             _lastUploadedPlayerCount = -1;
+
+            // Runs after the finished match's snapshot was taken, so nothing still needs the live
+            // standings - and the next match must not start from them.
+            var liveLeaderboard = UnityEngine.Object.FindAnyObjectByType<SBGLLiveLeaderboard.LiveLeaderboardPlugin>(FindObjectsInactive.Include);
+            liveLeaderboard?.ResetForNewMatch();
+
             Log("<color=cyan>[Match] Per-match state reset - ready for new round</color>");
         }
 
