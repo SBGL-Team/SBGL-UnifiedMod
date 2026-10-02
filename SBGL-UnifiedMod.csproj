@@ -178,7 +178,7 @@
              for ApprovedModsGraceHours. Needs network access to read the gist; a failure here
              only warns, so offline builds still succeed. -->
         <PropertyGroup>
-            <ApprovedModsGraceHours Condition="'$(ApprovedModsGraceHours)' == ''">24</ApprovedModsGraceHours>
+            <ApprovedModsGraceHours Condition="'$(ApprovedModsGraceHours)' == ''">1</ApprovedModsGraceHours>
             <ApprovedModsFile>$(ThunderstoreRoot)\Approved_Mods_$(Version).json</ApprovedModsFile>
         </PropertyGroup>
         <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\tools\New-ApprovedModsJson.ps1&quot; -DllPath &quot;$(ThunderstoreDir)\$(AssemblyName).dll&quot; -Version $(Version) -OutFile &quot;$(ApprovedModsFile)&quot; -GraceHours $(ApprovedModsGraceHours)"
