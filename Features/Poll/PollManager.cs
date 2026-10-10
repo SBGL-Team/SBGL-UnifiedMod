@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using BepInEx.Configuration;
 using Steamworks;
 using UnityEngine;
 using UnityEngine.InputSystem;
@@ -19,6 +20,7 @@ namespace SBGL.UnifiedMod.Features.Poll
         private Dictionary<ulong, int> _votes = new Dictionary<ulong, int>();
         private float _pollEndTime;
         private ulong _pollHostSteamId;
+        private string _pollHostName;
         private bool _hasVoted;
 
         // Results snapshot updated from incoming SBGL_POLL_VOTE packets
@@ -44,6 +46,15 @@ namespace SBGL.UnifiedMod.Features.Poll
         private const string PREFIX_CANCEL = "SBGL_POLL_CANCEL:";
 
         private static readonly Key[] VoteKeys = { Key.F1, Key.F2, Key.F3, Key.F4 };
+
+        // Config entry reference (injected by UnifiedPlugin)
+        private ConfigEntry<Key> _configCreatePanelKey;
+        private Key CreatePanelKey { get => _configCreatePanelKey?.Value ?? Key.F7; }
+
+        public void SetConfig(ConfigEntry<Key> createPanelKey)
+        {
+            _configCreatePanelKey = createPanelKey;
+        }
 
         private static readonly (string Question, string[] Options)[] Presets =
         {
@@ -77,6 +88,7 @@ namespace SBGL.UnifiedMod.Features.Poll
         private GUIStyle _presetActiveStyle;
         private GUIStyle _labelStyle;
         private GUIStyle _fieldStyle;
+        private GUIStyle _startedByStyle;
 
         // Aliases kept for shared code paths
         private GUIStyle _centeredLabel;
@@ -99,8 +111,9 @@ namespace SBGL.UnifiedMod.Features.Poll
             var kb = Keyboard.current;
             if (kb == null) return;
 
-            // F7 toggles the create panel
-            if (kb[Key.F7].wasPressedThisFrame)
+            // The create-panel key (F7 by default) toggles the create panel
+            Key createKey = CreatePanelKey;
+            if (createKey != Key.None && kb[createKey].wasPressedThisFrame)
                 _showCreatePanel = !_showCreatePanel;
 
             // F1–F4 cast votes when a poll is active and user hasn't voted yet
@@ -147,6 +160,7 @@ namespace SBGL.UnifiedMod.Features.Poll
             _voteCounts         = new int[_activePollOptions.Length];
             _pollEndTime        = Time.time + POLL_DURATION;
             _pollHostSteamId    = hostId;
+            _pollHostName       = ResolvePlayerName(hostId);
             _hasVoted           = false;
             _pollWindowPositioned = false; // re-center for new poll
 
@@ -177,11 +191,24 @@ namespace SBGL.UnifiedMod.Features.Poll
                 ClearActivePoll();
         }
 
+        // The starter is the packet's sender, not a name in the payload, so it can't be faked.
+        // Steam only knows names for players it has seen, so a blank result is retried on draw.
+        private static string ResolvePlayerName(ulong steamId)
+        {
+            try
+            {
+                string name = new Friend(steamId).Name;
+                return string.IsNullOrWhiteSpace(name) || name == "[unknown]" ? null : name;
+            }
+            catch { return null; }
+        }
+
         private void ClearActivePoll()
         {
             _activePollId       = null;
             _activePollQuestion = null;
             _activePollOptions  = null;
+            _pollHostName       = null;
             _votes.Clear();
             _voteCounts         = new int[0];
             _hasVoted           = false;
@@ -202,6 +229,7 @@ namespace SBGL.UnifiedMod.Features.Poll
             _voteCounts           = new int[options.Length];
             _pollEndTime          = Time.time + POLL_DURATION;
             _pollHostSteamId      = SteamClient.SteamId;
+            _pollHostName         = SteamClient.Name;
             _hasVoted             = false;
             _pollWindowPositioned = false;
 
@@ -256,7 +284,7 @@ namespace SBGL.UnifiedMod.Features.Poll
             if (_activePollId != null)
             {
                 int optCount = _activePollOptions?.Length ?? 0;
-                _pollWindowRect.height = 110f + optCount * 46f;
+                _pollWindowRect.height = 130f + optCount * 46f;
 
                 if (!_pollWindowPositioned)
                 {
@@ -275,7 +303,7 @@ namespace SBGL.UnifiedMod.Features.Poll
             }
 
             if (_showCreatePanel)
-                _createWindowRect = GUI.Window(CREATE_WINDOW_ID, _createWindowRect, DrawCreateWindow, "Create Poll  [F7]", _windowStyle);
+                _createWindowRect = GUI.Window(CREATE_WINDOW_ID, _createWindowRect, DrawCreateWindow, $"Create Poll  [{CreatePanelKey}]", _windowStyle);
         }
 
         private static Texture2D MakeTex(Color col)
@@ -385,6 +413,13 @@ namespace SBGL.UnifiedMod.Features.Poll
                 fontSize = 12
             };
 
+            _startedByStyle = new GUIStyle(_labelStyle)
+            {
+                fontSize  = 11,
+                fontStyle = FontStyle.Italic,
+                alignment = TextAnchor.MiddleCenter
+            };
+
             // Aliases for shared code
             _centeredLabel = _questionStyle;
             _voteButton    = _optionStyle;
@@ -402,6 +437,12 @@ namespace SBGL.UnifiedMod.Features.Poll
             // Question
             GUI.Label(new Rect(10f, cy, w, 44f), _activePollQuestion ?? "", _questionStyle);
             cy += 48f;
+
+            // Who started it
+            if (_pollHostName == null && Event.current.type == EventType.Repaint && Time.frameCount % 60 == 0)
+                _pollHostName = ResolvePlayerName(_pollHostSteamId);
+            GUI.Label(new Rect(10f, cy, w, 18f), $"Started by {_pollHostName ?? "another player"}", _startedByStyle);
+            cy += 20f;
 
             // Divider
             GUI.DrawTexture(new Rect(10f, cy, w, 1f), _texDivider);

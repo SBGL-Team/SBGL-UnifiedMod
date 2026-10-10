@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.1.38
+* Fixed players being briefly flagged as non-compliant at the start of each hole. A player who hasn't sent their mod list yet is now asked for it every few seconds, instead of being flagged after 15 seconds and cleared up to a minute later.
+
+## 0.1.37
+* The key that opens the Create Poll window can now be changed. It is the "Create Poll Key" setting under Poll.UI in the mod's config, and it defaults to F7.
+* Removed the hit tracker (the F6 overlay of who hit whom).
+
+## 0.1.36
+* The yellow "UPDATE REQUIRED BY", "UPDATE AVAILABLE" and "waiting for league approval" notices now only appear on the Driving Range. They no longer show in matches or on the main menu. The red "NON-COMPLIANT: SBGL UNIFIED MOD OUT OF DATE" warning still shows everywhere.
+
+## 0.1.35
+* Polls now show who started them ("Started by <name>") under the question.
+
+## 0.1.34
+* Reduced network traffic from the mod compliance check. Each player's mod list is now sent once when another player is first seen, then re-sent every 60 seconds. Before, it was re-sent every 10 seconds or more often at high frame rates.
+
+## 0.1.33
+* Player cards now show a country flag only. State and province flags are no longer shown.
+* Players who keep their region private now show the SBGL logo instead of a flag.
+* The mod no longer sends your region or state when you join the matchmaking queue.
+
 ## 0.1.32
 * The "UPDATE REQUIRED BY", "UPDATE AVAILABLE" and "waiting for league approval" notices are now hidden during a round and only appear on the Driving Range and main menu. The red "NON-COMPLIANT: SBGL UNIFIED MOD OUT OF DATE" warning still shows everywhere.
 

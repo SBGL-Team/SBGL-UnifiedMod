@@ -1554,9 +1554,7 @@ namespace SBGLeagueAutomation
             _userProfile = new PlayerProfile {
                 id = sharedProfile.ID,
                 display_name = sharedProfile.DisplayName,
-                current_mmr = sharedProfile.CurrentMMR,
-                region = sharedProfile.Region,
-                state_province = string.Empty
+                current_mmr = sharedProfile.CurrentMMR
             };
 
             Log($"<color=green>[{logContext}] ✓ Using shared profile: {_userProfile.display_name} ({_userProfile.id})</color>");
@@ -1844,8 +1842,6 @@ namespace SBGLeagueAutomation
                     ["user_id"] = GetOrDeriveUserUUID(),
                     ["player_id"] = _userProfile.id,
                     ["mmr_snapshot"] = _userProfile.current_mmr,
-                    ["region"] = _userProfile.region,
-                    ["state_province"] = _userProfile.state_province ?? "",
                     ["match_type"] = GetQueueMatchTypePayload(),
                     ["has_mod"] = true,
                     ["created_by"] = "SBGL_UnifiedMod",
@@ -4428,15 +4424,12 @@ namespace SBGLeagueAutomation
 
                     _userProfile = new PlayerProfile { 
                         id = (string)profile["id"],
-                        display_name = (string)profile["display_name"],
-                        region = (string)profile["region"] ?? "US",
-                        state_province = (string)profile["state_province"]
+                        display_name = (string)profile["display_name"]
                     };
                     
                     float.TryParse(profile["current_mmr"]?.ToString(), out _userProfile.current_mmr);
                     
-                    // Log it to verify
-                    Log($"Profile Sync: {_userProfile.display_name} from {_userProfile.state_province}");
+                    Log($"Profile Sync: {_userProfile.display_name}");
                     
                     string picUrl = (string)profile["profile_pic_url"];
                     if (!string.IsNullOrEmpty(picUrl) && !_hasFetchedProfilePic) 
@@ -4731,7 +4724,7 @@ namespace SBGLeagueAutomation
 
         public class PlayerProfile 
         { 
-            public string id, display_name, region, state_province; // Added state_province
+            public string id, display_name;
             public float current_mmr; 
         }
         public class MatchmakingSession { 

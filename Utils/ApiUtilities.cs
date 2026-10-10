@@ -107,7 +107,6 @@ namespace SBGL.UnifiedMod.Utils
             public string ID;
             public string DisplayName;
             public float CurrentMMR;
-            public string Region;
             public string ProfilePicUrl;
         }
 
@@ -154,7 +153,6 @@ namespace SBGL.UnifiedMod.Utils
                             {
                                 ID = res[0]["id"]?.ToString() ?? "",
                                 DisplayName = res[0]["display_name"]?.ToString() ?? "",
-                                Region = res[0]["region"]?.ToString() ?? "US",
                                 ProfilePicUrl = res[0]["profile_pic_url"]?.ToString(),
                                 CurrentMMR = float.TryParse(res[0]["current_mmr"]?.ToString() ?? "0", out float mmr) ? mmr : 0f
                             };
@@ -215,7 +213,6 @@ namespace SBGL.UnifiedMod.Utils
                             {
                                 ID = res[0]["id"]?.ToString() ?? "",
                                 DisplayName = res[0]["display_name"]?.ToString() ?? "",
-                                Region = res[0]["region"]?.ToString() ?? "US",
                                 ProfilePicUrl = res[0]["profile_pic_url"]?.ToString(),
                                 CurrentMMR = float.TryParse(res[0]["current_mmr"]?.ToString() ?? "0", out float mmr) ? mmr : 0f
                             };

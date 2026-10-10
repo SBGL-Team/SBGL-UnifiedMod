@@ -308,6 +308,27 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         private HashSet<ulong> _knownPeers = new HashSet<ulong>(); // All peers we've discovered (from P2P or Mirror)
         private Dictionary<ulong, float> _playerFirstSeenTime = new Dictionary<ulong, float>(); // When we first saw each player in lobby
         private const float COMPLIANCE_TIMEOUT = 15f; // Mark as non-compliant if no report received after 15 seconds
+        // Mod lists can't change mid-session, so the periodic re-broadcast is only a safety net.
+        // New peers get a report immediately (see SendMyModsToNewPeer), which keeps them well
+        // inside COMPLIANCE_TIMEOUT without flooding every peer every few seconds.
+        private const float MOD_REPORT_INTERVAL = 60f;
+        private float _nextModReportTime;
+        private readonly HashSet<ulong> _peersSentModReport = new HashSet<ulong>();
+        // A round start discovers every player in the same frame; reuse the built report
+        // instead of rescanning plugins once per peer.
+        private const float MOD_REPORT_CACHE_SECONDS = 5f;
+        private byte[] _cachedReportV1, _cachedReportV2;
+        private float _cachedReportTime = -100f;
+        // Each client clears its tracking when it loads a new hole, so a report sent while a
+        // peer is still loading is thrown away on their side, and SendMyModsToNewPeer won't
+        // send it again. Peers that haven't reported ask for it instead of waiting out the
+        // 60s broadcast and timing out as non-compliant in the meantime.
+        internal const string REPORT_REQUEST_MSG = "SBGL_REPORT_REQ";
+        private const float REPORT_REQUEST_DELAY = 3f;    // give the peer's own report a moment to arrive first
+        private const float REPORT_REQUEST_INTERVAL = 3f; // between requests to the same peer
+        private const float REPORT_REPLY_COOLDOWN = 2f;   // between replies to the same peer
+        private readonly Dictionary<ulong, float> _lastReportRequestTime = new Dictionary<ulong, float>();
+        private readonly Dictionary<ulong, float> _lastReportReplyTime = new Dictionary<ulong, float>();
         private bool _hasLoggedDiscoveryInfo = false; // Only log discovery info once per scene
         private string _lastDiscoveryScene = ""; // Track the last scene where we discovered players
         private float _lastMelonLoaderAnnouncementTime = -100f; // Track when we last announced MelonLoader (init to far past)
@@ -356,7 +377,6 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         private string _lastSyncTime = "Never";
 
         public string _activeUsername = "Searching...", _playerRank = "N/A", _totalPlayers = "0", _playerMMR = "0", _matches = "0", _playerPeak = "0", _winRate = "0%", _lastChange = "0", _top3s = "0", _avgScore = "0.0", _syncStatus = "Idle";
-        private string _playerRegion = "", _playerState = "";
         private string _clanTag = ""; // faction clan_tag, shown before the name on the stats card
         private string _spectatedPlayerName = ""; // non-empty when showing a spectated player's card
 
@@ -904,6 +924,8 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 _playerComplianceStatus.Clear();
                 _playerFirstSeenTime.Clear();
                 _knownPeers.Clear();
+                _peersSentModReport.Clear();
+                _lastReportRequestTime.Clear();
                 _playersNotifiedAbout.Clear();
                 _playerDisplayNames.Clear();
                 _remotePlayerMods.Clear();
@@ -917,6 +939,9 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 _playerComplianceStatus.Remove(id);
                 _playerFirstSeenTime.Remove(id);
                 _knownPeers.Remove(id);
+                _peersSentModReport.Remove(id);
+                _lastReportRequestTime.Remove(id);
+                _lastReportReplyTime.Remove(id);
                 _playersNotifiedAbout.Remove(id);
                 _playerDisplayNames.Remove(id);
                 _remotePlayerMods.Remove(id);
@@ -1115,10 +1140,11 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 AcceptIncomingP2PSessions();
 
             ListenForModReports();
-            if (Time.frameCount % 600 == 0)
+            RequestMissingModReports();
+            if (Time.unscaledTime >= _nextModReportTime)
             {
-                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Frame {Time.frameCount}: Triggering BroadcastMyMods()");
-                BroadcastMyMods(); // Broadcast roughly every 10 seconds
+                _nextModReportTime = Time.unscaledTime + MOD_REPORT_INTERVAL;
+                BroadcastMyMods();
             }
         }
 
@@ -1327,6 +1353,8 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                     _playerComplianceStatus.Clear();
                     _playerFirstSeenTime.Clear();
                     _knownPeers.Clear();
+                    _peersSentModReport.Clear();
+                    _lastReportRequestTime.Clear();
                     _playersNotifiedAbout.Clear();
                     _playerDisplayNames.Clear();
                     _remotePlayerMods.Clear();
@@ -1721,6 +1749,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 _knownPeers.Add(steamId);
                 UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Added player {steamId} to tracking (knownPeers={_knownPeers.Count})");
                 TrySendCurrentMatchIdToPeer(steamId, "peer discovered");
+                SendMyModsToNewPeer(steamId);
                 UpdateUIReport();
             }
         }
@@ -1809,7 +1838,41 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             }
         }
 
-        private void BroadcastMyMods()
+        /// <summary>
+        /// Sends our report to a peer the first time we see or hear from them, so they don't
+        /// have to wait for the next periodic broadcast and time us out in the meantime.
+        /// </summary>
+        private void SendMyModsToNewPeer(ulong peerId)
+        {
+            if (peerId == 0 || peerId == SteamClient.SteamId) return;
+            if (!_peersSentModReport.Add(peerId)) return;
+            BroadcastMyMods(peerId);
+        }
+
+        /// <summary>
+        /// Asks peers we're still waiting on to send their report, until it arrives or they time out.
+        /// </summary>
+        private void RequestMissingModReports()
+        {
+            if (!SteamClient.IsValid || _playerComplianceStatus.Count == 0) return;
+            float now = Time.time;
+            byte[] request = null;
+            foreach (var kvp in _playerComplianceStatus)
+            {
+                ulong peer = kvp.Key;
+                var status = kvp.Value;
+                if (peer == SteamClient.SteamId || status.HasReportedMods || status.TimedOut) continue;
+                if (!_playerFirstSeenTime.TryGetValue(peer, out float firstSeen) || now - firstSeen < REPORT_REQUEST_DELAY) continue;
+                if (_lastReportRequestTime.TryGetValue(peer, out float last) && now - last < REPORT_REQUEST_INTERVAL) continue;
+
+                _lastReportRequestTime[peer] = now;
+                request = request ?? Encoding.UTF8.GetBytes(REPORT_REQUEST_MSG);
+                try { SteamNetworking.SendP2PPacket(peer, request, -1, SBGL_NET_CHANNEL, P2PSend.Reliable); }
+                catch (Exception ex) { UnityEngine.Debug.LogWarning($"[SBGL-CompPluginCheck] Failed to request report from {peer}: {ex.Message}"); }
+            }
+        }
+
+        private void BroadcastMyMods(ulong? onlyPeer = null)
         {
             if (!SteamClient.IsValid)
             {
@@ -1853,12 +1916,26 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 if (!_playerDisplayNames.ContainsKey(SteamClient.SteamId))
                     _playerDisplayNames[SteamClient.SteamId] = SteamClient.Name ?? "Me";
 
-                byte[] data = Encoding.UTF8.GetBytes(sb.ToString());
-                byte[] dataV2 = Encoding.UTF8.GetBytes(BuildVerifiableReport(hasMelonLoader));
+                if (_cachedReportV1 == null || Time.unscaledTime - _cachedReportTime > MOD_REPORT_CACHE_SECONDS)
+                {
+                    _cachedReportV1 = Encoding.UTF8.GetBytes(sb.ToString());
+                    _cachedReportV2 = Encoding.UTF8.GetBytes(BuildVerifiableReport(hasMelonLoader));
+                    _cachedReportTime = Time.unscaledTime;
+                }
+                byte[] data = _cachedReportV1;
+                byte[] dataV2 = _cachedReportV2;
 
                 // Collect all known peers
-                var peersToSend = new HashSet<ulong>(_knownPeers);
-                peersToSend.UnionWith(_remotePlayerMods.Keys);
+                var peersToSend = new HashSet<ulong>();
+                if (onlyPeer.HasValue)
+                {
+                    peersToSend.Add(onlyPeer.Value);
+                }
+                else
+                {
+                    peersToSend.UnionWith(_knownPeers);
+                    peersToSend.UnionWith(_remotePlayerMods.Keys);
+                }
 
                 // Also add peers from active P2P connections
                 // Suppress the "Found active NetworkManager" log — not useful in steady state
@@ -2066,8 +2143,19 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                     
                     // Add this peer to our known peers so we broadcast back to them
                     _knownPeers.Add(remoteId.Value);
+                    SendMyModsToNewPeer(remoteId.Value);
                     
-                    if (msg.StartsWith("SBGL_POLL_"))
+                    if (msg == REPORT_REQUEST_MSG)
+                    {
+                        float now = Time.time;
+                        if (!_lastReportReplyTime.TryGetValue(remoteId.Value, out float lastReply) || now - lastReply >= REPORT_REPLY_COOLDOWN)
+                        {
+                            _lastReportReplyTime[remoteId.Value] = now;
+                            UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Peer {remoteId.Value} asked for our report - resending");
+                            BroadcastMyMods(remoteId.Value);
+                        }
+                    }
+                    else if (msg.StartsWith("SBGL_POLL_"))
                     {
                         Features.Poll.PollManager.Instance?.HandlePacket(msg, remoteId.Value);
                     }
@@ -2474,7 +2562,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             _lastChange = "0"; _top3s = "0"; _avgScore = "0.0"; _winRate = "0%";
             if (_profileIcon != null) _profileIcon.color = new Color(1, 1, 1, 0); // hide avatar, keep placeholder visible
             if (_flagIcon != null) _flagIcon.color = new Color(1, 1, 1, 0);
-            _playerRegion = ""; _playerState = ""; _clanTag = "";
+            _clanTag = "";
         }
 
         private string GetInGameName()
@@ -2734,10 +2822,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                         _winRate = t > 0 ? $"{(w / t * 100):F0}%" : "0%";
                         if (p["profile_pic_url"] != null && !string.IsNullOrEmpty(p["profile_pic_url"].ToString()))
                             StartCoroutine(DownloadProfilePic(p["profile_pic_url"].ToString()));
-                        _playerRegion = p["region"]?.ToString() ?? "";
-                        _playerState  = p["state_province"]?.ToString() ?? "";
-                        bool regionPrivate = p["region_private"]?.ToObject<bool>() ?? false;
-                        ResolveAndShowFlag(_playerState, _playerRegion, regionPrivate);
+                        StartCoroutine(FetchFlag(_activeUsername));
 
                         StartCoroutine(FetchClanTag(p["id"]?.ToString() ?? id));
                     }
@@ -2883,22 +2968,42 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         private static Texture2D _sbglLogoCache;
         private const string SBGL_LOGO_URL = "https://liquipedia.net/commons/images/1/19/Super_Battle_Golf_League_allmode.png";
 
-        private void ResolveAndShowFlag(string stateProvince, string region, bool regionPrivate)
+        /// <summary>
+        /// Looks up the player's country from player_public_flag. The view returns no row
+        /// for players who keep their region private, which falls through to the SBGL logo.
+        /// </summary>
+        IEnumerator FetchFlag(string displayName)
         {
-            if (regionPrivate)
+            JToken row = null;
+            if (!string.IsNullOrWhiteSpace(displayName))
             {
-                StartCoroutine(ShowSbglLogoCoroutine());
-                return;
+                string authToken = UnifiedPlugin.GetCurrentAuthToken();
+                string url = $"{UnifiedPlugin.GetCurrentBaseApi()}/player_public_flag?display_name=ilike.{UnityWebRequest.EscapeURL(displayName)}";
+                using (UnityWebRequest r = UnityWebRequest.Get(url))
+                {
+                    r.SetRequestHeader("apikey", authToken);
+                    r.SetRequestHeader("Authorization", $"Bearer {authToken}");
+                    r.certificateHandler = new BypassCertificate();
+                    yield return r.SendWebRequest();
+                    if (r.result == UnityWebRequest.Result.Success)
+                    {
+                        try
+                        {
+                            // ilike treats _ and % as wildcards; keep only the exact case-insensitive match
+                            row = JArray.Parse(r.downloadHandler.text).FirstOrDefault(x =>
+                                string.Equals(x["display_name"]?.ToString(), displayName, StringComparison.OrdinalIgnoreCase));
+                        }
+                        catch { row = null; }
+                    }
+                }
             }
+            ResolveAndShowFlag(row);
+        }
 
-            string country = NormalizeFlagCode(region);
-            string stateCode = string.IsNullOrEmpty(stateProvince) ? null
-                : string.IsNullOrEmpty(country) ? NormalizeFlagCode(stateProvince)
-                : $"{country}-{stateProvince.Trim().ToLower()}";
-
-            if (!string.IsNullOrEmpty(stateCode))
-                StartCoroutine(DownloadFlagWithFallback(stateCode, country));
-            else if (!string.IsNullOrEmpty(country))
+        private void ResolveAndShowFlag(JToken flagRow)
+        {
+            string country = NormalizeFlagCode(flagRow?["country"]?.ToString());
+            if (!string.IsNullOrEmpty(country))
                 StartCoroutine(DownloadFlagWithFallback(country, null));
             else
                 StartCoroutine(ShowSbglLogoCoroutine());
@@ -3047,10 +3152,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                         if (p["profile_pic_url"] != null && !string.IsNullOrEmpty(p["profile_pic_url"].ToString()))
                             StartCoroutine(DownloadProfilePic(p["profile_pic_url"].ToString()));
 
-                        _playerRegion = p["region"]?.ToString() ?? "";
-                        _playerState  = p["state_province"]?.ToString() ?? "";
-                        bool regionPrivate = p["region_private"]?.ToObject<bool>() ?? false;
-                        ResolveAndShowFlag(_playerState, _playerRegion, regionPrivate);
+                        StartCoroutine(FetchFlag(_activeUsername));
 
                         _syncStatus = "Spectating";
                         UpdateUIReport();
@@ -3261,8 +3363,9 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
 
         /// <summary>
         /// Tells the player when their Unified Mod is out of date and when the update came out.
-        /// A required update shows everywhere, since the player is already flagged; an update
-        /// that isn't required yet only shows on the Driving Range, as a heads-up.
+        /// A required update (red) shows everywhere, since the player is already flagged. The
+        /// yellow heads-ups - grace deadline, awaiting approval, update available - only show
+        /// on the Driving Range, never in a match.
         /// </summary>
         private void UpdateOwnUpdateNotice(LocalPluginScanResult scan)
         {
@@ -3272,17 +3375,15 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             var approved = _allowedModsSnapshot.GetApprovedVersion(UNIFIED_MOD_GUID);
             string scene = SceneManager.GetActiveScene().name;
             bool isRange = scene.Contains("Driving") || scene.Contains("Range");
-            // Heads-ups stay out of the way during a round; only being flagged shows mid-round.
-            bool isOutsideRound = isRange || scene.IndexOf("menu", StringComparison.OrdinalIgnoreCase) >= 0;
             string text = null;
 
             var deadline = _allowedModsSnapshot.GetHashExpiryUtc(GetOwnUnifiedModSha256());
 
             bool inGracePeriod = deadline != null && DateTime.UtcNow <= deadline.Value && approved != null && own < approved;
 
-            if (!isOutsideRound && scan.OwnUnifiedVersionState != UnifiedVersionState.Outdated)
+            if (!isRange && (inGracePeriod || scan.OwnUnifiedVersionState != UnifiedVersionState.Outdated))
             {
-                // Mid-round: only the red non-compliant banner (Outdated, below) is shown.
+                // Off the Driving Range only the red non-compliant banner (Outdated, below) is shown.
             }
             else if (inGracePeriod)
             {
@@ -3314,7 +3415,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 _updateNoticeText.fontSize = 18;
                 text = $"SBGL Unified Mod {own} is waiting for league approval.\n<size=16>You are non-compliant until it is approved.</size>";
             }
-            else if (isRange && _latestPublishedVersion != null && _latestPublishedVersion > own
+            else if (_latestPublishedVersion != null && _latestPublishedVersion > own
                      && (approved == null || _latestPublishedVersion > approved))
             {
                 _updateNoticeText.color = Color.yellow;

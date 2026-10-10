@@ -12,7 +12,6 @@ using System;
 using System.IO;
 using System.Security.Cryptography;
 using SBGL.UnifiedMod.Features.CompetitivePluginCheck;
-using SBGL.UnifiedMod.Features.HitTracker;
 using SBGL.UnifiedMod.Utils;
 using SBGL.UnifiedMod.Patches;
 using SBGLeagueAutomation;
@@ -27,7 +26,6 @@ namespace SBGL.UnifiedMod.Core
         public string ID { get; set; }
         public string DisplayName { get; set; }
         public float CurrentMMR { get; set; }
-        public string Region { get; set; }
         public string ProfilePicUrl { get; set; }
         public bool IsResolved { get; set; }
     }
@@ -172,6 +170,7 @@ namespace SBGL.UnifiedMod.Core
         // ==========================================
         public ConfigEntry<int> LL_MaxPlayers;
         public ConfigEntry<UnityEngine.InputSystem.Key> LL_ViewToggleKey;
+        public ConfigEntry<UnityEngine.InputSystem.Key> Poll_CreatePanelKey;
 
         // ==========================================
         // API ENVIRONMENT CONFIG (Staff Only)
@@ -252,6 +251,10 @@ namespace SBGL.UnifiedMod.Core
                 new ConfigDescription("Maximum rows to display", new AcceptableValueRange<int>(1, 50)));
             LL_ViewToggleKey = Config.Bind("LiveLeaderboard.UI", "View Toggle Key", UnityEngine.InputSystem.Key.F8,
                 "Key that switches between the SBGL leaderboard and the native in-game scoreboard.");
+
+            // === POLL CONFIG ===
+            Poll_CreatePanelKey = Config.Bind("Poll.UI", "Create Poll Key", UnityEngine.InputSystem.Key.F7,
+                "Key that opens and closes the Create Poll window. Change this if another program takes F7.");
 
             // === API ENVIRONMENT CONFIG (Staff Only) ===
             API_Environment = Config.Bind("API.Environment", "API Environment", "Production", 
@@ -712,15 +715,11 @@ namespace SBGL.UnifiedMod.Core
             Features.PseudoDedicatedServer pds = pdsObj.AddComponent<Features.PseudoDedicatedServer>();
             pds.SetConfig(PDS_Enabled, PDS_RequeueDelay, PDS_DefaultRuleset, Logger);
 
-            // Initialize Hit Tracker as a managed component
-            GameObject hitTrackerObj = new GameObject("SBGL-HitTracker");
-            UnityEngine.Object.DontDestroyOnLoad(hitTrackerObj);
-            hitTrackerObj.AddComponent<HitTrackerPlugin>();
-
             // Initialize Poll Manager as a managed component
             GameObject pollObj = new GameObject("SBGL-PollManager");
             UnityEngine.Object.DontDestroyOnLoad(pollObj);
-            pollObj.AddComponent<Features.Poll.PollManager>();
+            Features.Poll.PollManager poll = pollObj.AddComponent<Features.Poll.PollManager>();
+            poll.SetConfig(Poll_CreatePanelKey);
         }
 
         private IEnumerator ResolvePlayerProfile(string playerIdOrName)
@@ -753,7 +752,6 @@ namespace SBGL.UnifiedMod.Core
                         _sharedProfile.ID = profile.ID;
                         _sharedProfile.DisplayName = profile.DisplayName;
                         _sharedProfile.CurrentMMR = profile.CurrentMMR;
-                        _sharedProfile.Region = profile.Region;
                         _sharedProfile.ProfilePicUrl = profile.ProfilePicUrl;
                         _sharedProfile.IsResolved = true;
                         found = true;
@@ -773,7 +771,6 @@ namespace SBGL.UnifiedMod.Core
                             _sharedProfile.ID = profile.ID;
                             _sharedProfile.DisplayName = profile.DisplayName;
                             _sharedProfile.CurrentMMR = profile.CurrentMMR;
-                            _sharedProfile.Region = profile.Region;
                             _sharedProfile.ProfilePicUrl = profile.ProfilePicUrl;
                             _sharedProfile.IsResolved = true;
                             found = true;

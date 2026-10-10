@@ -5,7 +5,7 @@
         <AssemblyName>SBGL.UnifiedMod</AssemblyName>
         <RootNamespace>SBGL.UnifiedMod</RootNamespace>
         <Product>Super Battle Golf League Unified Mod</Product>
-        <Version>0.1.32</Version>
+        <Version>0.1.38</Version>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
         <LangVersion>latest</LangVersion>
         <RestoreAdditionalProjectSources>
@@ -140,7 +140,10 @@
               Condition="Exists('$(APPDATA)\com.kesomannen.gale\super-battle-golf\profiles\SBGLeague')" />
     </Target>
 
-    <Target Name="CopyToThunderstore" AfterTargets="Build">
+    <!-- Opt-in: only a release build packages (dotnet build -c Debug -p:Package=true).
+         An ordinary build used to overwrite the zip and Approved_Mods file for the current
+         version, which can silently replace an already-uploaded release. -->
+    <Target Name="CopyToThunderstore" AfterTargets="Build" Condition="'$(Package)' == 'true'">
         <PropertyGroup>
             <!-- Staging folder holding exactly the files that go into the Thunderstore package.
                  The zip is written alongside it rather than inside it, so it never packages itself. -->
