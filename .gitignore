@@ -14,3 +14,7 @@ obj/
 # OS
 Thumbs.db
 Desktop.ini
+
+# Player logs dropped in for bug reports
+Bug Report/
+Logreports/

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.39
+* Fixed players being able to keep playing during overtime in team matches. The SBGL scoreboard overlay could leave the game's scoreboard listening to team events after a hole ended, which made that player's game drop the updates saying the hole had gone to overtime or finished.
+* The SBGL scoreboard now shows team games: the red and blue rosters side by side, with each team's holes won and this hole's points across the top. The Driving Range keeps the final team score after the match.
+* Team match results now include each player's points and strokes. Before, team matches were submitted without them.
+* The scoreboard title row now shows the current hole's par and "Par Thru x", the total par of the holes finished so far, on the same basis as the +/- column.
+* Clicking 2V2 on the Driving Range now switches the lobby's game mode to Teams. 2v2, 3v3 and 4v4 matches from the queue switch to Teams when the lobby is created. The other ruleset buttons leave the game mode alone.
+* While the SBGL scoreboard is open it now hides the game's button prompts, the same as the game's own scoreboard does.
+* The scoreboard title shows the current season instead of always saying Season 2.
+* Your own row is highlighted in the SBGL scoreboard.
+* Smoother frame rate while the SBGL scoreboard is open. The overlay now reuses its text styles and labels instead of rebuilding them every frame.
+* Routine diagnostic logging is off by default, which makes the log file far smaller. A new "Verbose Logging" setting under Logging turns it back on when a bug report needs it.
+* The Driving Range ruleset panel no longer reads saved settings every frame.
+* The match ID is sent to each player once per match instead of with every mod report, cutting network chatter.
+* The SBGL scoreboard no longer stretches across ultrawide screens.
+* The Driving Range ruleset panel now scales up on 1440p and larger screens.
+* The Driving Range scoreboard no longer shows the range's own par as "Par Thru 0". After a match it keeps the match's final par.
+* The Driving Range ruleset panel hides while the scoreboard is held open, so the two no longer overlap at 1080p.
+
 ## 0.1.38
 * Fixed players being briefly flagged as non-compliant at the start of each hole. A player who hasn't sent their mod list yet is now asked for it every few seconds, instead of being flagged after 15 seconds and cleared up to a minute later.
 

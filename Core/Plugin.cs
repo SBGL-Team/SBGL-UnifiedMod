@@ -178,6 +178,17 @@ namespace SBGL.UnifiedMod.Core
         public ConfigEntry<string> API_Environment;
         public ConfigEntry<string> Staff_ModManifestOutputPath;
 
+        // ==========================================
+        // LOGGING
+        // ==========================================
+        public ConfigEntry<bool> Log_Verbose;
+
+        /// <summary>
+        /// Routine diagnostic lines (peer broadcasts, lobby scans, queue polling) are written
+        /// only when this is on. Errors and warnings are always written.
+        /// </summary>
+        public static bool VerboseLogging => Instance != null && Instance.Log_Verbose != null && Instance.Log_Verbose.Value;
+
         private readonly Rect _staffToolsRect = new Rect(20f, 20f, 340f, 110f);
         private string _staffManifestStatus = "Ready";
 
@@ -218,6 +229,10 @@ namespace SBGL.UnifiedMod.Core
                 new ConfigDescription("Compliance debug panel Y position (0 = auto)", new AcceptableValueRange<float>(0f, 4000f)));
             CompCheck_MelonLoaderChatEnabled = Config.Bind("CompetitiveCheck.Notifications", "Announce MelonLoader In Chat", false,
                 "When enabled, broadcasts a chat message in SBGL lobbies when MelonLoader is detected on your client.");
+
+            // === LOGGING ===
+            Log_Verbose = Config.Bind("Logging", "Verbose Logging", false,
+                "Write routine diagnostic lines (peer broadcasts, lobby scans, matchmaking queue polling) to the log. Turn on when asked to for a bug report.");
 
             // === MATCHMAKING ASSISTANT CONFIG ===
             MM_ShowSystemLogs = Config.Bind("Matchmaking.UI Settings", "Show System Logs", true, "Display system event logs");

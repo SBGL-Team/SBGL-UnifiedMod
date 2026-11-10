@@ -1687,8 +1687,11 @@ namespace SBGLeagueAutomation
 
         private IEnumerator RefreshPlayerList() {
             string fullUrl = $"{GetBaseApiUrl()}/matchmaking_queue?status=in.(queued,matched)";
-            Log($"<color=cyan>[Sync] GET /matchmaking_queue (fetching queued players)</color>");
-            Log($"<color=cyan>[Sync] Full URL: {fullUrl.Substring(0, Math.Min(150, fullUrl.Length))}...</color>");
+            if (SBGL.UnifiedMod.Core.UnifiedPlugin.VerboseLogging)
+            {
+                Log($"<color=cyan>[Sync] GET /matchmaking_queue (fetching queued players)</color>");
+                Log($"<color=cyan>[Sync] Full URL: {fullUrl.Substring(0, Math.Min(150, fullUrl.Length))}...</color>");
+            }
             using (UnityWebRequest req = UnityWebRequest.Get(fullUrl)) {
                 ApplyApiHeaders(req);
                 yield return req.SendWebRequest();
@@ -1886,7 +1889,8 @@ namespace SBGLeagueAutomation
             JObject activeSession = null;
 
             string urlHost = $"{GetBaseApiUrl()}/matchmaking_session?host_player_id=eq.{_userProfile.id}&status=eq.pending_accept";
-            Log($"<color=cyan>[Sync] Full URL: {urlHost.Substring(0, Math.Min(150, urlHost.Length))}...</color>");
+            if (SBGL.UnifiedMod.Core.UnifiedPlugin.VerboseLogging)
+                Log($"<color=cyan>[Sync] Full URL: {urlHost.Substring(0, Math.Min(150, urlHost.Length))}...</color>");
             using (UnityWebRequest req = UnityWebRequest.Get(urlHost)) {
                 ApplyApiHeaders(req);
                 yield return req.SendWebRequest();
@@ -1903,7 +1907,8 @@ namespace SBGLeagueAutomation
                 // URL-encode the jsonb array literal ["id"] so the request is well-formed
                 string encodedId = $"%5B%22{_userProfile.id}%22%5D"; // ["<id>"]
                 string urlPlayer = $"{GetBaseApiUrl()}/matchmaking_session?player_ids=cs.{encodedId}&status=eq.pending_accept";
-                Log($"<color=cyan>[Sync] Full URL: {urlPlayer.Substring(0, Math.Min(150, urlPlayer.Length))}...</color>");
+                if (SBGL.UnifiedMod.Core.UnifiedPlugin.VerboseLogging)
+                    Log($"<color=cyan>[Sync] Full URL: {urlPlayer.Substring(0, Math.Min(150, urlPlayer.Length))}...</color>");
                 using (UnityWebRequest req = UnityWebRequest.Get(urlPlayer)) {
                     ApplyApiHeaders(req);
                     yield return req.SendWebRequest();

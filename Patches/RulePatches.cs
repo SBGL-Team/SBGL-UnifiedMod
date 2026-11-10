@@ -102,6 +102,7 @@ namespace SBGL.UnifiedMod.Patches
 
                 ApplyRulesToMatchSetup(matchSetup);
                 ApplyCourseSelection(__instance);
+                ApplyGameMode(__instance);
 
                 Log($"============================");
             }
@@ -238,6 +239,41 @@ namespace SBGL.UnifiedMod.Patches
             menu.numberOfHolesSlider.value = numHoles;
 
             Log($"  ✓ Season {season.Season}: set {eligibleHoles.Count} eligible holes ({matchedNames.Count} banned excluded), random order ON, {numHoles} holes");
+        }
+
+        /// <summary>
+        /// Switches the lobby to Teams for the 2V2 button and for any team match type from the
+        /// queue, the same way the host's Game Mode dropdown does. Every other ruleset leaves
+        /// the host's own choice alone, so RANKED does not undo it. Server only; the game
+        /// redistributes teams and updates the Steam lobby data from its SyncVar hook.
+        /// </summary>
+        public static void ApplyGameMode(MatchSetupMenu menu)
+        {
+            if (menu == null || !menu.isServer) return;
+
+            string hostRuleset = PlayerPrefs.GetString("HostRuleset", "ranked");
+            string matchType = PlayerPrefs.GetString("MatchType", "");
+            bool isTeamMatch = hostRuleset == HOST_RULESET_2V2 || Season2RuleSet.GetTeamSize(matchType) >= 2;
+            if (!isTeamMatch) return;
+
+            if (menu.gameMode == GameMode.Teams)
+            {
+                Log("  Game mode already Teams");
+                return;
+            }
+
+            try
+            {
+                menu.NetworkgameMode = GameMode.Teams;
+                // The server-side hook updates the lobby but not the host's own dropdown
+                if (menu.gameModeDropdown != null)
+                    menu.gameModeDropdown.SetValue((int)GameMode.Teams);
+                Log($"  ✓ Game mode set to Teams (ruleset '{hostRuleset}', match type '{matchType}')");
+            }
+            catch (System.Exception ex)
+            {
+                LogError($"  ✗ Failed to set game mode to Teams: {ex.Message}");
+            }
         }
     }
 }

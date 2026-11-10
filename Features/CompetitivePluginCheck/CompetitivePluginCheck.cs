@@ -326,6 +326,16 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
         internal const string REPORT_REQUEST_MSG = "SBGL_REPORT_REQ";
         private const float REPORT_REQUEST_DELAY = 3f;    // give the peer's own report a moment to arrive first
         private const float REPORT_REQUEST_INTERVAL = 3f; // between requests to the same peer
+
+        // Match IDs already delivered to a peer after that peer proved its P2P path works (its mod
+        // report arrived). Every later report from the same peer used to trigger another copy.
+        private readonly Dictionary<ulong, string> _matchIdSentAfterReport = new Dictionary<ulong, string>();
+
+        /// <summary>Routine chatter, written only when Verbose Logging is on in the mod settings.</summary>
+        private static void LogVerbose(string message)
+        {
+            if (SBGL.UnifiedMod.Core.UnifiedPlugin.VerboseLogging) UnityEngine.Debug.Log(message);
+        }
         private const float REPORT_REPLY_COOLDOWN = 2f;   // between replies to the same peer
         private readonly Dictionary<ulong, float> _lastReportRequestTime = new Dictionary<ulong, float>();
         private readonly Dictionary<ulong, float> _lastReportReplyTime = new Dictionary<ulong, float>();
@@ -925,6 +935,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 _playerFirstSeenTime.Clear();
                 _knownPeers.Clear();
                 _peersSentModReport.Clear();
+                _matchIdSentAfterReport.Clear();
                 _lastReportRequestTime.Clear();
                 _playersNotifiedAbout.Clear();
                 _playerDisplayNames.Clear();
@@ -940,6 +951,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 _playerFirstSeenTime.Remove(id);
                 _knownPeers.Remove(id);
                 _peersSentModReport.Remove(id);
+                _matchIdSentAfterReport.Remove(id);
                 _lastReportRequestTime.Remove(id);
                 _lastReportReplyTime.Remove(id);
                 _playersNotifiedAbout.Remove(id);
@@ -1099,7 +1111,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
 
                 if (currentPlayerCount != _lastPlayerCosmeticsCount)
                 {
-                    UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] PlayerCosmetics count changed: {_lastPlayerCosmeticsCount} → {currentPlayerCount}, triggering immediate discovery");
+                    LogVerbose($"[SBGL-CompPluginCheck] PlayerCosmetics count changed: {_lastPlayerCosmeticsCount} → {currentPlayerCount}, triggering immediate discovery");
                     _lastPlayerCosmeticsCount = currentPlayerCount;
                     _hasLoggedDiscoveryInfo = false;
                     DiscoverLobbyPlayers();
@@ -1354,6 +1366,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                     _playerFirstSeenTime.Clear();
                     _knownPeers.Clear();
                     _peersSentModReport.Clear();
+                    _matchIdSentAfterReport.Clear();
                     _lastReportRequestTime.Clear();
                     _playersNotifiedAbout.Clear();
                     _playerDisplayNames.Clear();
@@ -1423,7 +1436,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                             {
                                 if (isFirstDiscovery)
                                 {
-                                    UnityEngine.Debug.Log($"[SBGL-CompPluginCheck]     → Has NetworkIdentity, checking for owner info");
+                                    LogVerbose($"[SBGL-CompPluginCheck]     → Has NetworkIdentity, checking for owner info");
                                 }
                                 
                                 // Try to get the owner's Steam ID from the connectionToServer or connectionToClient
@@ -1507,7 +1520,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                                         if (netIdProp != null)
                                         {
                                             var netId = netIdProp.GetValue(netIdentity);
-                                            UnityEngine.Debug.Log($"[SBGL-CompPluginCheck]       → netId: {netId}");
+                                            LogVerbose($"[SBGL-CompPluginCheck]       → netId: {netId}");
                                         }
                                     }
                                 }
@@ -1747,7 +1760,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 }
                 
                 _knownPeers.Add(steamId);
-                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Added player {steamId} to tracking (knownPeers={_knownPeers.Count})");
+                LogVerbose($"[SBGL-CompPluginCheck] Added player {steamId} to tracking (knownPeers={_knownPeers.Count})");
                 TrySendCurrentMatchIdToPeer(steamId, "peer discovered");
                 SendMyModsToNewPeer(steamId);
                 UpdateUIReport();
@@ -1774,7 +1787,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             return peers;
         }
 
-        private void TrySendCurrentMatchIdToPeer(ulong peerId, string reason)
+        private void TrySendCurrentMatchIdToPeer(ulong peerId, string reason, bool peerConfirmed = false)
         {
             if (!SteamClient.IsValid || peerId == 0 || peerId == SteamClient.SteamId) return;
             if (!ShouldShareCurrentMatchId()) return;
@@ -1782,10 +1795,14 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             string matchId = SBGLeagueAutomation.SBGLPlugin.CurrentMatchId;
             if (string.IsNullOrWhiteSpace(matchId)) return;
 
+            // Once the peer's own report has arrived, one reliable send per match ID is enough
+            if (peerConfirmed && _matchIdSentAfterReport.TryGetValue(peerId, out string alreadySent) && alreadySent == matchId) return;
+
             try
             {
                 byte[] data = Encoding.UTF8.GetBytes($"SBGL_MATCH_ID:{matchId}");
                 SteamNetworking.SendP2PPacket(peerId, data, -1, SBGL_NET_CHANNEL, P2PSend.Reliable);
+                if (peerConfirmed) _matchIdSentAfterReport[peerId] = matchId;
                 UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Sent active match ID {matchId} to peer {peerId} ({reason})");
             }
             catch (Exception ex)
@@ -1829,7 +1846,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 // Log SteamClient state for diagnostics
                 if (Time.frameCount % 1200 == 0) // Every 20 seconds
                 {
-                    UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] SteamClient.IsValid={SteamClient.IsValid}, SteamClient.SteamId={SteamClient.SteamId}, Known Peers={_knownPeers.Count}, Tracked Players={_playerComplianceStatus.Count}");
+                    LogVerbose($"[SBGL-CompPluginCheck] SteamClient.IsValid={SteamClient.IsValid}, SteamClient.SteamId={SteamClient.SteamId}, Known Peers={_knownPeers.Count}, Tracked Players={_playerComplianceStatus.Count}");
                 }
             }
             catch (Exception ex)
@@ -1904,7 +1921,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 }
                 
                 // Add debug logging
-                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] BroadcastMyMods (MelonLoader={hasMelonLoader})");
+                LogVerbose($"[SBGL-CompPluginCheck] BroadcastMyMods (MelonLoader={hasMelonLoader})");
 
                 // Store our own mod list locally so the UI can display it (same format as received reports)
                 // Keep the MelonLoader token so the UI renders the warning line
@@ -1945,7 +1962,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
 
                 // Only log broadcast details if there are actually peers to send to
                 if (peersToSend.Count > 0)
-                    UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Broadcasting to {peersToSend.Count} peers");
+                    LogVerbose($"[SBGL-CompPluginCheck] Broadcasting to {peersToSend.Count} peers");
 
                 // Both formats go out during the rollout: clients on the old build only
                 // understand SBGL_REPORT and would otherwise time this player out as
@@ -2139,7 +2156,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                 if (SteamNetworking.ReadP2PPacket(buffer, ref bytesRead, ref remoteId, SBGL_NET_CHANNEL))
                 {
                     string msg = Encoding.UTF8.GetString(buffer);
-                    UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Received from peer {remoteId.Value}: {msg}");
+                    LogVerbose($"[SBGL-CompPluginCheck] Received from peer {remoteId.Value}: {msg}");
                     
                     // Add this peer to our known peers so we broadcast back to them
                     _knownPeers.Add(remoteId.Value);
@@ -2151,7 +2168,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                         if (!_lastReportReplyTime.TryGetValue(remoteId.Value, out float lastReply) || now - lastReply >= REPORT_REPLY_COOLDOWN)
                         {
                             _lastReportReplyTime[remoteId.Value] = now;
-                            UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Peer {remoteId.Value} asked for our report - resending");
+                            LogVerbose($"[SBGL-CompPluginCheck] Peer {remoteId.Value} asked for our report - resending");
                             BroadcastMyMods(remoteId.Value);
                         }
                     }
@@ -2177,7 +2194,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                     }
                     else if (msg.StartsWith(REPORT_V2_PREFIX))
                     {
-                        TrySendCurrentMatchIdToPeer(remoteId.Value, "mod report received");
+                        TrySendCurrentMatchIdToPeer(remoteId.Value, "mod report received", peerConfirmed: true);
 
                         if (!_playerComplianceStatus.ContainsKey(remoteId.Value))
                             _playerComplianceStatus[remoteId.Value] = new PlayerComplianceStatus { FirstSeenTime = Time.time };
@@ -2203,7 +2220,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
                         // A mod report from a peer guarantees the P2P path is live, so reply with the
                         // current active match ID when we're already in a round. This lets late joiners or
                         // reconnecting players adopt the existing match instead of creating a new one.
-                        TrySendCurrentMatchIdToPeer(remoteId.Value, "mod report received");
+                        TrySendCurrentMatchIdToPeer(remoteId.Value, "mod report received", peerConfirmed: true);
                         
                         // Create/update compliance status for this player
                         if (!_playerComplianceStatus.ContainsKey(remoteId.Value))
@@ -2260,7 +2277,7 @@ namespace SBGL.UnifiedMod.Features.CompetitivePluginCheck
             try
             {
                 SBGLeagueAutomation.MatchResultSubmissionService.HandleIncomingMatchIdBroadcast(matchId);
-                UnityEngine.Debug.Log($"[SBGL-CompPluginCheck] Forwarded P2P Match ID (delayed {delaySeconds:0.#}s) from {senderId}: {matchId}");
+                LogVerbose($"[SBGL-CompPluginCheck] Forwarded P2P Match ID (delayed {delaySeconds:0.#}s) from {senderId}: {matchId}");
             }
             catch (System.Exception ex)
             {

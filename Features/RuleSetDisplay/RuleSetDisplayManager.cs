@@ -33,6 +33,32 @@ namespace SBGL.UnifiedMod.Features {
         private int _tooltipSeason = -1; // season the tooltips were built for
         private string _lastSceneName = string.Empty;
         private bool _defaultAppliedForScene = false;
+        private float _uiScale = 1f; // GUI.matrix scale; layout below is in 1080p units
+
+        // PlayerPrefs goes through the registry on Windows, so the panel reads it on a timer
+        // (and right after its own writes) instead of several times per frame.
+        private const float PREFS_REFRESH_INTERVAL = 0.5f;
+        private float _nextPrefsRefresh = 0f;
+        private string _prefRuleset = "";     // raw HostRuleset, "" when unset
+        private string _prefMatchType = "";
+        private string _prefCourse = "";
+        private int _prefSeason = 0;
+
+        private static readonly GUIContent RankedContent    = new GUIContent("<b>RANKED</b>");
+        private static readonly GUIContent TwoVsTwoContent  = new GUIContent("<b>2V2</b>");
+        private static readonly GUIContent ProContent       = new GUIContent("<b>PRO SERIES</b>");
+        private static readonly GUIContent CasualContent    = new GUIContent("<b>CASUAL</b>");
+        private static readonly GUIContent NoRulesetContent = new GUIContent("<b>NO RULESET</b>");
+
+        private void RefreshPrefsCache(bool force = false)
+        {
+            if (!force && Time.unscaledTime < _nextPrefsRefresh) return;
+            _nextPrefsRefresh = Time.unscaledTime + PREFS_REFRESH_INTERVAL;
+            _prefRuleset   = PlayerPrefs.GetString("HostRuleset", "");
+            _prefMatchType = PlayerPrefs.GetString("MatchType", "");
+            _prefCourse    = PlayerPrefs.GetString("SelectedCourse", "");
+            _prefSeason    = PlayerPrefs.GetInt("Season", 0);
+        }
 
         public void SetConfig(
             ConfigEntry<float> posX,
@@ -86,10 +112,19 @@ namespace SBGL.UnifiedMod.Features {
                 // Only show to the server host
                 if (!Mirror.NetworkServer.active) return;
 
+                // Step aside while the scoreboard is held open; at 1080p the two overlap
+                if (Scoreboard.IsVisible) return;
+
                 // Default to ranked once per driving-range scene unless explicitly changed by button click.
                 EnsureDefaultRankedForScene();
 
-                RenderPanel();
+                // The panel is laid out for 1080p. Scale it up on taller screens so it isn't tiny
+                // at 1440p and above; smaller screens keep the original size.
+                _uiScale = Mathf.Max(1f, Screen.height / 1080f);
+                var savedMatrix = GUI.matrix;
+                GUI.matrix = Matrix4x4.Scale(new Vector3(_uiScale, _uiScale, 1f));
+                try { RenderPanel(); }
+                finally { GUI.matrix = savedMatrix; }
             } catch (System.Exception ex) {
                 Debug.LogError($"[RuleSetDisplayManager] OnGUI error: {ex.Message}\n{ex.StackTrace}");
             }
@@ -123,6 +158,7 @@ namespace SBGL.UnifiedMod.Features {
             }
 
             PlayerPrefs.Save();
+            RefreshPrefsCache(true);
             Debug.Log("[RuleSetDisplayManager] Defaulted ruleset to ranked for this driving-range session");
         }
 
@@ -136,6 +172,8 @@ namespace SBGL.UnifiedMod.Features {
         }
 
         private void RenderPanel() {
+            RefreshPrefsCache();
+
             if (_labelStyle == null) {
                 _labelStyle = new GUIStyle(GUI.skin?.label ?? new GUIStyle()) {
                     alignment = TextAnchor.MiddleLeft,
@@ -180,13 +218,13 @@ namespace SBGL.UnifiedMod.Features {
             bool showDetails = _showDetails?.Value ?? false;
             bool rulesTurnedOffInSettings = !(_applyRulesets?.Value ?? true);
             bool rulesEnabled = !rulesTurnedOffInSettings && !Patches.RulePatches.SuspendedForLobby;
-            string activeRuleset = rulesEnabled ? PlayerPrefs.GetString("HostRuleset", "ranked") : "none";
+            string activeRuleset = rulesEnabled ? (string.IsNullOrEmpty(_prefRuleset) ? "ranked" : _prefRuleset) : "none";
 
             // A 2v2 from the queue arrives as a team match type with the ruleset left on ranked,
             // so highlight by what is actually being applied rather than by the button last clicked.
             bool is2v2Active = rulesEnabled
                 && (activeRuleset == Patches.RulePatches.HOST_RULESET_2V2
-                    || Core.Season2RuleSet.GetTeamSize(PlayerPrefs.GetString("MatchType", "")) == 2);
+                    || Core.Season2RuleSet.GetTeamSize(_prefMatchType) == 2);
 
             float panelWidth = 450f;
             float buttonHeight = 40f;
@@ -194,8 +232,10 @@ namespace SBGL.UnifiedMod.Features {
             float panelHeight = 30f + buttonHeight + detailsHeight + 10f;
 
             float cfgX = _posX?.Value ?? -1f;
-            float panelX = (cfgX < 0f) ? (Screen.width - panelWidth - 20f) : cfgX;
-            float panelY = _posY?.Value ?? 20f;
+            // Configured positions are screen pixels; convert into the scaled layout space
+            float screenW = Screen.width / _uiScale;
+            float panelX = (cfgX < 0f) ? (screenW - panelWidth - 20f) : cfgX / _uiScale;
+            float panelY = (_posY?.Value ?? 20f) / _uiScale;
 
             GUI.DrawTexture(new Rect(panelX, panelY, panelWidth, panelHeight), _bgTexture);
             // Say so when the saved setting is why nothing is being applied, rather than leaving
@@ -269,20 +309,15 @@ namespace SBGL.UnifiedMod.Features {
                     + $"\n<color=#AAFFAA>No Season {seasonRules.Season} rules enforced.</color>";
             }
 
-            var rankedContent    = new GUIContent("<b>RANKED</b>");
-            var proContent       = new GUIContent("<b>PRO SERIES</b>");
-            var casualContent    = new GUIContent("<b>CASUAL</b>");
-            var noRulesetContent = new GUIContent("<b>NO RULESET</b>");
-
             GUI.backgroundColor = activeRuleset == "ranked" && !is2v2Active ? Color.green : Color.grey;
-            if (GUI.Button(rankedRect, rankedContent)) {
+            if (GUI.Button(rankedRect, RankedContent)) {
                 Patches.RulePatches.SuspendedForLobby = false;
                 ApplyRuleset("ranked");
             }
 
             if (show2v2) {
                 GUI.backgroundColor = is2v2Active ? new Color(0.3f, 0.9f, 0.4f) : Color.grey;
-                if (GUI.Button(twoVsTwoRect, new GUIContent("<b>2V2</b>"))) {
+                if (GUI.Button(twoVsTwoRect, TwoVsTwoContent)) {
                     Patches.RulePatches.SuspendedForLobby = false;
                     ApplyRuleset(Patches.RulePatches.HOST_RULESET_2V2);
                 }
@@ -290,20 +325,20 @@ namespace SBGL.UnifiedMod.Features {
 
             if (showPro) {
                 GUI.backgroundColor = activeRuleset == "pro_series" ? Color.magenta : Color.grey;
-                if (GUI.Button(proRect, proContent)) {
+                if (GUI.Button(proRect, ProContent)) {
                     Patches.RulePatches.SuspendedForLobby = false;
                     ApplyRuleset("pro_series");
                 }
             }
 
             GUI.backgroundColor = activeRuleset == "casual" ? new Color(0.2f, 0.75f, 1f) : Color.grey;
-            if (GUI.Button(casualRect, casualContent)) {
+            if (GUI.Button(casualRect, CasualContent)) {
                 Patches.RulePatches.SuspendedForLobby = false;
                 ApplyRuleset("casual");
             }
 
             GUI.backgroundColor = activeRuleset == "none" ? Color.yellow : Color.grey;
-            if (GUI.Button(noRulesetRect, noRulesetContent, _smallBtnStyle)) {
+            if (GUI.Button(noRulesetRect, NoRulesetContent, _smallBtnStyle)) {
                 Patches.RulePatches.SuspendedForLobby = true;
                 ResetToClassicPreset();
                 Debug.Log("[RuleSetDisplayManager] Ruleset enforcement disabled via No Ruleset button");
@@ -328,17 +363,17 @@ namespace SBGL.UnifiedMod.Features {
                     float ttH = _tooltipStyle.CalcHeight(tipContent, ttW);
                     float ttX = mouse.x + 14f;
                     float ttY = mouse.y + 14f;
-                    if (ttX + ttW > Screen.width)  ttX = mouse.x - ttW - 6f;
-                    if (ttY + ttH > Screen.height) ttY = mouse.y - ttH - 6f;
+                    if (ttX + ttW > Screen.width / _uiScale)  ttX = mouse.x - ttW - 6f;
+                    if (ttY + ttH > Screen.height / _uiScale) ttY = mouse.y - ttH - 6f;
                     GUI.Box(new Rect(ttX, ttY, ttW, ttH), tipContent, _tooltipStyle);
                 }
             }
 
             if (showDetails) {
-                string matchType   = PlayerPrefs.GetString("MatchType",      "—");
-                string course      = PlayerPrefs.GetString("SelectedCourse", "—");
-                int    season      = PlayerPrefs.GetInt("Season", 0);
-                string ruleset     = PlayerPrefs.GetString("HostRuleset",    "—");
+                string matchType   = string.IsNullOrEmpty(_prefMatchType) ? "—" : _prefMatchType;
+                string course      = string.IsNullOrEmpty(_prefCourse)    ? "—" : _prefCourse;
+                int    season      = _prefSeason;
+                string ruleset     = string.IsNullOrEmpty(_prefRuleset)   ? "—" : _prefRuleset;
 
                 float lx = panelX + 10f;
                 float ly = btnY + buttonHeight + 8f;
@@ -392,6 +427,8 @@ namespace SBGL.UnifiedMod.Features {
                 Debug.Log($"[RuleSetDisplayManager] ✓ Ruleset {rulesetName} applied. Season={season}. Course preserved (manual selection mode). Stored in PlayerPrefs");
             }
             
+            RefreshPrefsCache(true);
+
             // IMPORTANT: Immediately apply rules to any existing MatchSetupRules instance on this scene
             // This ensures rules take effect NOW on the driving range, not later when the match loads
             ApplyRulesToExistingMatchSetupRules();
@@ -418,6 +455,7 @@ namespace SBGL.UnifiedMod.Features {
                 Debug.Log("[RuleSetDisplayManager] ✓ Match setup menu is open - applying rules NOW");
                 Patches.RulePatches.ApplyRulesToMatchSetup(matchSetup);
                 Patches.RulePatches.ApplyCourseSelection(matchSetupMenu);
+                Patches.RulePatches.ApplyGameMode(matchSetupMenu);
             }
             catch (System.Exception ex)
             {
