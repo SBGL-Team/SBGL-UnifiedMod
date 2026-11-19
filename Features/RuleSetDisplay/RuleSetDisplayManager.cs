@@ -455,7 +455,8 @@ namespace SBGL.UnifiedMod.Features {
                 Debug.Log("[RuleSetDisplayManager] ✓ Match setup menu is open - applying rules NOW");
                 Patches.RulePatches.ApplyRulesToMatchSetup(matchSetup);
                 Patches.RulePatches.ApplyCourseSelection(matchSetupMenu);
-                Patches.RulePatches.ApplyGameMode(matchSetupMenu);
+                // Reached from a ruleset button click, so RANKED switches back to Free For All
+                Patches.RulePatches.ApplyGameMode(matchSetupMenu, enforceRankedSingles: true);
             }
             catch (System.Exception ex)
             {

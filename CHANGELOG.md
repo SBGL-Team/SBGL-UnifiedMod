@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.1.40
+* Clicking RANKED on the Driving Range now switches the lobby back to Free For All, the same way 2V2 switches it to Teams. Ranked singles matches from the queue also open in Free For All. A lobby that just starts on the default ranked ruleset keeps the game mode the host picked.
+
 ## 0.1.39
 * Fixed players being able to keep playing during overtime in team matches. The SBGL scoreboard overlay could leave the game's scoreboard listening to team events after a hole ended, which made that player's game drop the updates saying the hole had gone to overtime or finished.
 * The SBGL scoreboard now shows team games: the red and blue rosters side by side, with each team's holes won and this hole's points across the top. The Driving Range keeps the final team score after the match.

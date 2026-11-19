@@ -102,7 +102,8 @@ namespace SBGL.UnifiedMod.Patches
 
                 ApplyRulesToMatchSetup(matchSetup);
                 ApplyCourseSelection(__instance);
-                ApplyGameMode(__instance);
+                // Queue matches are held to their format; a host's own lobby keeps its mode
+                ApplyGameMode(__instance, enforceRankedSingles: fromMatchmaking);
 
                 Log($"============================");
             }
@@ -242,37 +243,46 @@ namespace SBGL.UnifiedMod.Patches
         }
 
         /// <summary>
-        /// Switches the lobby to Teams for the 2V2 button and for any team match type from the
-        /// queue, the same way the host's Game Mode dropdown does. Every other ruleset leaves
-        /// the host's own choice alone, so RANKED does not undo it. Server only; the game
-        /// redistributes teams and updates the Steam lobby data from its SyncVar hook.
+        /// Puts the lobby in the game mode the ruleset calls for, the same way the host's Game
+        /// Mode dropdown does. The 2V2 button and any team match type from the queue switch to
+        /// Teams. Ranked singles switches to Free For All, but only when the host clicks RANKED
+        /// or the match came from the queue: a lobby that merely opens on the default ranked
+        /// ruleset keeps the host's own mode. Casual and Pro Series never change it. Server
+        /// only; the game redistributes teams and updates the Steam lobby data from its hook.
         /// </summary>
-        public static void ApplyGameMode(MatchSetupMenu menu)
+        public static void ApplyGameMode(MatchSetupMenu menu, bool enforceRankedSingles)
         {
             if (menu == null || !menu.isServer) return;
 
             string hostRuleset = PlayerPrefs.GetString("HostRuleset", "ranked");
             string matchType = PlayerPrefs.GetString("MatchType", "");
             bool isTeamMatch = hostRuleset == HOST_RULESET_2V2 || Season2RuleSet.GetTeamSize(matchType) >= 2;
-            if (!isTeamMatch) return;
 
-            if (menu.gameMode == GameMode.Teams)
+            GameMode wanted;
+            if (isTeamMatch)
+                wanted = GameMode.Teams;
+            else if (hostRuleset == "ranked" && enforceRankedSingles)
+                wanted = GameMode.FreeForAll;
+            else
+                return;
+
+            if (menu.gameMode == wanted)
             {
-                Log("  Game mode already Teams");
+                Log($"  Game mode already {wanted}");
                 return;
             }
 
             try
             {
-                menu.NetworkgameMode = GameMode.Teams;
+                menu.NetworkgameMode = wanted;
                 // The server-side hook updates the lobby but not the host's own dropdown
                 if (menu.gameModeDropdown != null)
-                    menu.gameModeDropdown.SetValue((int)GameMode.Teams);
-                Log($"  ✓ Game mode set to Teams (ruleset '{hostRuleset}', match type '{matchType}')");
+                    menu.gameModeDropdown.SetValue((int)wanted);
+                Log($"  ✓ Game mode set to {wanted} (ruleset '{hostRuleset}', match type '{matchType}')");
             }
             catch (System.Exception ex)
             {
-                LogError($"  ✗ Failed to set game mode to Teams: {ex.Message}");
+                LogError($"  ✗ Failed to set game mode to {wanted}: {ex.Message}");
             }
         }
     }
