@@ -1102,9 +1102,11 @@ namespace SBGLLiveLeaderboard
         {
             try
             {
-                var state = CourseManager.GetLocalPlayerState();
-                if (string.IsNullOrEmpty(state.name)) return "";
-                return CleanTMP(GameManager.RichTextNoParse(state.name));
+                // Through GameApiCompat: the game renamed PlayerState.name, and a direct read of
+                // a missing field fails when this method is compiled, before any try can catch it.
+                string name = SBGL.UnifiedMod.Core.GameApiCompat.GetPlayerStateName(CourseManager.GetLocalPlayerState());
+                if (string.IsNullOrEmpty(name)) return "";
+                return CleanTMP(GameManager.RichTextNoParse(name));
             }
             catch { return ""; }
         }

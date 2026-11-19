@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.1.41
+* Fixed the SBGL scoreboard staying empty and match results not uploading after the latest Super Battle Golf update. The update renamed the player name the scoreboard used to find your own row, which stopped it reading the scoreboard at all.
+
 ## 0.1.40
 * Clicking RANKED on the Driving Range now switches the lobby back to Free For All, the same way 2V2 switches it to Teams. Ranked singles matches from the queue also open in Free For All. A lobby that just starts on the default ranked ruleset keeps the game mode the host picked.
 
